@@ -18,7 +18,8 @@ ffmpeg-next.workspace = true
 screencapturekit = { version = "11.0.0", features = ["macos_15_0"] }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDictionary", "NSValue"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSGraphics"] }
 objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

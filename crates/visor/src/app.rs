@@ -58,10 +58,17 @@ pub struct App {
     prefs: RefCell<Option<Preferences>>,
     area_window: RefCell<Option<AreaSelector>>,
     /// Border around the display chosen in the panel, with several displays.
-    screen_highlight: RefCell<Option<ScreenHighlight>>,
+    screen_highlight: RefCell<Option<Highlight>>,
     next_start_id: std::cell::Cell<u64>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
+}
+
+struct Highlight {
+    display: u32,
+    ui: ScreenHighlight,
+    /// Keeps it over the whole display (see `update_screen_highlight`).
+    _keep_placed: Timer,
 }
 
 struct Panel {
@@ -304,42 +311,49 @@ impl App {
                     .and_then(|i| p.sources.displays.get(i).cloned())
             })
         };
-        let Some(display) = target else {
-            if let Some(h) = self.screen_highlight.borrow_mut().take() {
-                let _ = h.hide();
-            }
+        let current = self.screen_highlight.borrow().as_ref().map(|h| h.display);
+        if target.as_ref().map(|d| d.id) == current {
             return;
-        };
-        let existing = self
-            .screen_highlight
-            .borrow()
-            .as_ref()
-            .map(|h| h.clone_strong());
-        let created = existing.is_none();
-        let Some(ui) = existing.or_else(|| ScreenHighlight::new().ok()) else {
-            return;
-        };
-        ui.set_display_name(display.name.clone().into());
-        ui.set_display_width(display.frame.width as f32);
-        ui.set_display_height(display.frame.height as f32);
-        if created {
-            let _ = ui.show();
-            platform::configure_overlay(&ui, Overlay::Shield);
-            // Keep keyboard focus in the panel.
-            if let Some(p) = &*self.panel.borrow() {
-                platform::focus(p.ui.window());
-            }
         }
-        platform::set_frame(ui.window(), display.frame);
-        platform::set_click_through(ui.window());
-        if created {
-            *self.screen_highlight.borrow_mut() = Some(ui);
-            // The native window appears only once the event loop runs, so
-            // place it again then.
-            slint::Timer::single_shot(platform::OVERLAY_SETTLE * 2, || {
-                app().update_screen_highlight()
+        // One window per display: moving a window between displays with
+        // different scale factors leaves it mis-sized and unpainted.
+        if let Some(old) = self.screen_highlight.borrow_mut().take() {
+            let _ = old.ui.hide();
+        }
+        let Some(d) = target else { return };
+        let Ok(ui) = ScreenHighlight::new() else {
+            return;
+        };
+        ui.set_display_name(d.name.clone().into());
+        ui.set_display_width(d.frame.width as f32);
+        ui.set_display_height(d.frame.height as f32);
+        // Created on its display, so it has that display's scale.
+        ui.window()
+            .set_position(LogicalPosition::new(d.frame.x as f32, d.frame.y as f32));
+        let _ = ui.show();
+        platform::configure_overlay(&ui, Overlay::Shield);
+        // Keep keyboard focus in the panel.
+        if let Some(p) = &*self.panel.borrow() {
+            platform::focus(p.ui.window());
+        }
+        // The native window only appears once the event loop runs, and
+        // AppKit and Slint then nudge it below the menu bar. Keep putting it
+        // over the whole display (a no-op once it is there) while shown.
+        let timer = Timer::default();
+        {
+            let (weak, frame) = (ui.as_weak(), d.frame);
+            timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
+                if let Some(ui) = weak.upgrade() {
+                    platform::set_frame(ui.window(), frame);
+                    platform::set_click_through(ui.window());
+                }
             });
         }
+        *self.screen_highlight.borrow_mut() = Some(Highlight {
+            display: d.id,
+            ui,
+            _keep_placed: timer,
+        });
     }
 
     fn wire_panel(&self, ui: &RecorderPanel) {

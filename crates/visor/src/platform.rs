@@ -188,7 +188,7 @@ mod macos {
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardWriting, NSScreen,
-        NSView, NSWindow, NSWindowCollectionBehavior,
+        NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
     };
     use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
     use slint::winit_030::winit;
@@ -226,7 +226,9 @@ mod macos {
             NSPoint::new(frame.x, primary_height - frame.y - frame.height),
             NSSize::new(frame.width, frame.height),
         );
-        window.setFrame_display(rect, true);
+        if window.frame() != rect {
+            window.setFrame_display(rect, true);
+        }
     }
 
     pub fn raise(w: &winit::window::Window, kind: Overlay) {
@@ -242,6 +244,8 @@ mod macos {
                 | NSWindowCollectionBehavior::Stationary,
         );
         window.setHasShadow(false);
+        // Overlays appear and go instantly, without AppKit's zoom.
+        window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     }
 
     fn app() -> Option<Retained<NSApplication>> {

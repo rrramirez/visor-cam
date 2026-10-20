@@ -30,6 +30,7 @@ impl Backend for MacBackend {
     fn shareable(&self) -> anyhow::Result<Shareable> {
         let content = SCShareableContent::get().map_err(sc_err)?;
         let own_pid = std::process::id() as i32;
+        let names = display_names();
         let displays = content
             .displays()
             .iter()
@@ -43,11 +44,10 @@ impl Backend for MacBackend {
                     .map_or(2.0, |filter| f64::from(filter.point_pixel_scale()));
                 DisplayInfo {
                     id: d.display_id(),
-                    name: if i == 0 {
-                        "Main display".into()
-                    } else {
-                        format!("Display {}", i + 1)
-                    },
+                    name: names
+                        .get(&d.display_id())
+                        .cloned()
+                        .unwrap_or_else(|| format!("Display {}", i + 1)),
                     frame: Rect {
                         x: f.origin.x,
                         y: f.origin.y,
@@ -293,6 +293,42 @@ impl Backend for MacBackend {
             },
         ))
     }
+}
+
+/// The names macOS shows for displays ("Built-in Retina Display", the
+/// monitor's model), by display id. Empty off the main thread, where AppKit
+/// can't be asked. Identical monitors get a number to tell them apart.
+fn display_names() -> std::collections::HashMap<u32, String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+    use objc2_foundation::{NSNumber, NSString};
+
+    let mut names = std::collections::HashMap::new();
+    let Some(mtm) = MainThreadMarker::new() else {
+        return names;
+    };
+    let key = NSString::from_str("NSScreenNumber");
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for screen in NSScreen::screens(mtm).iter() {
+        let Some(id) = screen
+            .deviceDescription()
+            .objectForKey(&key)
+            .and_then(|n| n.downcast::<NSNumber>().ok())
+            .map(|n| n.unsignedIntValue())
+        else {
+            continue;
+        };
+        let name = screen.localizedName().to_string();
+        let count = seen.entry(name.clone()).or_insert(0);
+        *count += 1;
+        let name = if *count > 1 {
+            format!("{name} ({count})")
+        } else {
+            name
+        };
+        names.insert(id, name);
+    }
+    names
 }
 
 /// Polls until Visor's process shows up in the shareable content, then makes
