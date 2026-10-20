@@ -10,5 +10,7 @@ rust-version.workspace = true
 visor-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+crossbeam-channel.workspace = true
+cpal = "0.18"
 # Links the system FFmpeg via pkg-config.
 ffmpeg-next.workspace = true
