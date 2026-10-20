@@ -24,7 +24,7 @@ pub enum CaptureTarget {
     App {
         pid: i32,
     },
-    /// A region of a display, in that display's logical coordinates.
+    /// A region of a display, in global logical coordinates (top-left origin).
     Area {
         display_id: u32,
         rect: Rect,

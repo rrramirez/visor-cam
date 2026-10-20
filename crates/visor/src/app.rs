@@ -18,7 +18,8 @@ use slint::{
 use visor_capture::camera::{self, CameraDevice, CameraStream};
 use visor_capture::mic::{self, MicDevice, MicStream};
 use visor_capture::{Backend, DisplayInfo, Shareable};
-use visor_core::{AudioConfig, CaptureTarget, RecordingConfig, Rect};
+use visor_core::project::BubbleShape;
+use visor_core::{AudioConfig, CameraOverlay, CaptureTarget, RecordingConfig, Rect};
 use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
 
 use crate::editor::EditorWindow;
@@ -95,10 +96,14 @@ enum Session {
         remaining: u32,
         recorder: Option<Recorder>,
         display: DisplayInfo,
+        /// What is being captured, in global logical coordinates, when that
+        /// is a fixed region (a display or an area).
+        captured: Option<Rect>,
     },
     Recording {
         recorder: Recorder,
         bar: ControlBar,
+        captured: Option<Rect>,
         _timer: Timer,
     },
     Stopping,
@@ -573,6 +578,37 @@ impl App {
         });
     }
 
+    /// The camera bubble's on-screen placement relative to `captured`, as the
+    /// project's overlay. `None` without a bubble or when it lies outside.
+    fn bubble_overlay(&self, captured: Rect) -> Option<CameraOverlay> {
+        let devices = self.devices.borrow();
+        let bubble = devices.bubble.as_ref()?;
+        let window = bubble.ui.window();
+        let scale = window.scale_factor();
+        let pos = window.position().to_logical(scale);
+        let size = window.size().to_logical(scale);
+        let (x, y, w) = (f64::from(pos.x), f64::from(pos.y), f64::from(size.width));
+        let overlaps = x < captured.x + captured.width
+            && x + w > captured.x
+            && y < captured.y + captured.height
+            && y + w > captured.y;
+        if !overlaps || captured.width <= 0.0 || captured.height <= 0.0 {
+            return None;
+        }
+        Some(CameraOverlay {
+            visible: true,
+            shape: if bubble.ui.get_shape() == 0 {
+                BubbleShape::Circle
+            } else {
+                BubbleShape::RoundedRect
+            },
+            x: ((x - captured.x) / captured.width).clamp(0.0, 1.0),
+            y: ((y - captured.y) / captured.height).clamp(0.0, 1.0),
+            // The editor's size slider range.
+            size: (w / captured.width).clamp(0.08, 0.45),
+        })
+    }
+
     fn release_devices(&self) {
         self.close_bubble();
         *self.devices.borrow_mut() = Devices::default();
@@ -742,6 +778,11 @@ impl App {
             s.system_audio = config.audio.system;
             s.save();
         }
+        let captured = match &config.target {
+            CaptureTarget::Display { .. } => Some(display.frame),
+            CaptureTarget::Area { rect, .. } => Some(*rect),
+            CaptureTarget::Window { .. } | CaptureTarget::App { .. } => None,
+        };
         let save_dir = self.settings.borrow().save_dir.clone();
         let dir = new_project_dir(&save_dir, "Recording");
         let title = dir
@@ -790,6 +831,7 @@ impl App {
             countdown,
             recorder: None,
             display,
+            captured,
         };
         self.refresh_tray();
     }
@@ -970,6 +1012,7 @@ impl App {
         let Session::Starting {
             recorder: Some(recorder),
             display,
+            captured,
             ..
         } = session
         else {
@@ -1011,6 +1054,7 @@ impl App {
         *self.session.borrow_mut() = Session::Recording {
             recorder,
             bar,
+            captured,
             _timer: timer,
         };
         if let Some(p) = &*self.panel.borrow() {
@@ -1046,10 +1090,15 @@ impl App {
 
     pub fn stop_recording(&self, discard: bool) {
         let session = std::mem::replace(&mut *self.session.borrow_mut(), Session::Stopping);
-        let recorder = match session {
-            Session::Recording { recorder, bar, .. } => {
+        let (recorder, overlay) = match session {
+            Session::Recording {
+                recorder,
+                bar,
+                captured,
+                ..
+            } => {
                 let _ = bar.hide();
-                recorder
+                (recorder, captured.and_then(|c| self.bubble_overlay(c)))
             }
             Session::Starting {
                 recorder,
@@ -1080,7 +1129,16 @@ impl App {
                 let result = recorder.discard();
                 post(move |app| app.on_discarded(result));
             } else {
-                let result = recorder.stop().map(|(dir, _)| dir);
+                let result = recorder.stop().map(|(dir, mut project)| {
+                    // Start the editor with the bubble where it was on screen.
+                    if let Some(overlay) = overlay {
+                        project.camera_overlay = overlay;
+                        if let Err(e) = project.save(&dir) {
+                            tracing::warn!("could not save the bubble position: {e}");
+                        }
+                    }
+                    dir
+                });
                 post(move |app| app.on_stopped(result));
             }
         });

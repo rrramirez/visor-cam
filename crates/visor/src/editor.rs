@@ -36,6 +36,8 @@ pub struct EditorWindow {
 
 struct ExportJob {
     out: PathBuf,
+    /// Format name for the summary, e.g. "MP4".
+    kind: &'static str,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
     result: Arc<Mutex<Option<anyhow::Result<()>>>>,
@@ -61,6 +63,8 @@ impl EditorWindow {
         ui.set_bubble_y(o.y as f32);
         ui.set_bubble_size(o.size as f32);
         ui.set_export_format(default_format.clamp(0, 3));
+        ui.set_file_manager(platform::FILE_MANAGER.into());
+        ui.set_can_copy(platform::CAN_COPY_FILE);
 
         let this = Rc::new_cyclic(|weak: &Weak<EditorWindow>| {
             let timer = Timer::default();
@@ -193,20 +197,39 @@ impl EditorWindow {
         on!(on_reveal_project, |e| platform::reveal(
             &e.dir.join(visor_core::project::PROJECT_FILE)
         ));
+        on!(on_open_export, |e| {
+            if let Some(path) = &*e.last_export.borrow() {
+                platform::open_file(path);
+            }
+        });
+        on!(on_copy_export, |e| {
+            if let Some(path) = &*e.last_export.borrow() {
+                e.ui.set_copied(platform::copy_file(path));
+            }
+        });
+        on!(on_done, |e| {
+            e.closing();
+            let _ = e.ui.hide();
+        });
 
         let w = weak.clone();
         ui.window().on_close_requested(move || {
             if let Some(e) = w.upgrade() {
-                if let Some(job) = &*e.export.borrow() {
-                    job.cancel.store(true, Ordering::Relaxed);
-                }
-                e.player.borrow_mut().pause();
-                let dir = e.dir.clone();
-                // Drop the window (and its player threads) after this callback.
-                slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir));
+                e.closing();
             }
             slint::CloseRequestResponse::HideWindow
         });
+    }
+
+    /// Stops work for a window that is being hidden, then lets the app drop it.
+    fn closing(&self) {
+        if let Some(job) = &*self.export.borrow() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.player.borrow_mut().pause();
+        let dir = self.dir.clone();
+        // Drop the window (and its player threads) after this callback.
+        slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir));
     }
 
     fn duration(&self) -> Micros {
@@ -409,11 +432,11 @@ impl EditorWindow {
             return;
         }
         self.player.borrow_mut().pause();
-        let format = match self.ui.get_export_format() {
-            1 => ExportFormat::WebM { av1: false },
-            2 => ExportFormat::WebM { av1: true },
-            3 => ExportFormat::Gif,
-            _ => ExportFormat::Mp4,
+        let (format, kind) = match self.ui.get_export_format() {
+            1 => (ExportFormat::WebM { av1: false }, "WebM"),
+            2 => (ExportFormat::WebM { av1: true }, "WebM (AV1)"),
+            3 => (ExportFormat::Gif, "GIF"),
+            _ => (ExportFormat::Mp4, "MP4"),
         };
         let mut options = ExportOptions::new(format);
         options.max_height = match self.ui.get_export_resolution() {
@@ -436,6 +459,7 @@ impl EditorWindow {
         }
         let job = ExportJob {
             out: out.clone(),
+            kind,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(AtomicU32::new(0)),
             result: Arc::new(Mutex::new(None)),
@@ -456,6 +480,8 @@ impl EditorWindow {
         });
         self.ui.set_exporting(true);
         self.ui.set_export_done(false);
+        self.ui.set_export_card(false);
+        self.ui.set_copied(false);
         self.ui.set_export_progress(0.0);
         self.ui.set_export_status("Exporting… 0%".into());
         *self.export.borrow_mut() = Some(job);
@@ -482,8 +508,17 @@ impl EditorWindow {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
+                let mut detail = vec![job.kind.to_string()];
+                if let Ok(meta) = std::fs::metadata(&job.out) {
+                    detail.push(util::file_size(meta.len()));
+                }
+                detail.push(util::clock(self.project.borrow().edit.duration()));
                 self.ui.set_export_done(true);
                 self.ui.set_export_status(format!("Saved {name}").into());
+                self.ui.set_export_name(name.into());
+                self.ui.set_export_detail(detail.join(" · ").into());
+                self.ui.set_copied(false);
+                self.ui.set_export_card(true);
                 *self.last_export.borrow_mut() = Some(job.out);
             }
             Err(e) if job.cancel.load(Ordering::Relaxed) => {

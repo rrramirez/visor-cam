@@ -96,6 +96,13 @@ export component Editor inherits Window {
     in property <float> export-progress;
     in property <string> export-status;
     in property <bool> export-done;
+    // Shown when an export finishes: what was made and what to do with it.
+    in-out property <bool> export-card;
+    in property <string> export-name;
+    in property <string> export-detail;
+    in property <string> file-manager: "Finder";
+    in property <bool> can-copy;
+    in property <bool> copied;
 
     callback toggle-play();
     callback seek(float);
@@ -114,6 +121,9 @@ export component Editor inherits Window {
     callback cancel-export();
     callback reveal-export();
     callback reveal-project();
+    callback open-export();
+    callback copy-export();
+    callback done();
 
     forward-focus: keys;
     keys := FocusScope {
@@ -125,6 +135,11 @@ export component Editor inherits Window {
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
             if (event.text == Key.LeftArrow) { root.step(event.modifiers.shift ? -10 : -1); return accept; }
             if (event.text == Key.RightArrow) { root.step(event.modifiers.shift ? 10 : 1); return accept; }
+            if (event.text == Key.Escape && root.export-card) {
+                root.export-card = false;
+                return accept;
+            }
+            if (root.export-card) { return reject; }
             if (event.text == Key.Escape) {
                 root.sel-start = -1;
                 root.sel-end = -1;
@@ -535,6 +550,112 @@ export component Editor inherits Window {
                         height: 10px;
                         border-radius: 5px;
                         background: white;
+                    }
+                }
+            }
+        }
+    }
+
+    // Export finished: the next steps, over the editor.
+    if root.export-card: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000a8;
+        // Swallow clicks so the editor underneath stays put.
+        TouchArea { }
+
+        Card {
+            width: 440px;
+            height: card-layout.preferred-height;
+            background: Theme.surface;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+
+            card-layout := VerticalLayout {
+                padding: 28px;
+                padding-top: 30px;
+                spacing: 8px;
+                alignment: start;
+
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 52px;
+                        height: 52px;
+                        border-radius: 26px;
+                        background: Theme.success.with-alpha(0.15);
+                        Glyph { icon: Icons.check; color: Theme.success; width: 28px; height: 28px; }
+                    }
+                }
+                Text {
+                    text: "Your video is ready";
+                    horizontal-alignment: center;
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.export-name;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.export-detail;
+                    horizontal-alignment: center;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                }
+
+                Rectangle { height: 10px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    PillButton {
+                        primary: true;
+                        text: "Show in " + root.file-manager;
+                        icon: Icons.folder;
+                        clicked => { root.reveal-export(); }
+                    }
+                    PillButton {
+                        text: "Open";
+                        icon: Icons.open;
+                        clicked => { root.open-export(); }
+                    }
+                    if root.can-copy: PillButton {
+                        text: root.copied ? "Copied" : "Copy";
+                        icon: root.copied ? Icons.check : Icons.copy;
+                        clicked => { root.copy-export(); }
+                    }
+                }
+                if root.can-copy: Text {
+                    text: root.copied
+                        ? "Paste it into Messages, Mail, Slack or any app that takes files."
+                        : "Copy puts the file on the clipboard, ready to paste into a message.";
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                }
+
+                Rectangle { height: 14px; }
+                Rectangle { height: 1px; background: Theme.border; }
+                Rectangle { height: 6px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    PillButton {
+                        horizontal-stretch: 0;
+                        text: "Keep editing";
+                        clicked => { root.export-card = false; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    PillButton {
+                        horizontal-stretch: 0;
+                        text: "Done";
+                        icon: Icons.check;
+                        clicked => { root.done(); }
                     }
                 }
             }

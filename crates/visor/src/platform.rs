@@ -68,6 +68,47 @@ pub fn reveal(path: &Path) {
     }
 }
 
+/// Opens a file with its default app.
+pub fn open_file(path: &Path) {
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(path).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(path).spawn()
+    };
+    if let Err(e) = result {
+        tracing::warn!("could not open {}: {e}", path.display());
+    }
+}
+
+/// What the file manager is called, for "Show in …" buttons.
+pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
+    "Finder"
+} else if cfg!(target_os = "windows") {
+    "Explorer"
+} else {
+    "folder"
+};
+
+/// Whether [`copy_file`] is supported here.
+pub const CAN_COPY_FILE: bool = cfg!(target_os = "macos");
+
+/// Puts a file on the clipboard, so it can be pasted into another app (as
+/// if copied in the file manager). Returns false if that failed.
+pub fn copy_file(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::copy_file(path);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Opens a folder in the file manager.
 pub fn open_folder(path: &Path) {
     let _ = std::fs::create_dir_all(path);
@@ -85,11 +126,16 @@ pub fn open_folder(path: &Path) {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::path::Path;
+
     use objc2::MainThreadMarker;
     use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSView, NSWindowCollectionBehavior,
+        NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardWriting, NSView,
+        NSWindowCollectionBehavior,
     };
+    use objc2_foundation::{NSArray, NSString, NSURL};
     use slint::winit_030::winit;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -135,6 +181,18 @@ mod macos {
             };
             app.setActivationPolicy(policy);
         }
+    }
+
+    pub fn copy_file(path: &Path) -> bool {
+        let Some(path) = path.to_str() else {
+            return false;
+        };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let item: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+            ProtocolObject::from_retained(url);
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        pasteboard.writeObjects(&NSArray::from_retained_slice(&[item]))
     }
 
     pub fn activate() {

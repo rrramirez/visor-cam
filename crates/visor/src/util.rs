@@ -14,6 +14,18 @@ pub fn clock(us: Micros) -> String {
     }
 }
 
+/// Human file size: `840 KB`, `12.4 MB`, `1.2 GB` (decimal units, like Finder).
+pub fn file_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b < 1e6 {
+        format!("{:.0} KB", (b / 1e3).max(1.0))
+    } else if b < 1e9 {
+        format!("{:.1} MB", b / 1e6)
+    } else {
+        format!("{:.1} GB", b / 1e9)
+    }
+}
+
 /// `m:ss.d` for the editor.
 pub fn clock_tenths(us: Micros) -> String {
     format!("{}.{}", clock(us), us / 100_000 % 10)
@@ -82,6 +94,14 @@ pub fn wave_path(peaks: &[f32]) -> String {
 mod tests {
     use super::*;
     use visor_core::Plane;
+
+    #[test]
+    fn file_sizes() {
+        assert_eq!(file_size(0), "1 KB");
+        assert_eq!(file_size(840_000), "840 KB");
+        assert_eq!(file_size(12_400_000), "12.4 MB");
+        assert_eq!(file_size(1_234_000_000), "1.2 GB");
+    }
 
     #[test]
     fn formats_clocks() {
