@@ -10,6 +10,8 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use visor_core::{AudioBuffer, CaptureTarget, Rect, VideoFrame};
 
 pub mod camera;
+#[cfg(any(target_os = "windows", test))]
+mod capture_math;
 mod host_clock;
 pub mod mic;
 
@@ -17,6 +19,11 @@ pub mod mic;
 mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_permissions;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "windows")]
+pub use self::windows::exclude_window_from_capture;
 
 pub use host_clock::host_now;
 
@@ -112,7 +119,9 @@ pub trait Backend: Send + Sync {
 pub fn backend() -> anyhow::Result<Arc<dyn Backend>> {
     #[cfg(target_os = "macos")]
     return Ok(Arc::new(macos::MacBackend));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return Ok(Arc::new(self::windows::WinBackend));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     anyhow::bail!("no capture backend for this OS yet");
 }
 
