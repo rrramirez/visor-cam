@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     init_logging();
     visor_media::init()?;
 
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut backend_selector = slint::BackendSelector::new().backend_name("winit".into());
     #[cfg(target_os = "macos")]
     {

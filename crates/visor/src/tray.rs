@@ -56,11 +56,15 @@ impl Tray {
 
         let idle_icon = icon(false)?;
         let recording_icon = icon(true)?;
-        let tray = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Visor")
-            .with_icon_templated(idle_icon.clone())
-            .build()?;
+            .with_tooltip("Visor");
+        // macOS tints template icons to match the menu bar.
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(idle_icon.clone());
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_icon(idle_icon.clone());
+        let tray = builder.build()?;
         let mut tray = Self {
             icon: tray,
             pause,
@@ -106,7 +110,11 @@ impl Tray {
         let _ = if recording {
             self.icon.set_icon(Some(self.recording_icon.clone()))
         } else {
-            self.icon.set_icon_templated(Some(self.idle_icon.clone()))
+            #[cfg(target_os = "macos")]
+            let set = self.icon.set_icon_templated(Some(self.idle_icon.clone()));
+            #[cfg(not(target_os = "macos"))]
+            let set = self.icon.set_icon(Some(self.idle_icon.clone()));
+            set
         };
     }
 
@@ -124,7 +132,8 @@ impl Tray {
     }
 }
 
-/// A 44x44 icon: a ring with a dot (template, adapts to the menu bar) or a
+/// A 44x44 icon: a ring with a dot (a black template on macOS, which adapts
+/// to the menu bar; red elsewhere, visible on light and dark taskbars) or a
 /// solid red dot while recording.
 fn icon(recording: bool) -> anyhow::Result<Icon> {
     const S: usize = 44;
@@ -141,7 +150,11 @@ fn icon(recording: bool) -> anyhow::Result<Icon> {
             } else {
                 (
                     (coverage(13.0, 17.0) + coverage(-1.0, 8.0)).min(1.0),
-                    [0, 0, 0],
+                    if cfg!(target_os = "macos") {
+                        [0, 0, 0]
+                    } else {
+                        [255, 77, 94]
+                    },
                 )
             };
             let i = (y * S + x) * 4;
