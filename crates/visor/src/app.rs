@@ -1289,8 +1289,7 @@ impl App {
             platform::activate();
             return;
         }
-        let format = self.settings.borrow().export_format;
-        match EditorWindow::open(dir.clone(), format) {
+        match EditorWindow::open(dir.clone()) {
             Ok(editor) => {
                 self.editors.borrow_mut().push(editor);
                 self.update_dock();

@@ -44,7 +44,7 @@ struct ExportJob {
 }
 
 impl EditorWindow {
-    pub fn open(dir: PathBuf, default_format: i32) -> anyhow::Result<Rc<Self>> {
+    pub fn open(dir: PathBuf) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
@@ -71,7 +71,12 @@ impl EditorWindow {
             ui.set_camera_open(open("camera"));
             ui.set_speed_open(open("speed"));
         }
-        ui.set_export_format(default_format.clamp(0, 3));
+        {
+            let app = app();
+            let settings = app.settings.borrow();
+            ui.set_export_format(settings.export_format.clamp(0, 3));
+            ui.set_export_resolution(settings.export_resolution.clamp(0, 2));
+        }
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -487,6 +492,14 @@ impl EditorWindow {
             _ => (ExportFormat::Mp4, "MP4"),
         };
         let mut options = ExportOptions::new(format);
+        // The next editor starts with these choices.
+        {
+            let app = app();
+            let mut settings = app.settings.borrow_mut();
+            settings.export_format = self.ui.get_export_format();
+            settings.export_resolution = self.ui.get_export_resolution();
+            settings.save();
+        }
         options.max_height = match self.ui.get_export_resolution() {
             1 => Some(1080),
             2 => Some(720),

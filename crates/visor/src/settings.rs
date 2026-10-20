@@ -12,7 +12,12 @@ pub struct Settings {
     pub countdown_secs: u32,
     pub show_cursor: bool,
     /// Index into the editor's export format list (0 MP4, 1 VP9, 2 AV1, 3 GIF).
+    /// The editor starts with the last one exported.
     pub export_format: i32,
+    /// Index into the editor's export size list (0 original, 1 1080p, 2 720p),
+    /// likewise remembered. 1080p by default: full Retina size costs ~4x the
+    /// encoding for little visible gain when shared.
+    pub export_resolution: i32,
     pub last_camera: Option<String>,
     pub last_mic: Option<String>,
     pub system_audio: bool,
@@ -31,6 +36,7 @@ impl Default for Settings {
             countdown_secs: 3,
             show_cursor: true,
             export_format: 0,
+            export_resolution: 1,
             last_camera: None,
             last_mic: None,
             system_audio: false,
