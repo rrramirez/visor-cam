@@ -1,0 +1,95 @@
+import { ComboBox, Switch } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { PillButton, SectionLabel } from "widgets.slint";
+
+component Field inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 12px;
+    Text {
+        text: root.label;
+        width: 130px;
+        color: Theme.muted;
+        vertical-alignment: center;
+    }
+    @children
+}
+
+export component Preferences inherits Window {
+    title: "Visor Preferences";
+    width: 520px;
+    height: 400px;
+    background: Theme.bg;
+    default-font-size: Theme.font;
+
+    in property <string> save-dir;
+    in-out property <int> fps-index;
+    in-out property <int> countdown-index;
+    in-out property <bool> show-cursor;
+    in-out property <int> export-format;
+    in property <string> version;
+    callback choose-folder();
+    callback changed();
+
+    VerticalLayout {
+        padding: 22px;
+        spacing: 16px;
+
+        SectionLabel { text: "RECORDING"; }
+        Field {
+            label: "Save recordings to";
+            Text {
+                text: root.save-dir;
+                color: Theme.text;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            PillButton {
+                text: "Change…";
+                icon: Icons.folder;
+                clicked => { root.choose-folder(); }
+            }
+        }
+        Field {
+            label: "Frame rate";
+            ComboBox {
+                model: ["30 fps", "60 fps"];
+                current-index <=> root.fps-index;
+                selected => { root.changed(); }
+            }
+        }
+        Field {
+            label: "Countdown";
+            ComboBox {
+                model: ["Off", "3 seconds", "5 seconds"];
+                current-index <=> root.countdown-index;
+                selected => { root.changed(); }
+            }
+        }
+        Field {
+            label: "Cursor";
+            Switch {
+                text: "Show the cursor in recordings";
+                checked <=> root.show-cursor;
+                toggled => { root.changed(); }
+            }
+        }
+
+        SectionLabel { text: "EXPORT"; }
+        Field {
+            label: "Default format";
+            ComboBox {
+                model: ["MP4 (H.264)", "WebM (VP9)", "WebM (AV1)", "GIF"];
+                current-index <=> root.export-format;
+                selected => { root.changed(); }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+        Text {
+            text: "Visor " + root.version + " · Everything stays on this computer.";
+            color: Theme.faint;
+            font-size: Theme.font-small;
+            horizontal-alignment: center;
+        }
+    }
+}

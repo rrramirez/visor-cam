@@ -1,0 +1,168 @@
+import { Theme, Glyph } from "theme.slint";
+
+// Round icon button with an optional label tooltip.
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> filled;
+    in property <color> tint: Theme.text;
+    in property <color> fill-color: transparent;
+    in property <bool> enabled: true;
+    in property <string> tooltip;
+    in property <length> size: 32px;
+    in property <length> icon-size: 18px;
+    callback clicked;
+
+    width: size;
+    height: size;
+    border-radius: self.height / 2;
+    background: !enabled ? transparent
+        : touch.pressed ? Theme.surface-3
+        : touch.has-hover ? (fill-color == transparent ? Theme.surface-2 : fill-color.brighter(15%))
+        : fill-color;
+    opacity: enabled ? 1 : 0.35;
+
+    Glyph {
+        icon: root.icon;
+        filled: root.filled;
+        color: root.tint;
+        width: root.icon-size;
+        height: root.icon-size;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    if root.tooltip != "" && touch.has-hover: Rectangle {
+        y: root.height + 6px;
+        width: tip.preferred-width + 14px;
+        height: 22px;
+        border-radius: 5px;
+        background: #000000e0;
+        tip := Text {
+            text: root.tooltip;
+            color: white;
+            font-size: Theme.font-small;
+        }
+    }
+}
+
+// A labelled button; `primary` uses the record color.
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    in property <length> font-size: Theme.font;
+    callback clicked;
+
+    height: 34px;
+    min-width: label.preferred-width + (icon == "" ? 28px : 52px);
+    border-radius: self.height / 2;
+    background: !enabled ? Theme.surface-2
+        : primary ? (touch.pressed ? Theme.record-dark : touch.has-hover ? Theme.record.brighter(8%) : Theme.record)
+        : (touch.pressed ? Theme.surface-3 : touch.has-hover ? Theme.surface-3 : Theme.surface-2);
+    opacity: enabled ? 1 : 0.5;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": Glyph {
+            y: (parent.height - self.height) / 2;
+            icon: root.icon;
+            width: 16px;
+            height: 16px;
+            color: root.primary ? white : Theme.text;
+        }
+        label := Text {
+            text: root.text;
+            color: root.primary ? white : Theme.text;
+            font-size: root.font-size;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Horizontal tab-like selector.
+export component Segmented inherits Rectangle {
+    in property <[{label: string, icon: string}]> items;
+    in-out property <int> current;
+    callback changed(int);
+
+    height: 58px;
+    border-radius: Theme.radius;
+    background: Theme.surface;
+
+    HorizontalLayout {
+        padding: 4px;
+        spacing: 4px;
+        for item[i] in root.items: Rectangle {
+            border-radius: Theme.radius - 3px;
+            background: i == root.current ? Theme.surface-3 : (t.has-hover ? Theme.surface-2 : transparent);
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                HorizontalLayout {
+                    alignment: center;
+                    Glyph {
+                        icon: item.icon;
+                        color: i == root.current ? Theme.text : Theme.muted;
+                    }
+                }
+                Text {
+                    text: item.label;
+                    horizontal-alignment: center;
+                    font-size: Theme.font-small;
+                    color: i == root.current ? Theme.text : Theme.muted;
+                }
+            }
+            t := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current = i;
+                    root.changed(i);
+                }
+            }
+        }
+    }
+}
+
+// Mic input level, 0..1.
+export component LevelMeter inherits Rectangle {
+    in property <float> level;
+    height: 4px;
+    border-radius: 2px;
+    background: Theme.surface-3;
+    Rectangle {
+        x: 0;
+        width: parent.width * min(1.0, root.level);
+        border-radius: 2px;
+        background: root.level > 0.9 ? Theme.record : root.level > 0.6 ? Theme.warning : Theme.success;
+        animate width { duration: 80ms; }
+    }
+}
+
+export component SectionLabel inherits Text {
+    color: Theme.faint;
+    font-size: Theme.font-small;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+
+export component Card inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+}

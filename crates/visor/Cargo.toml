@@ -10,3 +10,6 @@ rust-version.workspace = true
 visor-core.workspace = true
 anyhow.workspace = true
 slint = "1.18"
+
+[build-dependencies]
+slint-build = "1.18"

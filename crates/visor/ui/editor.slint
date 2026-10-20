@@ -1,0 +1,537 @@
+import { ComboBox, Switch, Slider, ProgressIndicator } from "std-widgets.slint";
+import { Theme, Glyph, Icons } from "theme.slint";
+import { IconButton, PillButton, SectionLabel, Card } from "widgets.slint";
+
+// Positions on the timeline are fractions (0..1) of the source duration.
+export struct Region {
+    start: float,
+    end: float,
+}
+
+export struct Thumb {
+    image: image,
+    start: float,
+    end: float,
+}
+
+component SideButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> shortcut;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 34px;
+    border-radius: Theme.radius-small;
+    background: !enabled ? transparent : t.pressed ? Theme.surface-3 : t.has-hover ? Theme.surface-2 : transparent;
+    opacity: enabled ? 1 : 0.4;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+        Glyph {
+            y: (parent.height - self.height) / 2;
+            icon: root.icon;
+            width: 16px;
+            height: 16px;
+        }
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            color: Theme.text;
+        }
+        Text {
+            text: root.shortcut;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            color: Theme.faint;
+            font-size: Theme.font-small;
+        }
+    }
+    t := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Editor inherits Window {
+    title: "Visor — " + root.project-title;
+    preferred-width: 1180px;
+    preferred-height: 800px;
+    min-width: 860px;
+    min-height: 620px;
+    background: Theme.bg;
+    default-font-size: Theme.font;
+
+    in-out property <string> project-title;
+    in property <image> screen;
+    in property <float> screen-aspect: 16 / 9;
+    in property <image> camera;
+    in property <bool> has-camera;
+    in-out property <bool> bubble-visible: true;
+    // 0 circle, 1 rounded square
+    in-out property <int> bubble-shape;
+    // Normalized to the screen frame: top-left and width.
+    in-out property <float> bubble-x: 0.03;
+    in-out property <float> bubble-y: 0.75;
+    in-out property <float> bubble-size: 0.2;
+
+    in property <bool> playing;
+    in property <float> position;
+    in property <string> time-label;
+    in property <[Region]> cuts;
+    in-out property <float> sel-start: -1;
+    in-out property <float> sel-end: -1;
+    property <bool> has-selection: sel-start >= 0 && sel-end > sel-start;
+    in property <[Thumb]> thumbs;
+    in property <string> wave-path;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <bool> edited;
+    in property <string> kept-label;
+
+    in-out property <int> export-format;
+    in-out property <int> export-resolution;
+    in property <bool> exporting;
+    in property <float> export-progress;
+    in property <string> export-status;
+    in property <bool> export-done;
+
+    callback toggle-play();
+    callback seek(float);
+    callback selection-changed(float, float);
+    callback set-in();
+    callback set-out();
+    callback cut-selection();
+    callback trim-to-selection();
+    callback restore();
+    callback undo();
+    callback redo();
+    callback step(int);
+    callback bubble-changed();
+    callback title-edited(string);
+    callback export();
+    callback cancel-export();
+    callback reveal-export();
+    callback reveal-project();
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == " ") { root.toggle-play(); return accept; }
+            if (event.text == "i") { root.set-in(); return accept; }
+            if (event.text == "o") { root.set-out(); return accept; }
+            if (event.text == "t") { root.trim-to-selection(); return accept; }
+            if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
+            if (event.text == Key.LeftArrow) { root.step(event.modifiers.shift ? -10 : -1); return accept; }
+            if (event.text == Key.RightArrow) { root.step(event.modifiers.shift ? 10 : 1); return accept; }
+            if (event.text == Key.Escape) { root.sel-start = -1; root.sel-end = -1; return accept; }
+            if ((event.modifiers.meta || event.modifiers.control) && (event.text == "z" || event.text == "Z")) {
+                if (event.modifiers.shift) { root.redo(); } else { root.undo(); }
+                return accept;
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        // Top bar
+        Rectangle {
+            height: 52px;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 12px;
+                spacing: 10px;
+                Rectangle {
+                    width: 22px;
+                    Rectangle { width: 12px; height: 12px; border-radius: 6px; background: Theme.record; }
+                }
+                title-input := TextInput {
+                    text: root.project-title;
+                    color: Theme.text;
+                    font-size: Theme.font-large;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    single-line: true;
+                    edited => { root.title-edited(self.text); }
+                    accepted => { keys.focus(); }
+                }
+                IconButton {
+                    icon: Icons.folder;
+                    tooltip: "Show recording folder";
+                    clicked => { root.reveal-project(); }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            // Preview
+            preview-area := Rectangle {
+                horizontal-stretch: 1;
+                background: #0d0e10;
+                property <length> avail-w: self.width - 48px;
+                property <length> avail-h: self.height - 48px;
+                property <length> frame-w: min(avail-w, avail-h * root.screen-aspect);
+                property <length> frame-h: frame-w / root.screen-aspect;
+
+                frame := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: preview-area.frame-w;
+                    height: preview-area.frame-h;
+                    background: black;
+                    drop-shadow-blur: 24px;
+                    drop-shadow-color: #00000080;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.screen;
+                        image-fit: contain;
+                    }
+                    TouchArea {
+                        clicked => { root.toggle-play(); keys.focus(); }
+                    }
+
+                    if root.has-camera && root.bubble-visible: bubble := Rectangle {
+                        property <length> size: parent.width * root.bubble-size;
+                        x: max(0, min(parent.width - self.size, parent.width * root.bubble-x));
+                        y: max(0, min(parent.height - self.size, parent.height * root.bubble-y));
+                        width: self.size;
+                        height: self.size;
+                        border-radius: root.bubble-shape == 0 ? self.size / 2 : self.size * 0.18;
+                        clip: true;
+                        Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.camera;
+                            image-fit: cover;
+                        }
+                        Rectangle {
+                            border-radius: parent.border-radius;
+                            border-width: bubble-touch.has-hover ? 2px : 0;
+                            border-color: Theme.accent;
+                        }
+                        bubble-touch := TouchArea {
+                            mouse-cursor: move;
+                            moved => {
+                                root.bubble-x = max(0, min(1 - bubble.size / frame.width,
+                                    (bubble.x + self.mouse-x - self.pressed-x) / frame.width));
+                                root.bubble-y = max(0, min(1 - bubble.size / frame.height,
+                                    (bubble.y + self.mouse-y - self.pressed-y) / frame.height));
+                            }
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.up) { root.bubble-changed(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sidebar
+            Rectangle {
+                width: 268px;
+                background: Theme.surface;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 12px;
+
+                    SectionLabel { text: "EDIT"; }
+                    VerticalLayout {
+                        spacing: 2px;
+                        SideButton {
+                            text: "Set in point"; icon: Icons.trim; shortcut: "I";
+                            clicked => { root.set-in(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Set out point"; icon: Icons.trim; shortcut: "O";
+                            clicked => { root.set-out(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Cut selection"; icon: Icons.scissors; shortcut: "⌫";
+                            enabled: root.has-selection;
+                            clicked => { root.cut-selection(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Trim to selection"; icon: Icons.area; shortcut: "T";
+                            enabled: root.has-selection;
+                            clicked => { root.trim-to-selection(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";
+                            enabled: root.can-undo;
+                            clicked => { root.undo(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Redo"; icon: Icons.redo; shortcut: "⇧⌘Z";
+                            enabled: root.can-redo;
+                            clicked => { root.redo(); keys.focus(); }
+                        }
+                        SideButton {
+                            text: "Restore all cuts"; icon: Icons.restore;
+                            enabled: root.edited;
+                            clicked => { root.restore(); keys.focus(); }
+                        }
+                    }
+                    Text {
+                        text: root.kept-label;
+                        color: Theme.faint;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+
+                    if root.has-camera: SectionLabel { text: "CAMERA BUBBLE"; }
+                    if root.has-camera: VerticalLayout {
+                        spacing: 8px;
+                        Switch {
+                            text: "Show camera";
+                            checked <=> root.bubble-visible;
+                            toggled => { root.bubble-changed(); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            PillButton {
+                                text: "Circle";
+                                primary: root.bubble-shape == 0;
+                                clicked => { root.bubble-shape = 0; root.bubble-changed(); }
+                            }
+                            PillButton {
+                                text: "Rounded";
+                                primary: root.bubble-shape == 1;
+                                clicked => { root.bubble-shape = 1; root.bubble-changed(); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Size"; color: Theme.muted; vertical-alignment: center; }
+                            Slider {
+                                minimum: 0.08;
+                                maximum: 0.45;
+                                value <=> root.bubble-size;
+                                released => { root.bubble-changed(); }
+                            }
+                        }
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+
+                    SectionLabel { text: "EXPORT"; }
+                    ComboBox {
+                        model: ["MP4 (H.264)", "WebM (VP9)", "WebM (AV1)", "GIF"];
+                        current-index <=> root.export-format;
+                        enabled: !root.exporting;
+                    }
+                    ComboBox {
+                        model: ["Original size", "1080p", "720p"];
+                        current-index <=> root.export-resolution;
+                        enabled: !root.exporting && root.export-format != 3;
+                    }
+                    if root.exporting: VerticalLayout {
+                        spacing: 6px;
+                        ProgressIndicator { progress: root.export-progress; }
+                        HorizontalLayout {
+                            Text { text: root.export-status; color: Theme.muted; font-size: Theme.font-small; vertical-alignment: center; }
+                            PillButton { text: "Cancel"; clicked => { root.cancel-export(); } }
+                        }
+                    }
+                    if !root.exporting: PillButton {
+                        primary: true;
+                        text: "Export";
+                        icon: Icons.export;
+                        clicked => { root.export(); }
+                    }
+                    if !root.exporting && root.export-status != "": HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: root.export-status;
+                            color: root.export-done ? Theme.success : Theme.record;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                        if root.export-done: PillButton {
+                            text: "Show";
+                            clicked => { root.reveal-export(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Transport
+        Rectangle {
+            height: 48px;
+            background: Theme.surface;
+            border-width: 0;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 12px;
+                IconButton {
+                    y: (parent.height - self.height) / 2;
+                    size: 36px;
+                    icon: root.playing ? Icons.pause : Icons.play;
+                    filled: true;
+                    tooltip: "Play / pause (Space)";
+                    clicked => { root.toggle-play(); keys.focus(); }
+                }
+                Text {
+                    text: root.time-label;
+                    color: Theme.text;
+                    font-family: "Menlo";
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: "Drag on the timeline to select · I / O set points · ← → step";
+                    color: Theme.faint;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Timeline
+        timeline := Rectangle {
+            height: 128px;
+            background: Theme.bg;
+            property <length> track-x: 14px;
+            property <length> track-w: self.width - 28px;
+
+            track := Rectangle {
+                x: timeline.track-x;
+                y: 12px;
+                width: timeline.track-w;
+                height: parent.height - 24px;
+                border-radius: Theme.radius-small;
+                clip: true;
+                background: Theme.surface;
+
+                for t in root.thumbs: Image {
+                    x: t.start * track.width;
+                    y: 0;
+                    width: (t.end - t.start) * track.width;
+                    height: 64px;
+                    source: t.image;
+                    image-fit: cover;
+                    opacity: 0.85;
+                }
+                Path {
+                    x: 0;
+                    y: 66px;
+                    width: track.width;
+                    height: track.height - 68px;
+                    viewbox-width: 1000;
+                    viewbox-height: 100;
+                    commands: root.wave-path;
+                    fill: #5b9cff66;
+                    stroke: transparent;
+                }
+
+                for c in root.cuts: Rectangle {
+                    x: c.start * track.width;
+                    width: max(2px, (c.end - c.start) * track.width);
+                    height: track.height;
+                    background: #0b0c0ed9;
+                    Rectangle {
+                        height: 3px;
+                        y: 0;
+                        background: Theme.record;
+                    }
+                    Text {
+                        text: "cut";
+                        color: Theme.faint;
+                        font-size: Theme.font-small;
+                        visible: parent.width > 40px;
+                    }
+                }
+
+                if root.has-selection: Rectangle {
+                    x: root.sel-start * track.width;
+                    width: (root.sel-end - root.sel-start) * track.width;
+                    height: track.height;
+                    background: #5b9cff33;
+                    border-width: 2px;
+                    border-color: Theme.accent;
+                }
+
+                scrub := TouchArea {
+                    mouse-cursor: pointer;
+                    property <bool> dragging;
+                    property <float> anchor;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            self.dragging = false;
+                            self.anchor = max(0, min(1, self.mouse-x / track.width));
+                        }
+                        if (event.kind == PointerEventKind.up && !self.dragging) {
+                            root.sel-start = -1;
+                            root.sel-end = -1;
+                            root.seek(self.anchor);
+                            keys.focus();
+                        }
+                        if (event.kind == PointerEventKind.up && self.dragging) {
+                            root.selection-changed(root.sel-start, root.sel-end);
+                            keys.focus();
+                        }
+                    }
+                    moved => {
+                        if (abs(self.mouse-x - self.pressed-x) > 4px) { self.dragging = true; }
+                        if (self.dragging) {
+                            root.sel-start = min(self.anchor, max(0, min(1, self.mouse-x / track.width)));
+                            root.sel-end = max(self.anchor, max(0, min(1, self.mouse-x / track.width)));
+                        }
+                    }
+                }
+
+                // Selection edge handles.
+                if root.has-selection: Rectangle {
+                    x: root.sel-start * track.width - 5px;
+                    width: 10px;
+                    height: track.height;
+                    Rectangle { width: 4px; height: 28px; border-radius: 2px; background: Theme.accent; }
+                    TouchArea {
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            root.sel-start = max(0, min(root.sel-end - 0.001, (parent.x + self.mouse-x) / track.width));
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
+                        }
+                    }
+                }
+                if root.has-selection: Rectangle {
+                    x: root.sel-end * track.width - 5px;
+                    width: 10px;
+                    height: track.height;
+                    Rectangle { width: 4px; height: 28px; border-radius: 2px; background: Theme.accent; }
+                    TouchArea {
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            root.sel-end = min(1, max(root.sel-start + 0.001, (parent.x + self.mouse-x) / track.width));
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
+                        }
+                    }
+                }
+
+                // Playhead
+                Rectangle {
+                    x: root.position * track.width - 1px;
+                    width: 2px;
+                    height: track.height;
+                    background: white;
+                    Rectangle {
+                        y: 0;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: white;
+                    }
+                }
+            }
+        }
+    }
+}

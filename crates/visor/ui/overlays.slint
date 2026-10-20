@@ -1,0 +1,296 @@
+import { Theme, Glyph, Icons } from "theme.slint";
+import { IconButton, PillButton } from "widgets.slint";
+
+// Full-display overlay for dragging out a capture area.
+export component AreaSelector inherits Window {
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    title: "Select area";
+
+    // Selection in window coordinates.
+    in-out property <length> sel-x;
+    in-out property <length> sel-y;
+    in-out property <length> sel-w;
+    in-out property <length> sel-h;
+    property <bool> has-selection: sel-w > 8px && sel-h > 8px;
+    property <length> anchor-x;
+    property <length> anchor-y;
+    property <bool> moving;
+    property <length> grab-dx;
+    property <length> grab-dy;
+    in property <float> scale: 2;
+
+    callback confirm();
+    callback cancel();
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && root.has-selection) {
+                root.confirm();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Dim everything outside the selection.
+    Rectangle { x: 0; y: 0; width: root.width; height: root.has-selection ? root.sel-y : root.height; background: #00000088; }
+    if root.has-selection: Rectangle { x: 0; y: root.sel-y + root.sel-h; width: root.width; height: root.height - root.sel-y - root.sel-h; background: #00000088; }
+    if root.has-selection: Rectangle { x: 0; y: root.sel-y; width: root.sel-x; height: root.sel-h; background: #00000088; }
+    if root.has-selection: Rectangle { x: root.sel-x + root.sel-w; y: root.sel-y; width: root.width - root.sel-x - root.sel-w; height: root.sel-h; background: #00000088; }
+
+    drag := TouchArea {
+        mouse-cursor: crosshair;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                if (root.has-selection && self.mouse-x > root.sel-x && self.mouse-x < root.sel-x + root.sel-w
+                        && self.mouse-y > root.sel-y && self.mouse-y < root.sel-y + root.sel-h) {
+                    root.moving = true;
+                    root.grab-dx = self.mouse-x - root.sel-x;
+                    root.grab-dy = self.mouse-y - root.sel-y;
+                } else {
+                    root.moving = false;
+                    root.anchor-x = self.mouse-x;
+                    root.anchor-y = self.mouse-y;
+                    root.sel-x = self.mouse-x;
+                    root.sel-y = self.mouse-y;
+                    root.sel-w = 0;
+                    root.sel-h = 0;
+                }
+            }
+        }
+        moved => {
+            if (root.moving) {
+                root.sel-x = max(0, min(root.width - root.sel-w, self.mouse-x - root.grab-dx));
+                root.sel-y = max(0, min(root.height - root.sel-h, self.mouse-y - root.grab-dy));
+            } else {
+                root.sel-x = min(root.anchor-x, max(0, self.mouse-x));
+                root.sel-y = min(root.anchor-y, max(0, self.mouse-y));
+                root.sel-w = abs(max(0, min(root.width, self.mouse-x)) - root.anchor-x);
+                root.sel-h = abs(max(0, min(root.height, self.mouse-y)) - root.anchor-y);
+            }
+        }
+    }
+
+    if root.has-selection: Rectangle {
+        x: root.sel-x - 1px;
+        y: root.sel-y - 1px;
+        width: root.sel-w + 2px;
+        height: root.sel-h + 2px;
+        border-width: 2px;
+        border-color: white;
+        background: transparent;
+    }
+
+    if root.has-selection: Rectangle {
+        x: max(8px, min(root.width - self.width - 8px, root.sel-x + (root.sel-w - self.width) / 2));
+        y: root.sel-y + root.sel-h + 12px + self.height > root.height ? root.sel-y + root.sel-h - self.height - 12px : root.sel-y + root.sel-h + 12px;
+        width: bar.preferred-width;
+        height: 46px;
+        border-radius: 23px;
+        background: #1d1f23f0;
+        bar := HorizontalLayout {
+            padding: 6px;
+            padding-left: 16px;
+            spacing: 8px;
+            Text {
+                text: round(root.sel-w / 1px * root.scale) + " × " + round(root.sel-h / 1px * root.scale);
+                color: Theme.muted;
+                vertical-alignment: center;
+                font-size: Theme.font-small;
+            }
+            PillButton { text: "Cancel"; clicked => { root.cancel(); } }
+            PillButton { text: "Use area"; primary: true; icon: Icons.check; clicked => { root.confirm(); } }
+        }
+    }
+
+    if !root.has-selection: Rectangle {
+        width: hint.preferred-width + 32px;
+        height: 44px;
+        border-radius: 22px;
+        background: #1d1f23f0;
+        hint := Text {
+            text: "Drag to select an area  ·  Enter to confirm  ·  Esc to cancel";
+            color: Theme.text;
+        }
+    }
+}
+
+// 3-2-1 before recording starts. Click to skip.
+export component Countdown inherits Window {
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    title: "Countdown";
+    width: 180px;
+    height: 180px;
+    in property <int> value: 3;
+    callback skip();
+
+    Rectangle {
+        border-radius: self.width / 2;
+        background: #141518e6;
+        border-width: 3px;
+        border-color: Theme.record;
+        Text {
+            text: root.value;
+            font-size: 84px;
+            font-weight: 700;
+            color: white;
+        }
+        Text {
+            y: parent.height - 34px;
+            text: "click to skip";
+            font-size: Theme.font-small;
+            color: Theme.faint;
+        }
+    }
+    TouchArea { clicked => { root.skip(); } }
+}
+
+// Floating recording controls.
+export component ControlBar inherits Window {
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    title: "Visor recording";
+    width: 236px;
+    height: 52px;
+    in property <string> elapsed: "0:00";
+    in property <bool> paused;
+    callback toggle-pause();
+    callback stop();
+    callback discard();
+    callback drag-by(length, length);
+
+    property <bool> blink;
+    Timer {
+        interval: 600ms;
+        running: !root.paused;
+        triggered => { root.blink = !root.blink; }
+    }
+
+    Rectangle {
+        border-radius: self.height / 2;
+        background: #141518f2;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        mover := TouchArea {
+            mouse-cursor: move;
+            moved => { root.drag-by(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y); }
+        }
+
+        HorizontalLayout {
+            padding: 8px;
+            padding-left: 16px;
+            spacing: 6px;
+            Rectangle {
+                width: 12px;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: root.paused ? Theme.warning : (root.blink ? Theme.record : Theme.record-dark);
+                }
+            }
+            Text {
+                text: root.paused ? "Paused " + root.elapsed : root.elapsed;
+                color: Theme.text;
+                font-size: Theme.font-large;
+                font-weight: 600;
+                vertical-alignment: center;
+                min-width: 74px;
+            }
+            IconButton {
+                size: 36px;
+                icon: root.paused ? Icons.play : Icons.pause;
+                filled: true;
+                tooltip: root.paused ? "Resume" : "Pause";
+                clicked => { root.toggle-pause(); }
+            }
+            IconButton {
+                size: 36px;
+                icon: Icons.stop;
+                filled: true;
+                tint: white;
+                fill-color: Theme.record;
+                tooltip: "Stop and edit";
+                clicked => { root.stop(); }
+            }
+            IconButton {
+                size: 36px;
+                icon: Icons.trash;
+                tint: Theme.muted;
+                tooltip: "Discard";
+                clicked => { root.discard(); }
+            }
+        }
+    }
+}
+
+// Live camera preview shown on screen while recording.
+export component CameraBubble inherits Window {
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    title: "Visor camera";
+    in property <image> frame;
+    // 0 circle, 1 rounded square
+    in property <int> shape;
+    callback drag-by(length, length);
+    callback cycle-size();
+    callback cycle-shape();
+
+    clip-rect := Rectangle {
+        border-radius: root.shape == 0 ? self.width / 2 : self.width * 0.18;
+        clip: true;
+        background: #000000;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.frame;
+            image-fit: cover;
+        }
+    }
+    Rectangle {
+        border-radius: root.shape == 0 ? self.width / 2 : self.width * 0.18;
+        border-width: 2px;
+        border-color: #ffffff40;
+        background: transparent;
+    }
+
+    hover := TouchArea {
+        mouse-cursor: move;
+        moved => { root.drag-by(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y); }
+    }
+
+    if hover.has-hover: HorizontalLayout {
+        y: root.height - 44px;
+        height: 32px;
+        alignment: center;
+        spacing: 6px;
+        IconButton {
+            size: 30px;
+            icon-size: 15px;
+            icon: Icons.area;
+            fill-color: #000000b0;
+            tint: white;
+            clicked => { root.cycle-size(); }
+        }
+        IconButton {
+            size: 30px;
+            icon-size: 15px;
+            icon: Icons.apps;
+            fill-color: #000000b0;
+            tint: white;
+            clicked => { root.cycle-shape(); }
+        }
+    }
+}

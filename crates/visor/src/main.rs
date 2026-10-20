@@ -1,16 +1,7 @@
-slint::slint! {
-    export component RecorderPanel inherits Window {
-        title: "Visor";
-        width: 360px;
-        height: 200px;
-        Text {
-            text: "Visor";
-            font-size: 24px;
-        }
-    }
-}
+slint::include_modules!();
 
 fn main() -> anyhow::Result<()> {
-    RecorderPanel::new()?.run()?;
+    let panel = RecorderPanel::new()?;
+    panel.run()?;
     Ok(())
 }

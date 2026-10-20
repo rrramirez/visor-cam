@@ -1,0 +1,231 @@
+import { ComboBox, Switch } from "std-widgets.slint";
+import { Theme, Glyph, Icons } from "theme.slint";
+import { IconButton, PillButton, Segmented, LevelMeter, SectionLabel, Card } from "widgets.slint";
+
+component Row inherits HorizontalLayout {
+    in property <string> icon;
+    spacing: 10px;
+    alignment: stretch;
+    Glyph {
+        y: (parent.height - self.height) / 2;
+        icon: root.icon;
+        color: Theme.muted;
+    }
+    @children
+}
+
+export component RecorderPanel inherits Window {
+    title: "Visor";
+    width: 380px;
+    height: 560px;
+    background: Theme.bg;
+    default-font-size: Theme.font;
+
+    // 0 screen, 1 window, 2 app, 3 area
+    in-out property <int> mode;
+    in property <[string]> displays;
+    in-out property <int> display-index;
+    in property <[string]> windows;
+    in-out property <int> window-index;
+    in property <[string]> apps;
+    in-out property <int> app-index;
+    in property <string> area-label;
+    in property <[string]> cameras;
+    in-out property <int> camera-index;
+    in property <[string]> mics;
+    in-out property <int> mic-index;
+    in property <float> mic-level;
+    in-out property <bool> system-audio;
+    in property <[string]> audio-apps;
+    in-out property <int> audio-app-index;
+    in property <bool> screen-permission: true;
+    in property <string> permission-note;
+    in property <string> error;
+    in property <string> hint;
+    in property <bool> busy;
+
+    callback mode-changed(int);
+    callback camera-changed(int);
+    callback mic-changed(int);
+    callback select-area();
+    callback refresh();
+    callback start();
+    callback open-preferences();
+    callback open-folder();
+    callback open-permission-settings();
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            Rectangle {
+                width: 22px;
+                Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: Theme.record;
+                }
+            }
+            Text {
+                text: "Visor";
+                font-size: 18px;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            IconButton {
+                icon: Icons.refresh;
+                tooltip: "Refresh sources";
+                clicked => { root.refresh(); }
+            }
+            IconButton {
+                icon: Icons.folder;
+                tooltip: "Recordings";
+                clicked => { root.open-folder(); }
+            }
+            IconButton {
+                icon: Icons.settings;
+                tooltip: "Preferences";
+                clicked => { root.open-preferences(); }
+            }
+        }
+
+        if !root.screen-permission: Rectangle {
+            border-radius: Theme.radius;
+            background: #f6b74a22;
+            border-width: 1px;
+            border-color: #f6b74a66;
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 10px;
+                Text {
+                    text: root.permission-note;
+                    color: Theme.warning;
+                    wrap: word-wrap;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+                PillButton {
+                    text: "Open Settings";
+                    clicked => { root.open-permission-settings(); }
+                }
+            }
+        }
+
+        SectionLabel { text: "RECORD"; }
+        Segmented {
+            items: [
+                { label: "Screen", icon: Icons.monitor },
+                { label: "Window", icon: Icons.window },
+                { label: "App", icon: Icons.apps },
+                { label: "Area", icon: Icons.area },
+            ];
+            current <=> root.mode;
+            changed(i) => { root.mode-changed(i); }
+        }
+
+        if root.mode == 0 || root.mode == 3: Row {
+            icon: Icons.monitor;
+            ComboBox {
+                model: root.displays;
+                current-index <=> root.display-index;
+            }
+        }
+        if root.mode == 1: Row {
+            icon: Icons.window;
+            ComboBox {
+                model: root.windows;
+                current-index <=> root.window-index;
+            }
+        }
+        if root.mode == 2: Row {
+            icon: Icons.apps;
+            ComboBox {
+                model: root.apps;
+                current-index <=> root.app-index;
+            }
+        }
+        if root.mode == 3: HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.area-label;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            PillButton {
+                text: "Select area";
+                icon: Icons.area;
+                clicked => { root.select-area(); }
+            }
+        }
+
+        SectionLabel { text: "CAMERA & AUDIO"; }
+        Row {
+            icon: Icons.camera;
+            ComboBox {
+                model: root.cameras;
+                current-index <=> root.camera-index;
+                selected => { root.camera-changed(self.current-index); }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            Row {
+                icon: Icons.mic;
+                ComboBox {
+                    model: root.mics;
+                    current-index <=> root.mic-index;
+                    selected => { root.mic-changed(self.current-index); }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 28px;
+                LevelMeter {
+                    level: root.mic-index > 0 ? root.mic-level : 0;
+                }
+            }
+        }
+        Row {
+            icon: Icons.speaker;
+            Switch {
+                text: "System audio";
+                checked <=> root.system-audio;
+            }
+            if root.system-audio: ComboBox {
+                model: root.audio-apps;
+                current-index <=> root.audio-app-index;
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        if root.error != "": Text {
+            text: root.error;
+            color: Theme.record;
+            wrap: word-wrap;
+            font-size: Theme.font-small;
+        }
+
+        PillButton {
+            height: 44px;
+            primary: true;
+            enabled: !root.busy && root.screen-permission;
+            text: root.busy ? "Starting…" : "Start recording";
+            icon: Icons.record;
+            font-size: Theme.font-large;
+            clicked => { root.start(); }
+        }
+        Text {
+            text: root.hint;
+            color: Theme.faint;
+            font-size: Theme.font-small;
+            horizontal-alignment: center;
+        }
+    }
+}
+
