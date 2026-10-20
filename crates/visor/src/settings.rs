@@ -16,6 +16,8 @@ pub struct Settings {
     pub last_camera: Option<String>,
     pub last_mic: Option<String>,
     pub system_audio: bool,
+    /// Editor sidebar sections the user folded ("edit", "camera", "speed").
+    pub folded_sections: Vec<String>,
 }
 
 impl Default for Settings {
@@ -32,6 +34,7 @@ impl Default for Settings {
             last_camera: None,
             last_mic: None,
             system_audio: false,
+            folded_sections: Vec::new(),
         }
     }
 }

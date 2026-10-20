@@ -64,6 +64,13 @@ impl EditorWindow {
         ui.set_bubble_size(o.size as f32);
         ui.set_bubble_mirror(o.mirror);
         ui.set_speed(project.speed as f32);
+        {
+            let folded = app().settings.borrow().folded_sections.clone();
+            let open = |name: &str| !folded.iter().any(|s| s == name);
+            ui.set_edit_open(open("edit"));
+            ui.set_camera_open(open("camera"));
+            ui.set_speed_open(open("speed"));
+        }
         ui.set_export_format(default_format.clamp(0, 3));
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
@@ -178,6 +185,21 @@ impl EditorWindow {
                 o.mirror = e.ui.get_bubble_mirror();
             }
             e.save();
+        });
+        on!(on_sections_changed, |e| {
+            let folded = [
+                ("edit", e.ui.get_edit_open()),
+                ("camera", e.ui.get_camera_open()),
+                ("speed", e.ui.get_speed_open()),
+            ]
+            .into_iter()
+            .filter(|(_, open)| !open)
+            .map(|(name, _)| name.to_string())
+            .collect();
+            let app = app();
+            let mut settings = app.settings.borrow_mut();
+            settings.folded_sections = folded;
+            settings.save();
         });
         on!(on_speed_changed, |e| {
             let speed = f64::from(e.ui.get_speed()).clamp(0.5, 2.0);

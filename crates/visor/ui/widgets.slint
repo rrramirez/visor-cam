@@ -167,3 +167,55 @@ export component Card inherits Rectangle {
     border-width: 1px;
     border-color: Theme.border;
 }
+
+// A titled section whose content folds away when its header is clicked.
+export component CollapsibleSection inherits VerticalLayout {
+    in property <string> title;
+    in-out property <bool> open: true;
+    callback toggled(bool);
+    spacing: 8px;
+
+    header := Rectangle {
+        height: 24px;
+        border-radius: Theme.radius-small;
+        background: header-touch.has-hover ? Theme.surface-2 : transparent;
+        HorizontalLayout {
+            padding-left: 2px;
+            padding-right: 4px;
+            spacing: 6px;
+            Glyph {
+                y: (parent.height - self.height) / 2;
+                icon: root.open ? Icons.chevron-down : Icons.chevron-right;
+                color: Theme.faint;
+                width: 12px;
+                height: 12px;
+            }
+            Text {
+                text: root.title;
+                color: Theme.faint;
+                font-size: Theme.font-small;
+                font-weight: 600;
+                letter-spacing: 0.6px;
+                vertical-alignment: center;
+            }
+        }
+        header-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.open = !root.open;
+                root.toggled(root.open);
+            }
+        }
+    }
+    Rectangle {
+        clip: true;
+        height: root.open ? content.preferred-height : 0;
+        animate height { duration: 160ms; easing: ease-in-out; }
+        content := VerticalLayout {
+            y: 0;
+            height: self.preferred-height;
+            spacing: 8px;
+            @children
+        }
+    }
+}

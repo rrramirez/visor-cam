@@ -1,6 +1,6 @@
-import { ComboBox, Switch, Slider, ProgressIndicator } from "std-widgets.slint";
+import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView } from "std-widgets.slint";
 import { Theme, Glyph, Icons } from "theme.slint";
-import { IconButton, PillButton, SectionLabel, Card } from "widgets.slint";
+import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection } from "widgets.slint";
 
 // Positions on the timeline are fractions (0..1) of the source duration.
 export struct Region {
@@ -80,6 +80,10 @@ export component Editor inherits Window {
     // Playback and export speed, 0.5–2.0.
     in-out property <float> speed: 1.0;
     in property <string> speed-label;
+    // Which sidebar sections are unfolded.
+    in-out property <bool> edit-open: true;
+    in-out property <bool> camera-open: true;
+    in-out property <bool> speed-open: true;
 
     in property <bool> playing;
     in property <float> position;
@@ -122,6 +126,7 @@ export component Editor inherits Window {
     callback step(int);
     callback bubble-changed();
     callback speed-changed();
+    callback sections-changed();
     callback title-edited(string);
     callback export();
     callback cancel-export();
@@ -256,175 +261,193 @@ export component Editor inherits Window {
                 }
             }
 
-            // Sidebar
+            // Sidebar: sections scroll; Export stays at the bottom.
             Rectangle {
                 width: 268px;
                 background: Theme.surface;
                 VerticalLayout {
-                    padding: 14px;
-                    spacing: 12px;
+                    sidebar-scroll := ScrollView {
+                        vertical-stretch: 1;
+                        viewport-width: self.visible-width;
+                        viewport-height: sections.preferred-height;
+                        sections := VerticalLayout {
+                            width: sidebar-scroll.visible-width;
+                            height: self.preferred-height;
+                            padding: 14px;
+                            spacing: 14px;
 
-                    SectionLabel { text: "EDIT"; }
+                            CollapsibleSection {
+                                title: "EDIT";
+                                open <=> root.edit-open;
+                                toggled => { root.sections-changed(); }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    SideButton {
+                                        text: "Set in point"; icon: Icons.trim; shortcut: "I";
+                                        clicked => { root.set-in(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Set out point"; icon: Icons.trim; shortcut: "O";
+                                        clicked => { root.set-out(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Cut selection"; icon: Icons.scissors; shortcut: "⌫";
+                                        enabled: root.has-selection;
+                                        clicked => { root.cut-selection(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Trim to selection"; icon: Icons.area; shortcut: "T";
+                                        enabled: root.has-selection;
+                                        clicked => { root.trim-to-selection(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";
+                                        enabled: root.can-undo;
+                                        clicked => { root.undo(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Redo"; icon: Icons.redo; shortcut: "⇧⌘Z";
+                                        enabled: root.can-redo;
+                                        clicked => { root.redo(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: "Restore all cuts"; icon: Icons.restore;
+                                        enabled: root.edited;
+                                        clicked => { root.restore(); keys.focus(); }
+                                    }
+                                }
+                                Text {
+                                    text: root.kept-label;
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            if root.has-camera: CollapsibleSection {
+                                title: "CAMERA BUBBLE";
+                                open <=> root.camera-open;
+                                toggled => { root.sections-changed(); }
+                                Switch {
+                                    text: "Show camera";
+                                    checked <=> root.bubble-visible;
+                                    toggled => { root.bubble-changed(); }
+                                }
+                                Switch {
+                                    text: "Mirror camera";
+                                    checked <=> root.bubble-mirror;
+                                    toggled => { root.bubble-changed(); }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    PillButton {
+                                        text: "Circle";
+                                        primary: root.bubble-shape == 0;
+                                        clicked => { root.bubble-shape = 0; root.bubble-changed(); }
+                                    }
+                                    PillButton {
+                                        text: "Rounded";
+                                        primary: root.bubble-shape == 1;
+                                        clicked => { root.bubble-shape = 1; root.bubble-changed(); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: "Size"; color: Theme.muted; vertical-alignment: center; }
+                                    Slider {
+                                        minimum: 0.08;
+                                        maximum: 0.45;
+                                        value <=> root.bubble-size;
+                                        released => { root.bubble-changed(); }
+                                    }
+                                }
+                            }
+
+                            CollapsibleSection {
+                                title: "SPEED";
+                                open <=> root.speed-open;
+                                toggled => { root.sections-changed(); }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Slider {
+                                        minimum: 0.5;
+                                        maximum: 2.0;
+                                        value <=> root.speed;
+                                        // Snap to 0.05 steps.
+                                        changed(v) => { root.speed = round(v * 20) / 20; }
+                                        released => { root.speed-changed(); }
+                                    }
+                                    Text {
+                                        width: 44px;
+                                        text: (round(root.speed * 100) / 100) + "×";
+                                        color: root.speed == 1 ? Theme.muted : Theme.text;
+                                        font-weight: 600;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.speed-label;
+                                        color: Theme.faint;
+                                        font-size: Theme.font-small;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.speed != 1: PillButton {
+                                        horizontal-stretch: 0;
+                                        text: "Reset";
+                                        font-size: Theme.font-small;
+                                        clicked => { root.speed = 1; root.speed-changed(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
                     VerticalLayout {
-                        spacing: 2px;
-                        SideButton {
-                            text: "Set in point"; icon: Icons.trim; shortcut: "I";
-                            clicked => { root.set-in(); keys.focus(); }
+                        padding: 14px;
+                        spacing: 10px;
+                        SectionLabel { text: "EXPORT"; }
+                        ComboBox {
+                            model: ["MP4 (H.264)", "WebM (VP9)", "WebM (AV1)", "GIF"];
+                            current-index <=> root.export-format;
+                            enabled: !root.exporting;
                         }
-                        SideButton {
-                            text: "Set out point"; icon: Icons.trim; shortcut: "O";
-                            clicked => { root.set-out(); keys.focus(); }
+                        ComboBox {
+                            model: ["Original size", "1080p", "720p"];
+                            current-index <=> root.export-resolution;
+                            enabled: !root.exporting && root.export-format != 3;
                         }
-                        SideButton {
-                            text: "Cut selection"; icon: Icons.scissors; shortcut: "⌫";
-                            enabled: root.has-selection;
-                            clicked => { root.cut-selection(); keys.focus(); }
-                        }
-                        SideButton {
-                            text: "Trim to selection"; icon: Icons.area; shortcut: "T";
-                            enabled: root.has-selection;
-                            clicked => { root.trim-to-selection(); keys.focus(); }
-                        }
-                        SideButton {
-                            text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";
-                            enabled: root.can-undo;
-                            clicked => { root.undo(); keys.focus(); }
-                        }
-                        SideButton {
-                            text: "Redo"; icon: Icons.redo; shortcut: "⇧⌘Z";
-                            enabled: root.can-redo;
-                            clicked => { root.redo(); keys.focus(); }
-                        }
-                        SideButton {
-                            text: "Restore all cuts"; icon: Icons.restore;
-                            enabled: root.edited;
-                            clicked => { root.restore(); keys.focus(); }
-                        }
-                    }
-                    Text {
-                        text: root.kept-label;
-                        color: Theme.faint;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-
-                    if root.has-camera: SectionLabel { text: "CAMERA BUBBLE"; }
-                    if root.has-camera: VerticalLayout {
-                        spacing: 8px;
-                        Switch {
-                            text: "Show camera";
-                            checked <=> root.bubble-visible;
-                            toggled => { root.bubble-changed(); }
-                        }
-                        Switch {
-                            text: "Mirror camera";
-                            checked <=> root.bubble-mirror;
-                            toggled => { root.bubble-changed(); }
-                        }
-                        HorizontalLayout {
+                        if root.exporting: VerticalLayout {
                             spacing: 6px;
-                            PillButton {
-                                text: "Circle";
-                                primary: root.bubble-shape == 0;
-                                clicked => { root.bubble-shape = 0; root.bubble-changed(); }
-                            }
-                            PillButton {
-                                text: "Rounded";
-                                primary: root.bubble-shape == 1;
-                                clicked => { root.bubble-shape = 1; root.bubble-changed(); }
+                            ProgressIndicator { progress: root.export-progress; }
+                            HorizontalLayout {
+                                Text { text: root.export-status; color: Theme.muted; font-size: Theme.font-small; vertical-alignment: center; }
+                                PillButton { text: "Cancel"; clicked => { root.cancel-export(); } }
                             }
                         }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { text: "Size"; color: Theme.muted; vertical-alignment: center; }
-                            Slider {
-                                minimum: 0.08;
-                                maximum: 0.45;
-                                value <=> root.bubble-size;
-                                released => { root.bubble-changed(); }
-                            }
+                        if !root.exporting: PillButton {
+                            primary: true;
+                            text: "Export";
+                            icon: Icons.export;
+                            clicked => { root.export(); }
                         }
-                    }
-
-                    SectionLabel { text: "SPEED"; }
-                    VerticalLayout {
-                        spacing: 6px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Slider {
-                                minimum: 0.5;
-                                maximum: 2.0;
-                                value <=> root.speed;
-                                // Snap to 0.05 steps.
-                                changed(v) => { root.speed = round(v * 20) / 20; }
-                                released => { root.speed-changed(); }
-                            }
-                            Text {
-                                width: 44px;
-                                text: (round(root.speed * 100) / 100) + "×";
-                                color: root.speed == 1 ? Theme.muted : Theme.text;
-                                font-weight: 600;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                            }
-                        }
-                        HorizontalLayout {
+                        if !root.exporting && root.export-status != "": HorizontalLayout {
                             spacing: 6px;
                             Text {
-                                text: root.speed-label;
-                                color: Theme.faint;
+                                text: root.export-status;
+                                color: root.export-done ? Theme.success : Theme.record;
                                 font-size: Theme.font-small;
                                 wrap: word-wrap;
                                 vertical-alignment: center;
                             }
-                            if root.speed != 1: PillButton {
-                                horizontal-stretch: 0;
-                                text: "Reset";
-                                font-size: Theme.font-small;
-                                clicked => { root.speed = 1; root.speed-changed(); }
+                            if root.export-done: PillButton {
+                                text: "Show";
+                                clicked => { root.reveal-export(); }
                             }
-                        }
-                    }
-
-                    Rectangle { vertical-stretch: 1; }
-
-                    SectionLabel { text: "EXPORT"; }
-                    ComboBox {
-                        model: ["MP4 (H.264)", "WebM (VP9)", "WebM (AV1)", "GIF"];
-                        current-index <=> root.export-format;
-                        enabled: !root.exporting;
-                    }
-                    ComboBox {
-                        model: ["Original size", "1080p", "720p"];
-                        current-index <=> root.export-resolution;
-                        enabled: !root.exporting && root.export-format != 3;
-                    }
-                    if root.exporting: VerticalLayout {
-                        spacing: 6px;
-                        ProgressIndicator { progress: root.export-progress; }
-                        HorizontalLayout {
-                            Text { text: root.export-status; color: Theme.muted; font-size: Theme.font-small; vertical-alignment: center; }
-                            PillButton { text: "Cancel"; clicked => { root.cancel-export(); } }
-                        }
-                    }
-                    if !root.exporting: PillButton {
-                        primary: true;
-                        text: "Export";
-                        icon: Icons.export;
-                        clicked => { root.export(); }
-                    }
-                    if !root.exporting && root.export-status != "": HorizontalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: root.export-status;
-                            color: root.export-done ? Theme.success : Theme.record;
-                            font-size: Theme.font-small;
-                            wrap: word-wrap;
-                            vertical-alignment: center;
-                        }
-                        if root.export-done: PillButton {
-                            text: "Show";
-                            clicked => { root.reveal-export(); }
                         }
                     }
                 }
