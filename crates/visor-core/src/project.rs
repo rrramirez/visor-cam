@@ -85,6 +85,13 @@ pub struct Project {
     pub edit: EditList,
     #[serde(default)]
     pub camera_overlay: CameraOverlay,
+    /// Playback speed of the whole video (0.5–2.0), applied after the edit.
+    #[serde(default = "speed_default")]
+    pub speed: f64,
+}
+
+fn speed_default() -> f64 {
+    1.0
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,7 +118,13 @@ impl Project {
             tracks: Tracks::default(),
             edit: EditList::full(duration_us),
             camera_overlay: CameraOverlay::default(),
+            speed: 1.0,
         }
+    }
+
+    /// Length of the exported video: the kept time, sped up or slowed down.
+    pub fn output_duration(&self) -> Micros {
+        (self.edit.duration() as f64 / self.speed.max(0.01)).round() as Micros
     }
 
     pub fn load(dir: &Path) -> Result<Self, ProjectError> {

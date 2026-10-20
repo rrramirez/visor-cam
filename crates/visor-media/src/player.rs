@@ -24,6 +24,7 @@ use visor_core::{EditList, Micros, Project};
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::decode::{AudioReader, VideoReader};
+use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
 /// An RGBA image ready for the UI.
@@ -57,6 +58,8 @@ enum Cmd {
     Pause,
     Seek(Micros),
     SetEdit(EditList),
+    /// The clock already runs at the new speed; restart audio stretching.
+    SetSpeed(f64),
 }
 
 #[derive(Default)]
@@ -74,6 +77,7 @@ pub struct Player {
     video_tx: Sender<Cmd>,
     audio_tx: Option<Sender<Cmd>>,
     shared: Arc<Shared>,
+    clock: Arc<Mutex<Clock>>,
     seen_generation: u64,
     edit: EditList,
     duration: Micros,
@@ -120,7 +124,8 @@ impl Player {
             .collect();
 
         let shared = Arc::new(Shared::default());
-        let clock = Arc::new(Mutex::new(Clock::paused(0)));
+        let speed = project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
+        let clock = Arc::new(Mutex::new(Clock::paused(0, speed)));
         let edit = project.edit.clone();
 
         let (video_tx, video_rx) = unbounded();
@@ -154,6 +159,7 @@ impl Player {
             video_tx,
             audio_tx,
             shared,
+            clock,
             seen_generation: 0,
             duration: project.duration_us,
             edit,
@@ -210,6 +216,16 @@ impl Player {
         self.seek(pos);
     }
 
+    /// Plays at `speed` (0.5–2.0) from now on, audio pitch unchanged.
+    pub fn set_speed(&mut self, speed: f64) {
+        let speed = speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
+        {
+            let mut c = self.clock.lock().unwrap();
+            *c = c.rebased(c.now(), speed);
+        }
+        self.send(Cmd::SetSpeed(speed));
+    }
+
     /// Current source position.
     pub fn position(&self) -> Micros {
         self.shared.position.load(Ordering::Relaxed)
@@ -238,6 +254,7 @@ impl Player {
                 Cmd::Pause => Cmd::Pause,
                 Cmd::Seek(t) => Cmd::Seek(*t),
                 Cmd::SetEdit(e) => Cmd::SetEdit(e.clone()),
+                Cmd::SetSpeed(s) => Cmd::SetSpeed(*s),
             });
         }
         let _ = self.video_tx.send(cmd);
@@ -265,26 +282,46 @@ fn snap_to_kept(edit: &EditList, t: Micros) -> Micros {
         .unwrap_or(0)
 }
 
-/// Shared playback clock in *output* time.
+/// Shared playback clock in *output* time (after cuts, before speed), which
+/// advances `speed` times as fast as the wall clock.
 #[derive(Clone, Copy)]
 struct Clock {
     base: Micros,
     started: Option<Instant>,
+    speed: f64,
 }
 
 impl Clock {
-    fn paused(at: Micros) -> Self {
+    fn paused(at: Micros, speed: f64) -> Self {
         Self {
             base: at,
             started: None,
+            speed,
+        }
+    }
+
+    fn running(at: Micros, speed: f64) -> Self {
+        Self {
+            base: at,
+            started: Some(Instant::now()),
+            speed,
+        }
+    }
+
+    /// The same clock (running or paused) from `at`, at `speed`.
+    fn rebased(&self, at: Micros, speed: f64) -> Self {
+        if self.started.is_some() {
+            Self::running(at, speed)
+        } else {
+            Self::paused(at, speed)
         }
     }
 
     fn now(&self) -> Micros {
         self.base
-            + self
-                .started
-                .map_or(0, |s| s.elapsed().as_micros() as Micros)
+            + self.started.map_or(0, |s| {
+                (s.elapsed().as_micros() as f64 * self.speed) as Micros
+            })
     }
 }
 
@@ -317,27 +354,24 @@ fn video_loop(
                 Cmd::Play => {
                     let src = shared.position.load(Ordering::Relaxed);
                     let out = edit.to_output(src).unwrap_or(0);
-                    *clock.lock().unwrap() = Clock {
-                        base: out,
-                        started: Some(Instant::now()),
-                    };
+                    let mut c = clock.lock().unwrap();
+                    *c = Clock::running(out, c.speed);
                     playing = true;
                 }
                 Cmd::Pause => {
                     playing = false;
-                    let out = clock.lock().unwrap().now();
-                    *clock.lock().unwrap() = Clock::paused(out);
+                    let mut c = clock.lock().unwrap();
+                    *c = Clock::paused(c.now(), c.speed);
                 }
                 Cmd::Seek(t) => {
                     let out = edit.to_output(t).unwrap_or(0);
                     let mut c = clock.lock().unwrap();
-                    *c = Clock {
-                        base: out,
-                        started: c.started.map(|_| Instant::now()),
-                    };
+                    *c = c.rebased(out, c.speed);
                     pending_render = Some(t);
                 }
                 Cmd::SetEdit(e) => edit = e,
+                // The Player rebased the shared clock already.
+                Cmd::SetSpeed(_) => {}
             }
             continue;
         }
@@ -350,7 +384,8 @@ fn video_loop(
                 playing = false;
                 shared.playing.store(false, Ordering::Relaxed);
                 let end = edit.ranges().last().map_or(0, |r| r.1.saturating_sub(1));
-                *clock.lock().unwrap() = Clock::paused(edit.duration());
+                let mut c = clock.lock().unwrap();
+                *c = Clock::paused(edit.duration(), c.speed);
                 end
             } else {
                 edit.to_source(out).unwrap_or(0)
@@ -424,6 +459,8 @@ fn audio_loop(
     stream.play()?;
 
     let mut map = SampleMap::new(&edit);
+    let mut tempo = Tempo::new(clock.lock().unwrap().speed)?;
+    let mut stretched = Vec::new();
     let mut playing = false;
     // Next output sample to queue.
     let mut cursor = 0i64;
@@ -446,7 +483,9 @@ fn audio_loop(
         match cmd {
             Some(Cmd::Play) => {
                 ring.lock().unwrap().clear();
-                cursor = micros_to_samples(clock.lock().unwrap().now());
+                let c = *clock.lock().unwrap();
+                cursor = micros_to_samples(c.now());
+                tempo = Tempo::new(c.speed)?;
                 playing = true;
             }
             Some(Cmd::Pause) => {
@@ -456,6 +495,12 @@ fn audio_loop(
             Some(Cmd::Seek(t)) => {
                 ring.lock().unwrap().clear();
                 cursor = micros_to_samples(edit.to_output(t).unwrap_or(0));
+                tempo = Tempo::new(clock.lock().unwrap().speed)?;
+            }
+            Some(Cmd::SetSpeed(speed)) => {
+                ring.lock().unwrap().clear();
+                cursor = micros_to_samples(clock.lock().unwrap().now());
+                tempo = Tempo::new(speed)?;
             }
             Some(Cmd::SetEdit(e)) => {
                 edit = e;
@@ -469,14 +514,15 @@ fn audio_loop(
         while ring.lock().unwrap().len() < ahead && cursor < map.total {
             let chunk = 1_024i64.min(map.total - cursor);
             for (src, len) in map.pieces(cursor, chunk) {
-                let samples = mix.read(src, len)?;
+                stretched.clear();
+                tempo.process(&mix.read(src, len)?, &mut stretched)?;
                 match &mut resampler {
                     Some(r) => {
                         converted.clear();
-                        r.process(&samples, &mut converted)?;
+                        r.process(&stretched, &mut converted)?;
                         ring.lock().unwrap().extend(converted.iter().copied());
                     }
-                    None => ring.lock().unwrap().extend(samples),
+                    None => ring.lock().unwrap().extend(stretched.iter().copied()),
                 }
             }
             cursor += chunk;

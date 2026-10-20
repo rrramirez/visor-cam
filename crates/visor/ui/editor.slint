@@ -77,6 +77,9 @@ export component Editor inherits Window {
     in-out property <float> bubble-size: 0.2;
     // Selfie view, as the live bubble showed it while recording.
     in-out property <bool> bubble-mirror: true;
+    // Playback and export speed, 0.5–2.0.
+    in-out property <float> speed: 1.0;
+    in property <string> speed-label;
 
     in property <bool> playing;
     in property <float> position;
@@ -118,6 +121,7 @@ export component Editor inherits Window {
     callback redo();
     callback step(int);
     callback bubble-changed();
+    callback speed-changed();
     callback title-edited(string);
     callback export();
     callback cancel-export();
@@ -338,6 +342,46 @@ export component Editor inherits Window {
                                 maximum: 0.45;
                                 value <=> root.bubble-size;
                                 released => { root.bubble-changed(); }
+                            }
+                        }
+                    }
+
+                    SectionLabel { text: "SPEED"; }
+                    VerticalLayout {
+                        spacing: 6px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Slider {
+                                minimum: 0.5;
+                                maximum: 2.0;
+                                value <=> root.speed;
+                                // Snap to 0.05 steps.
+                                changed(v) => { root.speed = round(v * 20) / 20; }
+                                released => { root.speed-changed(); }
+                            }
+                            Text {
+                                width: 44px;
+                                text: (round(root.speed * 100) / 100) + "×";
+                                color: root.speed == 1 ? Theme.muted : Theme.text;
+                                font-weight: 600;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.speed-label;
+                                color: Theme.faint;
+                                font-size: Theme.font-small;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                            if root.speed != 1: PillButton {
+                                horizontal-stretch: 0;
+                                text: "Reset";
+                                font-size: Theme.font-small;
+                                clicked => { root.speed = 1; root.speed-changed(); }
                             }
                         }
                     }

@@ -63,6 +63,7 @@ impl EditorWindow {
         ui.set_bubble_y(o.y as f32);
         ui.set_bubble_size(o.size as f32);
         ui.set_bubble_mirror(o.mirror);
+        ui.set_speed(project.speed as f32);
         ui.set_export_format(default_format.clamp(0, 3));
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
@@ -177,6 +178,13 @@ impl EditorWindow {
                 o.mirror = e.ui.get_bubble_mirror();
             }
             e.save();
+        });
+        on!(on_speed_changed, |e| {
+            let speed = f64::from(e.ui.get_speed()).clamp(0.5, 2.0);
+            e.project.borrow_mut().speed = speed;
+            e.player.borrow_mut().set_speed(speed);
+            e.save();
+            e.refresh_edit_ui();
         });
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
@@ -321,6 +329,17 @@ impl EditorWindow {
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
         self.ui
             .set_edited(project.edit != EditList::full(project.duration_us));
+        let kept = project.edit.duration();
+        let speed_label = if (project.speed - 1.0).abs() < 1e-6 {
+            format!("Normal speed, {}", util::clock(kept))
+        } else {
+            format!(
+                "Exports at {} instead of {}",
+                util::clock(project.output_duration()),
+                util::clock(kept)
+            )
+        };
+        self.ui.set_speed_label(speed_label.into());
         drop(project);
         self.ui.set_kept_label(self.kept_label().into());
     }
@@ -360,13 +379,18 @@ impl EditorWindow {
         self.ui.set_playing(playing);
         self.ui
             .set_position((pos as f64 / self.duration() as f64) as f32);
-        let edit = self.project.borrow().edit.clone();
+        let (edit, speed) = {
+            let p = self.project.borrow();
+            (p.edit.clone(), p.speed)
+        };
+        // Times as they will be in the export, after cuts and speed.
         let out = edit.to_output(pos).unwrap_or_else(|| edit.duration());
+        let sped = |t: Micros| (t as f64 / speed) as Micros;
         self.ui.set_time_label(
             format!(
                 "{} / {}",
-                util::clock_tenths(out),
-                util::clock_tenths(edit.duration())
+                util::clock_tenths(sped(out)),
+                util::clock_tenths(sped(edit.duration()))
             )
             .into(),
         );
@@ -514,7 +538,7 @@ impl EditorWindow {
                 if let Ok(meta) = std::fs::metadata(&job.out) {
                     detail.push(util::file_size(meta.len()));
                 }
-                detail.push(util::clock(self.project.borrow().edit.duration()));
+                detail.push(util::clock(self.project.borrow().output_duration()));
                 self.ui.set_export_done(true);
                 self.ui.set_export_status(format!("Saved {name}").into());
                 self.ui.set_export_name(name.into());

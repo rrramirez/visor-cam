@@ -129,3 +129,46 @@ fn exports_gif_and_honours_cancel() {
     assert!(!cancelled.exists(), "partial file must be removed");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn exports_sped_up_video_and_audio() {
+    let (dir, mut project) = project("export-speed", 6);
+    project.edit.cut(1_000_000, 2_000_000);
+    project.speed = 1.5;
+    let out = dir.join("fast.mp4");
+    export(
+        &dir,
+        &project,
+        &out,
+        &ExportOptions::new(ExportFormat::Mp4),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    // 5 s kept, at 1.5x.
+    let (duration, _) = probe(&out);
+    assert!((duration - 5.0 / 1.5).abs() < 0.08, "duration {duration}");
+    let input = ffmpeg::format::input(&out).unwrap();
+    for s in input.streams() {
+        let secs = s.duration() as f64 * f64::from(s.time_base());
+        assert!(
+            (secs - 5.0 / 1.5).abs() < 0.1,
+            "{:?} lasts {secs}",
+            s.parameters().id()
+        );
+    }
+
+    // Output 2.0 s is edit 3.0 s, which is source 4.0 s (frame 120).
+    let mut reader =
+        VideoReader::open(&out, Some((ffmpeg::format::Pixel::YUV420P, 640, 360))).unwrap();
+    reader.seek(2_000_000).unwrap();
+    let (_, f) = reader.frame_at(2_000_000).unwrap().unwrap();
+    let expected = f64::from(luma(120));
+    assert!(
+        (top_luma(&f) - expected).abs() < 8.0,
+        "{} vs {expected}",
+        top_luma(&f)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

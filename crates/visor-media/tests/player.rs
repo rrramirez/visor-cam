@@ -87,3 +87,30 @@ fn builds_thumbnails_and_waveform() {
     assert!(wave.iter().all(|&p| (0.3..0.5).contains(&p)), "{wave:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn plays_at_the_project_speed() {
+    let (dir, mut project) = project("player-speed", 4);
+    project.tracks.mic = None;
+    project.tracks.system = None;
+    project.speed = 2.0;
+
+    let mut player = Player::open(&dir, &project, (320, 180), 120).unwrap();
+    wait_frame(&mut player);
+    player.play();
+    std::thread::sleep(Duration::from_millis(500));
+    // 0.5 s at 2x covers 1 s of the recording.
+    let pos = player.position();
+    assert!((850_000..1_250_000).contains(&pos), "position {pos} at 2x");
+
+    // Changing speed mid-play continues from where it is.
+    player.set_speed(0.5);
+    let at = player.position();
+    std::thread::sleep(Duration::from_millis(400));
+    let advanced = player.position() - at;
+    assert!(
+        (120_000..320_000).contains(&advanced),
+        "advanced {advanced} at 0.5x"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

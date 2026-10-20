@@ -19,6 +19,7 @@ use visor_core::{EditList, Micros, Project};
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::composite::Bubble;
 use crate::decode::{AudioReader, VideoReader};
+use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,11 +137,15 @@ fn run(
         (!tracks.is_empty()).then(|| AudioMix::new(tracks))
     };
 
-    let total_frames = (u128::from(edit.duration()) * u128::from(fps)).div_ceil(1_000_000) as u64;
-    let frame_us = |k: u64| (u128::from(k) * 1_000_000 / u128::from(fps)) as Micros;
+    let speed = project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
+    let total_frames =
+        (u128::from(project.output_duration()) * u128::from(fps)).div_ceil(1_000_000) as u64;
+    // Edit (cut-aware, before speed) time at the end of output frame `k`.
+    let edit_us = |k: u64| (k as f64 * 1e6 / f64::from(fps) * speed) as Micros;
     let mut renderer = Renderer {
         edit,
         fps,
+        speed,
         screen,
         camera,
     };
@@ -188,27 +193,35 @@ fn run(
 
     let mut muxer = Muxer::new(out, opts.format, out_w, out_h, fps, audio.is_some())?;
     let segments = SampleMap::new(edit);
-    let mut audio_written = 0i64;
+    let mut tempo = Tempo::new(speed)?;
+    let mut stretched = Vec::new();
+    // Edit-time samples read so far (before the speed change).
+    let mut audio_read = 0i64;
     for k in 0..total_frames {
         check(cancel)?;
         muxer.video(&renderer.render(k)?)?;
         if let Some(mix) = &mut audio {
-            // Audio up to the end of this frame, in output samples.
-            let end = (segments.total.min(micros_to_samples(frame_us(k + 1)))).max(audio_written);
-            for (src, len) in segments.pieces(audio_written, end - audio_written) {
-                let samples = mix.read(src, len)?;
-                muxer.audio(&samples)?;
+            // Audio through the end of this frame.
+            let end = segments
+                .total
+                .min(micros_to_samples(edit_us(k + 1)))
+                .max(audio_read);
+            for (src, len) in segments.pieces(audio_read, end - audio_read) {
+                stretched.clear();
+                tempo.process(&mix.read(src, len)?, &mut stretched)?;
+                muxer.audio(&stretched)?;
             }
-            audio_written = end;
+            audio_read = end;
         }
         progress((k + 1) as f32 / total_frames as f32);
     }
-    if let Some(mix) = &mut audio
-        && audio_written < segments.total
-    {
-        for (src, len) in segments.pieces(audio_written, segments.total - audio_written) {
-            muxer.audio(&mix.read(src, len)?)?;
+    if let Some(mix) = &mut audio {
+        stretched.clear();
+        for (src, len) in segments.pieces(audio_read, segments.total - audio_read) {
+            tempo.process(&mix.read(src, len)?, &mut stretched)?;
         }
+        tempo.flush(&mut stretched)?;
+        muxer.audio(&stretched)?;
     }
     muxer.finish()
 }
@@ -217,6 +230,7 @@ fn run(
 struct Renderer<'a> {
     edit: &'a EditList,
     fps: u32,
+    speed: f64,
     screen: FrameCursor,
     camera: Option<(FrameCursor, Bubble)>,
 }
@@ -224,7 +238,8 @@ struct Renderer<'a> {
 impl Renderer<'_> {
     /// Output frame `k`, stamped with pts `k`.
     fn render(&mut self, k: u64) -> anyhow::Result<frame::Video> {
-        let t_out = (u128::from(k) * 1_000_000 / u128::from(self.fps)) as Micros;
+        // Output frame time, sped up or slowed down into edit time.
+        let t_out = (k as f64 * 1e6 / f64::from(self.fps) * self.speed) as Micros;
         let t_src = self
             .edit
             .to_source(t_out)

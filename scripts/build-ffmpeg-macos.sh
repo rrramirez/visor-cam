@@ -82,7 +82,7 @@ PKG_CONFIG_PATH="$static/lib/pkgconfig" PKG_CONFIG_LIBDIR="$static/lib/pkgconfig
     --enable-parser=h264,aac,vp9,opus,av1 \
     --enable-hwaccel=h264_videotoolbox \
     --enable-bsfs \
-    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,null,anull,palettegen,paletteuse,split \
+    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
     --enable-swscale --enable-swresample \
     --extra-ldflags="-Wl,-headerpad_max_install_names" \
     --install-name-dir='@rpath'

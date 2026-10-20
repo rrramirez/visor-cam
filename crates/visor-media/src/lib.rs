@@ -9,12 +9,14 @@ pub mod player;
 pub mod preview;
 pub mod recover;
 mod resample;
+pub mod tempo;
 mod timeline;
 mod writer;
 
 pub use audio_writer::AudioWriter;
 pub use export::{ExportFormat, ExportOptions, export};
 pub use resample::Resampler;
+pub use tempo::Tempo;
 pub use writer::VideoWriter;
 
 /// Initializes FFmpeg and limits its console logging to errors.

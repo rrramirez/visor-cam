@@ -33,6 +33,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
+   - **Speed** (0.5×–2×) speeds up or slows down the whole video; speech
+     keeps its pitch. The preview plays at that speed.
    - Drag, resize, reshape, mirror or hide the camera bubble. It starts where
      it was on screen while recording, mirrored as you saw it.
    - **Export** to MP4, WebM (VP9 or AV1) or GIF, at original size, 1080p or
