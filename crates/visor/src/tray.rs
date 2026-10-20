@@ -132,24 +132,33 @@ impl Tray {
     }
 }
 
-/// A 44x44 icon: a ring with a dot (a black template on macOS, which adapts
-/// to the menu bar; red elsewhere, visible on light and dark taskbars) or a
-/// solid red dot while recording.
+/// A 44x44 icon: the app's V with a dot above it (a black template on macOS,
+/// which adapts to the menu bar; red elsewhere, visible on light and dark
+/// taskbars) or a solid red dot while recording.
 fn icon(recording: bool) -> anyhow::Result<Icon> {
     const S: usize = 44;
+    // V arms from the top corners to the bottom point, and the dot, in pixels.
+    const LEFT: (f32, f32) = (9.0, 15.0);
+    const POINT: (f32, f32) = (22.0, 36.0);
+    const RIGHT: (f32, f32) = (35.0, 15.0);
+    const STROKE: f32 = 3.4;
+    const DOT: ((f32, f32), f32) = ((22.0, 12.0), 4.6);
+
     let mut rgba = vec![0u8; S * S * 4];
-    let c = S as f32 / 2.0;
     for y in 0..S {
         for x in 0..S {
-            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
-            let coverage = |inner: f32, outer: f32| {
-                ((outer - d + 0.5).clamp(0.0, 1.0)) * ((d - inner + 0.5).clamp(0.0, 1.0))
-            };
+            let p = (x as f32 + 0.5, y as f32 + 0.5);
+            // Signed distance to each shape's edge (negative inside), turned
+            // into anti-aliased coverage.
+            let cover = |dist: f32| (0.5 - dist).clamp(0.0, 1.0);
             let (alpha, color) = if recording {
-                (coverage(-1.0, 15.0), [255, 77, 94])
+                (cover(distance(p, (22.0, 22.0)) - 15.0), [255, 77, 94])
             } else {
+                let v = segment_distance(p, LEFT, POINT).min(segment_distance(p, POINT, RIGHT))
+                    - STROKE;
+                let dot = distance(p, DOT.0) - DOT.1;
                 (
-                    (coverage(13.0, 17.0) + coverage(-1.0, 8.0)).min(1.0),
+                    cover(v.min(dot)),
                     if cfg!(target_os = "macos") {
                         [0, 0, 0]
                     } else {
@@ -163,4 +172,15 @@ fn icon(recording: bool) -> anyhow::Result<Icon> {
         }
     }
     Ok(Icon::from_rgba(rgba, S as u32, S as u32)?)
+}
+
+fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    distance(p, (a.0 + t * dx, a.1 + t * dy))
 }
