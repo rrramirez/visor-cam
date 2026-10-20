@@ -30,9 +30,18 @@ const INPUT_FORMAT: &str = "dshow";
 #[cfg(all(unix, not(target_os = "macos")))]
 const INPUT_FORMAT: &str = "v4l2";
 
-/// Preferred capture mode; cameras that reject it are opened with defaults.
-const WIDTH: u32 = 1280;
-const HEIGHT: u32 = 720;
+/// Sizes to ask the camera for, best first. The bubble never needs more than
+/// 1080p, and a 4K camera feed costs ~9x the memory and encoding of 720p.
+const SIZES: [(u32, u32); 6] = [
+    (1280, 720),
+    (1920, 1080),
+    (1600, 900),
+    (960, 540),
+    (1280, 960),
+    (640, 480),
+];
+/// Larger camera frames are scaled down to fit this.
+const MAX_SIZE: (u32, u32) = (1920, 1080);
 const FPS: u32 = 30;
 
 pub fn list() -> Vec<CameraDevice> {
@@ -139,10 +148,10 @@ impl CameraStream {
         let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
             .decoder()
             .video()?;
-        let size = (decoder.width() & !1, decoder.height() & !1);
-        if size.0 == 0 || size.1 == 0 {
+        if decoder.width() < 2 || decoder.height() < 2 {
             anyhow::bail!("camera reported an empty frame size");
         }
+        let size = fit_within((decoder.width(), decoder.height()), MAX_SIZE);
 
         let tap = Tap::default();
         let stop = Arc::new(AtomicBool::new(false));
@@ -186,12 +195,13 @@ fn open_device(
 ) -> anyhow::Result<format::context::Input> {
     // SAFETY: `fmt` is a static AVInputFormat from av_find_input_format.
     let format = format::format::Format::Input(unsafe { format::Input::wrap(fmt as *mut _) });
-    let preferred = || {
+    let sized = |(w, h): (u32, u32), nv12: bool| {
         let mut d = Dictionary::new();
         d.set("framerate", &FPS.to_string());
-        d.set("video_size", &format!("{WIDTH}x{HEIGHT}"));
-        #[cfg(target_os = "macos")]
-        d.set("pixel_format", "nv12");
+        d.set("video_size", &format!("{w}x{h}"));
+        if nv12 && cfg!(target_os = "macos") {
+            d.set("pixel_format", "nv12");
+        }
         d
     };
     let rate_only = || {
@@ -199,8 +209,13 @@ fn open_device(
         d.set("framerate", &FPS.to_string());
         d
     };
+    let attempts = SIZES
+        .iter()
+        .map(|&s| sized(s, true))
+        .chain(SIZES.iter().map(|&s| sized(s, false)))
+        .chain([rate_only(), Dictionary::new()]);
     let mut last_err = None;
-    for opts in [preferred(), rate_only(), Dictionary::new()] {
+    for opts in attempts {
         match format::open_with(id, &format, opts) {
             Ok(ctx) => return Ok(ctx.input()),
             Err(e) => last_err = Some(e),
@@ -209,6 +224,16 @@ fn open_device(
     Err(anyhow!(
         "could not open camera {id:?}: {last_err:?} (is camera permission granted?)"
     ))
+}
+
+/// `size` scaled down (keeping its aspect) to fit `max`, with even sides.
+fn fit_within((w, h): (u32, u32), (max_w, max_h): (u32, u32)) -> (u32, u32) {
+    let scale = f64::min(
+        1.0,
+        f64::min(max_w as f64 / w as f64, max_h as f64 / h as f64),
+    );
+    let even = |v: f64| ((v.round() as u32) & !1).max(2);
+    (even(w as f64 * scale), even(h as f64 * scale))
 }
 
 fn read_loop(
@@ -232,9 +257,11 @@ fn read_loop(
     let mut anchor: Option<(i64, Micros)> = None;
 
     // Read packets directly: `Input::packets()` ends at the first EAGAIN,
-    // which capture devices return whenever no frame is ready yet.
-    let mut packet = ffmpeg::Packet::empty();
+    // which capture devices return whenever no frame is ready yet. Each read
+    // needs a fresh packet: av_read_frame overwrites a packet without
+    // freeing what it held, so reusing one leaks every frame.
     while !stop.load(Ordering::Relaxed) {
+        let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut input) {
             Ok(()) => {}
             Err(ffmpeg::Error::Other {
@@ -308,5 +335,18 @@ fn to_video_frame(f: &frame::Video, width: u32, height: u32, host_ts: Micros) ->
         height,
         format: PixelFormat::Nv12,
         planes: vec![plane(0, height as usize), plane(1, height as usize / 2)],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_within;
+
+    #[test]
+    fn large_camera_frames_are_scaled_to_fit() {
+        assert_eq!(fit_within((3840, 2160), (1920, 1080)), (1920, 1080));
+        assert_eq!(fit_within((4032, 3024), (1920, 1080)), (1440, 1080));
+        assert_eq!(fit_within((1280, 720), (1920, 1080)), (1280, 720));
+        assert_eq!(fit_within((641, 481), (1920, 1080)), (640, 480));
     }
 }

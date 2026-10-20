@@ -7,6 +7,7 @@ pub mod decode;
 pub mod export;
 pub mod player;
 pub mod preview;
+pub mod recover;
 mod resample;
 mod timeline;
 mod writer;

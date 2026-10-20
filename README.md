@@ -47,6 +47,15 @@ Command line: `visor --edit <recording folder>` opens a recording;
 preferences as soon as the saved camera is ready, optionally stopping after
 that many seconds of recorded time.
 
+## Troubleshooting
+
+- **Logs:** `~/Library/Logs/Visor/visor.log`. Crashes inside Visor (panics)
+  are written there with a backtrace; for crashes macOS reports, see
+  `~/Library/Logs/DiagnosticReports/visor-*.ips`.
+- **Interrupted recordings:** if Visor quits unexpectedly while recording,
+  the tracks are kept up to that point. The next time Visor starts it
+  recovers them, and the recording opens in the editor like any other.
+
 ## Building
 
 ### macOS

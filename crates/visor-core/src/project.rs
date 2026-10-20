@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::{EditList, Micros};
 
 pub const PROJECT_FILE: &str = "project.json";
+/// Track files inside a recording folder.
+pub const SCREEN_FILE: &str = "screen.mp4";
+pub const CAMERA_FILE: &str = "camera.mp4";
+pub const MIC_FILE: &str = "mic.m4a";
+pub const SYSTEM_FILE: &str = "system.m4a";
 pub const CURRENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

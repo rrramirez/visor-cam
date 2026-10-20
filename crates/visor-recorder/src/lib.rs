@@ -16,10 +16,7 @@ use visor_capture::{Backend, ScreenRequest, ScreenSession, SystemAudio, host_now
 use visor_core::{AudioBuffer, MediaClock, Micros, Project, RecordingConfig, Track, VideoFrame};
 use visor_media::{AudioWriter, VideoWriter};
 
-pub const SCREEN_FILE: &str = "screen.mp4";
-pub const CAMERA_FILE: &str = "camera.mp4";
-pub const MIC_FILE: &str = "mic.m4a";
-pub const SYSTEM_FILE: &str = "system.m4a";
+pub use visor_core::project::{CAMERA_FILE, MIC_FILE, SCREEN_FILE, SYSTEM_FILE};
 
 /// How long to keep draining queued buffers after stop.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -158,6 +155,11 @@ impl Recorder {
         }
         if let (Some(rx), Some(writer)) = (session.audio.clone(), system_writer) {
             workers.push(spawn_audio("system", rx, writer, clock.clone())?);
+        }
+        // Written now with no duration, so a recording interrupted by a crash
+        // can be found and recovered (see visor_media::recover).
+        if let Err(e) = project.save(&dir) {
+            tracing::warn!("could not write the project file: {e}");
         }
         tracing::info!(dir = %dir.display(), tracks = workers.len(), "recording started");
 

@@ -45,7 +45,7 @@ struct ExportJob {
 
 impl EditorWindow {
     pub fn open(dir: PathBuf, default_format: i32) -> anyhow::Result<Rc<Self>> {
-        let project = Project::load(&dir)?;
+        let project = visor_media::recover::load_or_recover(&dir)?;
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
 

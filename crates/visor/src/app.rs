@@ -142,6 +142,25 @@ impl App {
 
     // ---- tray -------------------------------------------------------------
 
+    /// Recovers recordings left unfinished by a crash, in the background.
+    /// Call at launch, before a recording can start: one in progress would
+    /// look unfinished too.
+    pub fn recover_interrupted(&self) {
+        let root = self.settings.borrow().save_dir.clone();
+        let dirs = visor_media::recover::find_interrupted(&root);
+        if dirs.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            for dir in dirs {
+                if let Err(e) = visor_media::recover::recover(&dir) {
+                    tracing::warn!("could not recover {}: {e:#}", dir.display());
+                }
+            }
+            post(|app| app.refresh_tray());
+        });
+    }
+
     pub fn create_tray(&self) {
         match Tray::new(&self.recent()) {
             Ok(tray) => *self.tray.borrow_mut() = Some(tray),

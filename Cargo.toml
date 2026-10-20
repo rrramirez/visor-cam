@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "9.0.0"
 
 [profile.release]
-# Smaller app bundle: strip symbols and let LTO drop unused code.
-strip = true
+# Smaller app bundle: drop debug info and let LTO drop unused code. Symbol
+# names stay so panic backtraces in the log name functions.
+strip = "debuginfo"
 lto = "thin"

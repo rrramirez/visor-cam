@@ -23,6 +23,7 @@ slint::include_modules!();
 
 fn main() -> anyhow::Result<()> {
     init_logging();
+    log_panics();
     visor_media::init()?;
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -43,6 +44,7 @@ fn main() -> anyhow::Result<()> {
 
     // The tray needs a running event loop on macOS.
     slint::Timer::single_shot(Duration::ZERO, move || {
+        app.recover_interrupted();
         app.create_tray();
         match args {
             Args::Edit(dir) => app.open_editor(dir),
@@ -123,6 +125,32 @@ fn parse_args() -> Args {
         }
     }
     parsed
+}
+
+/// Writes panics (any thread) to the log with a backtrace, so a crash in the
+/// app bundle, where stderr goes nowhere, leaves a trace.
+fn log_panics() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        tracing::error!(
+            thread = thread.name().unwrap_or("unnamed"),
+            %location,
+            "panic: {message}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        default_hook(info);
+    }));
 }
 
 /// Logs to stderr and to a file (`~/Library/Logs/Visor/visor.log` on macOS,
