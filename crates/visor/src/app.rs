@@ -54,6 +54,9 @@ pub struct App {
     editors: RefCell<Vec<Rc<EditorWindow>>>,
     prefs: RefCell<Option<Preferences>>,
     area_window: RefCell<Option<AreaSelector>>,
+    next_start_id: std::cell::Cell<u64>,
+    /// Quit once the recording being finalized is saved.
+    quit_pending: std::cell::Cell<bool>,
 }
 
 struct Panel {
@@ -86,6 +89,8 @@ enum Session {
     #[default]
     Idle,
     Starting {
+        /// Identifies this start so a late result from an abandoned one is ignored.
+        id: u64,
         countdown: Option<(Countdown, Timer)>,
         remaining: u32,
         recorder: Option<Recorder>,
@@ -111,6 +116,8 @@ impl App {
             editors: RefCell::default(),
             prefs: RefCell::default(),
             area_window: RefCell::default(),
+            next_start_id: std::cell::Cell::new(1),
+            quit_pending: std::cell::Cell::new(false),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
         app
@@ -179,23 +186,27 @@ impl App {
     }
 
     fn quit(&self) {
-        let recording = matches!(
-            &*self.session.borrow(),
-            Session::Recording { .. } | Session::Starting { .. }
-        );
-        if recording {
+        if matches!(*self.session.borrow(), Session::Stopping) {
+            // A recording is being finalized; quit once it's saved.
+            self.quit_pending.set(true);
+            return;
+        }
+        let session = std::mem::take(&mut *self.session.borrow_mut());
+        match session {
             // Finish the recording rather than losing it.
-            let session = std::mem::take(&mut *self.session.borrow_mut());
-            let recorder = match session {
-                Session::Recording { recorder, .. } => Some(recorder),
-                Session::Starting { recorder, .. } => recorder,
-                _ => None,
-            };
-            if let Some(r) = recorder
-                && let Err(e) = r.stop()
-            {
-                tracing::error!("saving the recording on quit failed: {e:#}");
+            Session::Recording { recorder, .. } => {
+                if let Err(e) = recorder.stop() {
+                    tracing::error!("saving the recording on quit failed: {e:#}");
+                }
             }
+            // Nothing was recorded yet.
+            Session::Starting {
+                recorder: Some(recorder),
+                ..
+            } => {
+                let _ = recorder.discard();
+            }
+            _ => {}
         }
         let _ = slint::quit_event_loop();
     }
@@ -206,8 +217,14 @@ impl App {
         if !matches!(*self.session.borrow(), Session::Idle) {
             return;
         }
-        if let Some(panel) = &*self.panel.borrow() {
-            let _ = panel.ui.show();
+        let existing = self.panel.borrow().as_ref().map(|p| p.ui.clone_strong());
+        if let Some(ui) = existing {
+            // Devices are released after each recording and when the panel
+            // closes; reopen the chosen ones.
+            self.refresh_sources();
+            self.restore_device_choices();
+            ui.set_busy(false);
+            let _ = ui.show();
             platform::activate();
             return;
         }
@@ -273,7 +290,11 @@ impl App {
             app.update_hint();
         });
         ui.on_select_area(|| app().select_area());
-        ui.on_refresh(|| app().refresh_sources());
+        ui.on_refresh(|| {
+            let app = app();
+            app.refresh_sources();
+            app.restore_device_choices();
+        });
         ui.on_camera_changed(|i| app().choose_camera(i as usize));
         ui.on_mic_changed(|i| app().choose_mic(i as usize));
         ui.on_start(|| app().start_recording());
@@ -476,8 +497,10 @@ impl App {
     }
 
     fn on_camera_opened(&self, id: String, result: anyhow::Result<CameraStream>) {
-        if self.devices.borrow().camera_pending.as_deref() != Some(id.as_str()) {
-            return; // A different camera was chosen meanwhile.
+        if self.devices.borrow().camera_pending.as_deref() != Some(id.as_str())
+            || !matches!(*self.session.borrow(), Session::Idle)
+        {
+            return; // A different camera was chosen, or recording began, meanwhile.
         }
         self.devices.borrow_mut().camera_pending = None;
         match result {
@@ -573,8 +596,16 @@ impl App {
                     request(kind, move |granted| {
                         let retry = retry.lock().unwrap().take();
                         post(move |app| {
+                            let panel_open = app
+                                .panel
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|p| p.ui.window().is_visible());
                             if granted {
-                                if let Some(retry) = retry {
+                                if let Some(retry) = retry
+                                    && panel_open
+                                    && matches!(*app.session.borrow(), Session::Idle)
+                                {
                                     retry(app);
                                 }
                             } else {
@@ -682,9 +713,12 @@ impl App {
 
     // ---- recording session --------------------------------------------------
 
-    fn start_recording(&self) {
+    pub fn start_recording(&self) {
         if !matches!(*self.session.borrow(), Session::Idle) {
             return;
+        }
+        if self.devices.borrow().camera_pending.is_some() {
+            return self.set_panel_error("The camera is still starting; try again in a moment.");
         }
         let built = self.build_config();
         let (config, display) = match built {
@@ -727,9 +761,11 @@ impl App {
             exclude_self: true,
             start_paused: true,
         };
+        let id = self.next_start_id.get();
+        self.next_start_id.set(id + 1);
         std::thread::spawn(move || {
             let result = Recorder::start(backend.as_ref(), options);
-            post(move |app| app.on_recorder_ready(result));
+            post(move |app| app.on_recorder_ready(id, result));
         });
 
         let secs = self.settings.borrow().countdown_secs;
@@ -737,8 +773,9 @@ impl App {
             .then(|| self.show_countdown(&display, secs))
             .flatten();
         *self.session.borrow_mut() = Session::Starting {
+            id,
+            remaining: if countdown.is_some() { secs } else { 0 },
             countdown,
-            remaining: secs,
             recorder: None,
             display,
         };
@@ -863,42 +900,56 @@ impl App {
         }
     }
 
-    fn on_recorder_ready(&self, result: anyhow::Result<Recorder>) {
+    fn on_recorder_ready(&self, start_id: u64, result: anyhow::Result<Recorder>) {
+        let current =
+            matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
+        if !current {
+            // This start was cancelled; throw away what it created.
+            if let Ok(r) = result {
+                discard_in_background(r);
+            }
+            return;
+        }
+        let recorder = match result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("could not start recording: {e:#}");
+                if let Session::Starting {
+                    countdown: Some((ui, _)),
+                    ..
+                } = std::mem::take(&mut *self.session.borrow_mut())
+                {
+                    let _ = ui.hide();
+                }
+                self.return_to_panel(Some(&format!("Could not start recording: {e:#}")));
+                return;
+            }
+        };
         let ready = {
             let mut session = self.session.borrow_mut();
             let Session::Starting {
-                recorder,
+                recorder: slot,
                 remaining,
                 ..
             } = &mut *session
             else {
-                // Session was abandoned meanwhile; discard what was started.
-                if let Ok(r) = result {
-                    let _ = r.discard();
-                }
                 return;
             };
-            match result {
-                Ok(r) => {
-                    *recorder = Some(r);
-                    *remaining == 0
-                }
-                Err(e) => {
-                    drop(session);
-                    *self.session.borrow_mut() = Session::Idle;
-                    tracing::error!("could not start recording: {e:#}");
-                    if let Some(p) = &*self.panel.borrow() {
-                        p.ui.set_busy(false);
-                        p.ui.set_error(format!("Could not start recording: {e:#}").into());
-                        let _ = p.ui.show();
-                    }
-                    self.refresh_tray();
-                    return;
-                }
-            }
+            *slot = Some(recorder);
+            *remaining == 0
         };
         if ready {
             self.begin_recording();
+        }
+    }
+
+    /// Back to Idle with the panel showing, e.g. after a cancelled start.
+    fn return_to_panel(&self, error: Option<&str>) {
+        *self.session.borrow_mut() = Session::Idle;
+        self.refresh_tray();
+        self.open_panel();
+        if let Some(e) = error {
+            self.set_panel_error(e);
         }
     }
 
@@ -968,7 +1019,7 @@ impl App {
         self.refresh_tray();
     }
 
-    fn stop_recording(&self, discard: bool) {
+    pub fn stop_recording(&self, discard: bool) {
         let session = std::mem::replace(&mut *self.session.borrow_mut(), Session::Stopping);
         let recorder = match session {
             Session::Recording { recorder, bar, .. } => {
@@ -980,17 +1031,16 @@ impl App {
                 countdown,
                 ..
             } => {
+                // Nothing has been recorded yet: cancel and go back to the panel.
                 if let Some((ui, _)) = countdown {
                     let _ = ui.hide();
                 }
-                match recorder {
-                    Some(r) => r,
-                    None => {
-                        // Still starting; on_recorder_ready will discard it.
-                        *self.session.borrow_mut() = Session::Idle;
-                        return;
-                    }
+                if let Some(r) = recorder {
+                    discard_in_background(r);
                 }
+                // A recorder still starting is discarded by on_recorder_ready.
+                self.return_to_panel(None);
+                return;
             }
             other => {
                 *self.session.borrow_mut() = other;
@@ -1013,6 +1063,12 @@ impl App {
 
     fn on_stopped(&self, result: anyhow::Result<PathBuf>) {
         *self.session.borrow_mut() = Session::Idle;
+        if self.quit_pending.get() {
+            if let Err(e) = &result {
+                tracing::error!("finishing the recording failed: {e:#}");
+            }
+            return self.quit();
+        }
         self.refresh_tray();
         match result {
             Ok(dir) => self.open_editor(dir),
@@ -1025,13 +1081,14 @@ impl App {
     }
 
     fn on_discarded(&self, result: anyhow::Result<()>) {
-        *self.session.borrow_mut() = Session::Idle;
-        self.refresh_tray();
         if let Err(e) = result {
             tracing::warn!("discarding the recording failed: {e:#}");
         }
-        self.open_panel();
-        self.restore_device_choices();
+        if self.quit_pending.get() {
+            *self.session.borrow_mut() = Session::Idle;
+            return self.quit();
+        }
+        self.return_to_panel(None);
     }
 
     // ---- editor & preferences ---------------------------------------------
@@ -1139,6 +1196,15 @@ impl App {
 enum Permission {
     Camera,
     Microphone,
+}
+
+/// Discards a recorder without blocking the UI thread on its writer threads.
+fn discard_in_background(recorder: Recorder) {
+    std::thread::spawn(move || {
+        if let Err(e) = recorder.discard() {
+            tracing::warn!("discarding an abandoned recording failed: {e:#}");
+        }
+    });
 }
 
 fn strings(items: impl Iterator<Item = String>) -> ModelRc<SharedString> {

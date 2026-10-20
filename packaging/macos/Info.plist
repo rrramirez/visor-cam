@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Visor</string>
+    <key>CFBundleDisplayName</key>
+    <string>Visor</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.visor.Visor</string>
+    <key>CFBundleExecutable</key>
+    <string>visor</string>
+    <key>CFBundleIconFile</key>
+    <string>Visor</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Visor records your camera alongside the screen when you choose a camera.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Visor records your microphone alongside the screen when you choose a microphone.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Visor is free software, licensed under the GNU GPL v3 or later.</string>
+</dict>
+</plist>

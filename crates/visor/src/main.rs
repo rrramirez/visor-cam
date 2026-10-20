@@ -1,7 +1,11 @@
 //! Visor: an offline screen recorder.
 //!
-//! Usage: `visor` starts in the menu bar and opens the recorder panel;
-//! `visor --edit <project-folder>` opens a recording in the editor.
+//! Usage:
+//!   visor                         menu bar app; opens the recorder panel
+//!   visor --edit <folder>         open a recording in the editor
+//!   visor --record [--stop-after S]
+//!                                 start recording right away with the saved
+//!                                 preferences (optionally stopping after S s)
 
 mod app;
 mod editor;
@@ -34,37 +38,69 @@ fn main() -> anyhow::Result<()> {
     backend_selector.select()?;
 
     let app = app::App::install(visor_capture::backend()?);
-    let edit_dir = parse_args();
+    let args = parse_args();
 
     // The tray needs a running event loop on macOS.
     slint::Timer::single_shot(Duration::ZERO, move || {
         app.create_tray();
-        match edit_dir {
-            Some(dir) => app.open_editor(dir),
-            None => app.open_panel(),
+        match args {
+            Args::Edit(dir) => app.open_editor(dir),
+            Args::Record { stop_after } => {
+                app.open_panel();
+                app.start_recording();
+                if let Some(secs) = stop_after {
+                    let countdown = u64::from(app.settings.borrow().countdown_secs);
+                    slint::Timer::single_shot(Duration::from_secs(secs + countdown + 1), || {
+                        app::app().stop_recording(false);
+                    });
+                }
+            }
+            Args::Panel => app.open_panel(),
         }
     });
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
 
-fn parse_args() -> Option<PathBuf> {
+enum Args {
+    Panel,
+    Edit(PathBuf),
+    Record { stop_after: Option<u64> },
+}
+
+fn parse_args() -> Args {
+    let mut parsed = Args::Panel;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--edit" => return args.next().map(PathBuf::from),
+            "--edit" => {
+                if let Some(dir) = args.next() {
+                    parsed = Args::Edit(PathBuf::from(dir));
+                }
+            }
+            "--record" => {
+                if !matches!(parsed, Args::Record { .. }) {
+                    parsed = Args::Record { stop_after: None };
+                }
+            }
+            "--stop-after" => {
+                let secs = args.next().and_then(|s| s.parse().ok());
+                parsed = Args::Record { stop_after: secs };
+            }
             "--version" => {
                 println!("visor {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                println!("usage: visor [--edit <recording folder>]");
+                println!(
+                    "usage: visor [--edit <recording folder> | --record [--stop-after SECONDS]]"
+                );
                 std::process::exit(0);
             }
             _ => {}
         }
     }
-    None
+    parsed
 }
 
 /// Logs to stderr and to a file (`~/Library/Logs/Visor/visor.log` on macOS,

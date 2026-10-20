@@ -125,7 +125,12 @@ export component Editor inherits Window {
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
             if (event.text == Key.LeftArrow) { root.step(event.modifiers.shift ? -10 : -1); return accept; }
             if (event.text == Key.RightArrow) { root.step(event.modifiers.shift ? 10 : 1); return accept; }
-            if (event.text == Key.Escape) { root.sel-start = -1; root.sel-end = -1; return accept; }
+            if (event.text == Key.Escape) {
+                root.sel-start = -1;
+                root.sel-end = -1;
+                root.selection-changed(-1, -1);
+                return accept;
+            }
             if ((event.modifiers.meta || event.modifiers.control) && (event.text == "z" || event.text == "Z")) {
                 if (event.modifiers.shift) { root.redo(); } else { root.undo(); }
                 return accept;
@@ -468,6 +473,7 @@ export component Editor inherits Window {
                         if (event.kind == PointerEventKind.up && !self.dragging) {
                             root.sel-start = -1;
                             root.sel-end = -1;
+                            root.selection-changed(-1, -1);
                             root.seek(self.anchor);
                             keys.focus();
                         }

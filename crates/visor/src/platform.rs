@@ -17,7 +17,10 @@ pub enum Overlay {
 pub fn configure_overlay(window: &slint::Window, kind: Overlay) {
     window.with_winit_window(|w: &winit::window::Window| {
         // Hidden from screen capture (NSWindowSharingNone / WDA_EXCLUDEFROMCAPTURE).
-        w.set_content_protected(true);
+        // VISOR_DEBUG_UNPROTECTED=1 keeps overlays visible to screenshots.
+        if std::env::var_os("VISOR_DEBUG_UNPROTECTED").is_none() {
+            w.set_content_protected(true);
+        }
         w.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
         #[cfg(target_os = "macos")]
         macos::raise(w, kind);

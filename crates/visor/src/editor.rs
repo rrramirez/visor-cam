@@ -30,6 +30,7 @@ pub struct EditorWindow {
     undo: RefCell<Vec<EditList>>,
     redo: RefCell<Vec<EditList>>,
     export: RefCell<Option<ExportJob>>,
+    last_export: RefCell<Option<PathBuf>>,
     _timer: Timer,
 }
 
@@ -77,6 +78,7 @@ impl EditorWindow {
                 undo: RefCell::default(),
                 redo: RefCell::default(),
                 export: RefCell::default(),
+                last_export: RefCell::default(),
                 _timer: timer,
             }
         });
@@ -123,6 +125,7 @@ impl EditorWindow {
             if e.ui.get_sel_end() <= p {
                 e.ui.set_sel_end((p + 0.05).min(1.0));
             }
+            e.ui.set_kept_label(e.kept_label().into());
         });
         on!(on_set_out, |e| {
             let p = e.position_fraction();
@@ -130,6 +133,7 @@ impl EditorWindow {
                 e.ui.set_sel_start((p - 0.05).max(0.0));
             }
             e.ui.set_sel_end(p);
+            e.ui.set_kept_label(e.kept_label().into());
         });
         on!(on_cut_selection, |e| {
             if let Some((a, b)) = e.selection() {
@@ -182,10 +186,8 @@ impl EditorWindow {
             }
         });
         on!(on_reveal_export, |e| {
-            let out = e.ui.get_export_status();
-            let _ = out;
-            if let Some(path) = e.last_export() {
-                platform::reveal(&path);
+            if let Some(path) = &*e.last_export.borrow() {
+                platform::reveal(path);
             }
         });
         on!(on_reveal_project, |e| platform::reveal(
@@ -482,7 +484,7 @@ impl EditorWindow {
                     .into_owned();
                 self.ui.set_export_done(true);
                 self.ui.set_export_status(format!("Saved {name}").into());
-                *LAST_EXPORT.lock().unwrap() = Some((self.dir.clone(), job.out));
+                *self.last_export.borrow_mut() = Some(job.out);
             }
             Err(e) if job.cancel.load(Ordering::Relaxed) => {
                 tracing::info!("export cancelled: {e:#}");
@@ -497,19 +499,7 @@ impl EditorWindow {
             }
         }
     }
-
-    fn last_export(&self) -> Option<PathBuf> {
-        LAST_EXPORT
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(dir, _)| *dir == self.dir)
-            .map(|(_, out)| out.clone())
-    }
 }
-
-/// Most recent successful export per process (the editor shows one at a time).
-static LAST_EXPORT: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
 
 fn sanitize(title: &str) -> String {
     let cleaned: String = title
