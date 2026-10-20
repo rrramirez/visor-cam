@@ -10,6 +10,7 @@ pub struct Bubble {
     pub size: usize,
     pub x: usize,
     pub y: usize,
+    mirror: bool,
     mask: Vec<u8>,
 }
 
@@ -32,6 +33,7 @@ impl Bubble {
             size,
             x,
             y,
+            mirror: overlay.mirror,
             mask: mask(overlay.shape, size),
         })
     }
@@ -60,7 +62,8 @@ impl Bubble {
             let out = &mut dst_y[(self.y + r) * dst_stride + self.x..][..d];
             let m = &self.mask[r * d..][..d];
             for c in 0..d {
-                out[c] = mix(src[c], out[c], m[c]);
+                let s = if self.mirror { src[d - 1 - c] } else { src[c] };
+                out[c] = mix(s, out[c], m[c]);
             }
         }
 
@@ -79,7 +82,12 @@ impl Bubble {
                         + u16::from(self.mask[i + d])
                         + u16::from(self.mask[i + d + 1]))
                         / 4;
-                    out[c] = mix(src[c], out[c], a as u8);
+                    let s = if self.mirror {
+                        src[half - 1 - c]
+                    } else {
+                        src[c]
+                    };
+                    out[c] = mix(s, out[c], a as u8);
                 }
             }
         }
@@ -140,6 +148,7 @@ mod tests {
             x: 0.95,
             y: 0.95,
             size: 0.2,
+            mirror: true,
         };
         let b = Bubble::new(&overlay, 1920, 1080).unwrap();
         assert_eq!(b.size, 384);
@@ -161,6 +170,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             size: 0.5,
+            mirror: false,
         };
         let b = Bubble::new(&overlay, 64, 64).unwrap();
         let mut dst = frame::Video::new(format::Pixel::YUV420P, 64, 64);
@@ -175,5 +185,34 @@ mod tests {
         assert_eq!(y(&dst, 16, 16), 240, "bubble center");
         assert_eq!(y(&dst, 0, 0), 10, "outside circle corner");
         assert_eq!(y(&dst, 48, 48), 10, "outside bubble");
+    }
+
+    #[test]
+    fn mirror_flips_the_camera_horizontally() {
+        let left_of_bubble = |mirror: bool| {
+            let overlay = CameraOverlay {
+                visible: true,
+                shape: BubbleShape::Circle,
+                x: 0.0,
+                y: 0.0,
+                size: 0.5,
+                mirror,
+            };
+            let b = Bubble::new(&overlay, 64, 64).unwrap();
+            let mut dst = frame::Video::new(format::Pixel::YUV420P, 64, 64);
+            let (cw, ch) = b.camera_scale(64, 32);
+            let mut cam = frame::Video::new(format::Pixel::YUV420P, cw, ch);
+            // Camera: dark left half, bright right half.
+            let stride = cam.stride(0);
+            for r in 0..ch as usize {
+                for c in 0..cw as usize {
+                    cam.data_mut(0)[r * stride + c] = if c < cw as usize / 2 { 20 } else { 220 };
+                }
+            }
+            b.blend(&mut dst, &cam);
+            dst.data(0)[16 * dst.stride(0) + 8]
+        };
+        assert_eq!(left_of_bubble(false), 20);
+        assert_eq!(left_of_bubble(true), 220);
     }
 }

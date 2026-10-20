@@ -27,7 +27,9 @@ use crate::platform::{self, Overlay};
 use crate::settings::Settings;
 use crate::tray::{Action, Tray};
 use crate::util;
-use crate::{AreaSelector, CameraBubble, ControlBar, Countdown, Preferences, RecorderPanel};
+use crate::{
+    AreaSelector, CameraBubble, ControlBar, Countdown, Preferences, RecorderPanel, ScreenHighlight,
+};
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -55,6 +57,8 @@ pub struct App {
     editors: RefCell<Vec<Rc<EditorWindow>>>,
     prefs: RefCell<Option<Preferences>>,
     area_window: RefCell<Option<AreaSelector>>,
+    /// Border around the display chosen in the panel, with several displays.
+    screen_highlight: RefCell<Option<ScreenHighlight>>,
     next_start_id: std::cell::Cell<u64>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
@@ -121,6 +125,7 @@ impl App {
             editors: RefCell::default(),
             prefs: RefCell::default(),
             area_window: RefCell::default(),
+            screen_highlight: RefCell::default(),
             next_start_id: std::cell::Cell::new(1),
             quit_pending: std::cell::Cell::new(false),
         });
@@ -231,6 +236,7 @@ impl App {
             ui.set_busy(false);
             let _ = ui.show();
             platform::activate();
+            self.update_screen_highlight();
             return;
         }
         let ui = match RecorderPanel::new() {
@@ -278,6 +284,62 @@ impl App {
         }
         let _ = ui.show();
         platform::activate();
+        self.update_screen_highlight();
+    }
+
+    /// Outlines the display chosen in the panel while it is open in Screen
+    /// mode, so it's clear which one will be recorded. Only with several
+    /// displays; hidden otherwise.
+    fn update_screen_highlight(&self) {
+        let target = {
+            let panel = self.panel.borrow();
+            panel.as_ref().and_then(|p| {
+                let choosing = p.ui.window().is_visible()
+                    && p.ui.get_mode() == 0
+                    && matches!(*self.session.borrow(), Session::Idle)
+                    && p.sources.displays.len() > 1;
+                choosing
+                    .then(|| usize::try_from(p.ui.get_display_index()).ok())
+                    .flatten()
+                    .and_then(|i| p.sources.displays.get(i).cloned())
+            })
+        };
+        let Some(display) = target else {
+            if let Some(h) = self.screen_highlight.borrow_mut().take() {
+                let _ = h.hide();
+            }
+            return;
+        };
+        let existing = self
+            .screen_highlight
+            .borrow()
+            .as_ref()
+            .map(|h| h.clone_strong());
+        let created = existing.is_none();
+        let Some(ui) = existing.or_else(|| ScreenHighlight::new().ok()) else {
+            return;
+        };
+        ui.set_display_name(display.name.clone().into());
+        ui.set_display_width(display.frame.width as f32);
+        ui.set_display_height(display.frame.height as f32);
+        if created {
+            let _ = ui.show();
+            platform::configure_overlay(&ui, Overlay::Shield);
+            // Keep keyboard focus in the panel.
+            if let Some(p) = &*self.panel.borrow() {
+                platform::focus(p.ui.window());
+            }
+        }
+        platform::set_frame(ui.window(), display.frame);
+        platform::set_click_through(ui.window());
+        if created {
+            *self.screen_highlight.borrow_mut() = Some(ui);
+            // The native window appears only once the event loop runs, so
+            // place it again then.
+            slint::Timer::single_shot(platform::OVERLAY_SETTLE * 2, || {
+                app().update_screen_highlight()
+            });
+        }
     }
 
     fn wire_panel(&self, ui: &RecorderPanel) {
@@ -293,12 +355,15 @@ impl App {
                 app.select_area();
             }
             app.update_hint();
+            app.update_screen_highlight();
         });
+        ui.on_display_changed(|_| app().update_screen_highlight());
         ui.on_select_area(|| app().select_area());
         ui.on_refresh(|| {
             let app = app();
             app.refresh_sources();
             app.restore_device_choices();
+            app.update_screen_highlight();
         });
         ui.on_camera_changed(|i| app().choose_camera(i as usize));
         ui.on_mic_changed(|i| app().choose_mic(i as usize));
@@ -319,6 +384,10 @@ impl App {
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
             }
+            // Runs after the panel is hidden.
+            slint::Timer::single_shot(Duration::ZERO, || {
+                crate::app::app().update_screen_highlight()
+            });
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -570,7 +639,7 @@ impl App {
             }
         });
         let _ = ui.show();
-        platform::configure_overlay(ui.window(), Overlay::Floating);
+        platform::configure_overlay(&ui, Overlay::Floating);
         self.devices.borrow_mut().bubble = Some(Bubble {
             ui,
             _timer: timer,
@@ -606,6 +675,8 @@ impl App {
             y: ((y - captured.y) / captured.height).clamp(0.0, 1.0),
             // The editor's size slider range.
             size: (w / captured.width).clamp(0.08, 0.45),
+            // The live bubble is a mirror view.
+            mirror: true,
         })
     }
 
@@ -749,12 +820,14 @@ impl App {
                 }
                 let _ = p.ui.show();
             }
+            app.update_screen_highlight();
         });
         if let Some(p) = &*self.panel.borrow() {
             let _ = p.ui.hide();
         }
+        self.update_screen_highlight();
         let _ = ui.show();
-        platform::configure_overlay(ui.window(), Overlay::Shield);
+        platform::configure_overlay(&ui, Overlay::Shield);
         platform::activate();
         *self.area_window.borrow_mut() = Some(ui);
     }
@@ -802,6 +875,7 @@ impl App {
             p.ui.set_busy(true);
             let _ = p.ui.hide();
         }
+        self.update_screen_highlight();
 
         // Capture warms up (paused) during the countdown.
         let backend = self.backend.clone();
@@ -918,7 +992,7 @@ impl App {
         ));
         ui.on_skip(|| app().countdown_tick(true));
         let _ = ui.show();
-        platform::configure_overlay(ui.window(), Overlay::Shield);
+        platform::configure_overlay(&ui, Overlay::Shield);
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_secs(1), || {
             app().countdown_tick(false)
@@ -1035,7 +1109,7 @@ impl App {
             }
         });
         let _ = bar.show();
-        platform::configure_overlay(bar.window(), Overlay::Floating);
+        platform::configure_overlay(&bar, Overlay::Floating);
 
         // The portal can't hide our windows on Linux; keep the bubble out of
         // display recordings there.

@@ -46,6 +46,14 @@ pub struct CameraOverlay {
     pub y: f64,
     /// Bubble width as a fraction of the screen width.
     pub size: f64,
+    /// Flip the camera horizontally, as the live bubble shows it while
+    /// recording (selfie view). The camera track itself is stored unflipped.
+    #[serde(default = "mirror_default")]
+    pub mirror: bool,
+}
+
+fn mirror_default() -> bool {
+    true
 }
 
 impl Default for CameraOverlay {
@@ -56,6 +64,7 @@ impl Default for CameraOverlay {
             x: 0.03,
             y: 0.75,
             size: 0.2,
+            mirror: true,
         }
     }
 }

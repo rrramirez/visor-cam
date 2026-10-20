@@ -25,6 +25,7 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    when you pick a device.
 3. Pick what to record (Screen / Window / App / Area), a camera, a microphone
    and optionally system audio (all apps or one app), then **Start recording**.
+   With several displays, the chosen one is outlined in red.
 4. Use the floating control bar (or the menu bar menu) to pause, resume, stop
    or discard. The control bar and camera bubble never appear in the recording.
 5. Stopping opens the editor:
@@ -32,7 +33,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
-   - Drag, resize, reshape or hide the camera bubble.
+   - Drag, resize, reshape, mirror or hide the camera bubble. It starts where
+     it was on screen while recording, mirrored as you saw it.
    - **Export** to MP4, WebM (VP9 or AV1) or GIF, at original size, 1080p or
      720p. Files go to the recording's `exports/` folder.
 

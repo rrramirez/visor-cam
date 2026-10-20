@@ -62,6 +62,7 @@ impl EditorWindow {
         ui.set_bubble_x(o.x as f32);
         ui.set_bubble_y(o.y as f32);
         ui.set_bubble_size(o.size as f32);
+        ui.set_bubble_mirror(o.mirror);
         ui.set_export_format(default_format.clamp(0, 3));
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
@@ -173,6 +174,7 @@ impl EditorWindow {
                 o.x = f64::from(e.ui.get_bubble_x());
                 o.y = f64::from(e.ui.get_bubble_y());
                 o.size = f64::from(e.ui.get_bubble_size());
+                o.mirror = e.ui.get_bubble_mirror();
             }
             e.save();
         });

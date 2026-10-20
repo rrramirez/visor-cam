@@ -75,6 +75,8 @@ export component Editor inherits Window {
     in-out property <float> bubble-x: 0.03;
     in-out property <float> bubble-y: 0.75;
     in-out property <float> bubble-size: 0.2;
+    // Selfie view, as the live bubble showed it while recording.
+    in-out property <bool> bubble-mirror: true;
 
     in property <bool> playing;
     in property <float> position;
@@ -227,6 +229,7 @@ export component Editor inherits Window {
                             height: parent.height;
                             source: root.camera;
                             image-fit: cover;
+                            transform-scale-x: root.bubble-mirror ? -1 : 1;
                         }
                         Rectangle {
                             border-radius: parent.border-radius;
@@ -307,6 +310,11 @@ export component Editor inherits Window {
                         Switch {
                             text: "Show camera";
                             checked <=> root.bubble-visible;
+                            toggled => { root.bubble-changed(); }
+                        }
+                        Switch {
+                            text: "Mirror camera";
+                            checked <=> root.bubble-mirror;
                             toggled => { root.bubble-changed(); }
                         }
                         HorizontalLayout {

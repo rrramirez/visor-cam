@@ -45,6 +45,7 @@ export component RecorderPanel inherits Window {
     in property <bool> busy;
 
     callback mode-changed(int);
+    callback display-changed(int);
     callback camera-changed(int);
     callback mic-changed(int);
     callback select-area();
@@ -133,6 +134,7 @@ export component RecorderPanel inherits Window {
             ComboBox {
                 model: root.displays;
                 current-index <=> root.display-index;
+                selected => { root.display-changed(self.current-index); }
             }
         }
         if root.mode == 1: Row {

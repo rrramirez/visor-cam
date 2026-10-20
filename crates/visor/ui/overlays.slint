@@ -294,3 +294,53 @@ export component CameraBubble inherits Window {
         }
     }
 }
+
+// Border around the display that will be recorded (multi-display setups).
+// Click-through; shown while choosing a screen in the recorder panel.
+export component ScreenHighlight inherits Window {
+    no-frame: true;
+    background: transparent;
+    title: "Visor screen highlight";
+    in property <string> display-name;
+    // The display's size. Fixed, so the window isn't resizable: AppKit
+    // shrinks resizable windows to fit between the menu bar and the Dock.
+    in property <length> display-width: 800px;
+    in property <length> display-height: 600px;
+    width: display-width;
+    height: display-height;
+
+    Rectangle {
+        border-width: 5px;
+        border-color: Theme.record;
+        border-radius: 10px;
+        background: transparent;
+    }
+    Rectangle {
+        y: 44px;
+        width: label.preferred-width + 32px;
+        height: 34px;
+        border-radius: 17px;
+        background: Theme.record;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000060;
+        label := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 8px;
+            Glyph {
+                y: (parent.height - self.height) / 2;
+                icon: Icons.monitor;
+                color: white;
+                width: 16px;
+                height: 16px;
+            }
+            Text {
+                text: root.display-name + " will be recorded";
+                color: white;
+                font-size: Theme.font;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
