@@ -1,0 +1,20 @@
+[package]
+name = "visor-capture"
+description = "Screen, audio and camera capture backends for Visor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+visor-core.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "11.0.0", features = ["macos_15_0"] }
+
+# Platform backends are added per milestone (see DESIGN.md):
+# Windows (M4):    windows-capture, wasapi
+# Linux   (M5):    ashpd, pipewire

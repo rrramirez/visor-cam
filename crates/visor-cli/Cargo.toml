@@ -1,0 +1,17 @@
+[package]
+name = "visor-cli"
+description = "Headless Visor recorder for development and testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+visor-core.workspace = true
+visor-capture.workspace = true
+visor-media.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

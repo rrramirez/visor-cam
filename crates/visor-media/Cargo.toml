@@ -1,0 +1,14 @@
+[package]
+name = "visor-media"
+description = "FFmpeg-based encoding, preview decoding and export for Visor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+visor-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+# Links the system FFmpeg via pkg-config.
+ffmpeg-next = "9.0.0"

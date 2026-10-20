@@ -1,0 +1,12 @@
+[package]
+name = "visor-core"
+description = "Platform-agnostic types and logic for Visor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
