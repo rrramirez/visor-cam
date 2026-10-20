@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libavfilter-dev libswscale-dev libswresample-dev \
         libpipewire-0.3-dev libspa-0.2-dev \
         libasound2-dev libdbus-1-dev \
+        libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
         libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
         libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev \
         libxrandr-dev libxi-dev libgl-dev libegl-dev libgles-dev \

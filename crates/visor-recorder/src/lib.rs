@@ -34,6 +34,9 @@ pub struct RecorderOptions {
     /// Open camera stream to record from (shared with the bubble preview).
     pub camera: Option<Arc<CameraStream>>,
     pub exclude_self: bool,
+    /// Start paused; call [`Recorder::resume`] to begin. Lets capture warm up
+    /// (during a countdown) so recording starts the instant it's resumed.
+    pub start_paused: bool,
 }
 
 type ClockRef = Arc<Mutex<MediaClock>>;
@@ -64,6 +67,7 @@ impl Recorder {
             mic,
             camera,
             exclude_self,
+            start_paused,
         } = opts;
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -130,7 +134,11 @@ impl Recorder {
             None => None,
         };
 
-        let clock: ClockRef = Arc::new(Mutex::new(MediaClock::start(host_now())));
+        let mut start_clock = MediaClock::start(host_now());
+        if start_paused {
+            start_clock.pause(host_now());
+        }
+        let clock: ClockRef = Arc::new(Mutex::new(start_clock));
         let mut workers = vec![spawn_video(
             "screen",
             session.video.clone(),

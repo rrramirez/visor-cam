@@ -1,4 +1,4 @@
-import { Theme, Glyph } from "theme.slint";
+import { Theme, Glyph, Icons } from "theme.slint";
 
 // Round icon button with an optional label tooltip.
 export component IconButton inherits Rectangle {
@@ -74,6 +74,7 @@ export component PillButton inherits Rectangle {
         if root.icon != "": Glyph {
             y: (parent.height - self.height) / 2;
             icon: root.icon;
+            filled: root.icon == Icons.record;
             width: 16px;
             height: 16px;
             color: root.primary ? white : Theme.text;

@@ -417,7 +417,8 @@ fn audio_loop(
                 *s = ring.pop_front().unwrap_or(0.0);
             }
         },
-        |e| tracing::warn!("audio output error: {e}"),
+        // Underruns are expected while paused (nothing is queued).
+        |e| tracing::debug!("audio output: {e}"),
         None,
     )?;
     stream.play()?;

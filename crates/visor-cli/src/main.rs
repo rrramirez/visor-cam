@@ -177,6 +177,7 @@ fn record(backend: &dyn Backend, args: RecordArgs) -> anyhow::Result<()> {
             mic,
             camera,
             exclude_self: false,
+            start_paused: false,
         },
     )?;
 
