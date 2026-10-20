@@ -39,3 +39,8 @@ wasapi = "0.26"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 libc = "0.2"
+# The ScreenCast portal client runs on a blocking async-io executor on its own
+# thread, so tokio is not pulled into the app.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screencast"] }
+futures-lite = "2"
+pipewire = "0.10"

@@ -25,6 +25,9 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use self::windows::exclude_window_from_capture;
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+
 pub use host_clock::host_now;
 
 /// Which system audio to record alongside the screen.
@@ -121,7 +124,9 @@ pub fn backend() -> anyhow::Result<Arc<dyn Backend>> {
     return Ok(Arc::new(macos::MacBackend));
     #[cfg(target_os = "windows")]
     return Ok(Arc::new(self::windows::WinBackend));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return Ok(Arc::new(linux::LinuxBackend));
+    #[cfg(not(any(unix, target_os = "windows")))]
     anyhow::bail!("no capture backend for this OS yet");
 }
 
