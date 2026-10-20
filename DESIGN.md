@@ -38,7 +38,7 @@ License: **GPL-3.0-or-later**.
 | Encode / decode / export | FFmpeg (libav*) via `ffmpeg-next`  | Hardware encoders: VideoToolbox (macOS), NVENC/QSV/AMF (Windows), VAAPI (Linux). x264 / libvpx / SVT-AV1 software fallbacks. GPL build is fine because Visor is GPL. |
 | macOS capture      | ScreenCaptureKit via `screencapturekit`   | Display, window, app and area (`sourceRect`), system audio, per-app audio (app-filtered content filter), and the mic (macOS 15+ `captureMicrophone`; `cpal` on older systems). |
 | Windows capture    | Windows.Graphics.Capture via `windows-capture` | Window, display, area (crop). Audio: WASAPI loopback (`wasapi`); per-app audio uses process loopback (Win10 2004+). |
-| Linux capture      | xdg-desktop-portal ScreenCast (`ashpd`) + PipeWire (`pipewire`) | Works on both Wayland and X11 desktops with a portal. The portal's picker selects window/display; app capture is limited there. |
+| Linux capture      | xdg-desktop-portal ScreenCast (`ashpd`) + PipeWire (`pipewire`) | Works on both Wayland and X11 desktops with a portal. The portal's picker selects window/display (an App target records one window the user picks); Area crops the chosen monitor. System audio comes from PipeWire directly: the default sink monitor, or per-app by linking the app's output stream nodes (matched by `application.process.id`, including child processes) to Visor's capture stream. See `crates/visor-capture/src/linux.rs`. |
 | Camera             | `nokhwa`                                 | AVFoundation / Media Foundation / V4L2. |
 | Microphone (fallback) | `cpal`                                | CoreAudio / WASAPI / ALSA-PulseAudio-PipeWire. |
 | Serialization      | `serde` + `serde_json`                    | `project.json`. |
@@ -210,5 +210,5 @@ deep-links to System Settings.
   `cpal` as the fallback.
 - Bundle FFmpeg statically or dynamically? Dynamic is easier for development;
   the release choice can wait until M6.
-- Linux per-app audio would need PipeWire node selection outside the portal.
-  Defer to M5.
+- Linux per-app audio links PipeWire nodes outside the portal, which needs
+  direct PipeWire access (not available in a strict Flatpak sandbox).

@@ -51,26 +51,33 @@ pub fn list() -> Vec<CameraDevice> {
 #[cfg(not(target_os = "macos"))]
 fn list_with_ffmpeg() -> anyhow::Result<Vec<CameraDevice>> {
     let fmt = input_format()?;
-    // SAFETY: an empty input context with the device format set is all
-    // avdevice_list_devices needs; the wrapper frees it on drop.
-    let mut ctx = unsafe {
+    // SAFETY: an empty context with the device format set is all
+    // avdevice_list_devices needs. It is freed with avformat_free_context, not
+    // wrapped in `Input`: closing it as an input would call the device's
+    // read_close on a context it never opened (v4l2 dereferences priv_data).
+    unsafe {
         let ctx = ffmpeg::ffi::avformat_alloc_context();
+        if ctx.is_null() {
+            anyhow::bail!("out of memory");
+        }
         (*ctx).iformat = fmt;
-        format::context::Input::wrap(ctx)
-    };
-    let devices = ffmpeg::device::extensions::DeviceExt::devices(&mut ctx)?;
-    Ok(devices
-        .map(|d| {
-            #[cfg(target_os = "windows")]
-            let id = format!("video={}", d.description());
-            #[cfg(not(target_os = "windows"))]
-            let id = d.name().to_owned();
-            CameraDevice {
-                id,
-                name: d.description().to_owned(),
-            }
-        })
-        .collect())
+        let devices = ffmpeg::device::extensions::DeviceIter::wrap(ctx).map(|devices| {
+            devices
+                .map(|d| {
+                    #[cfg(target_os = "windows")]
+                    let id = format!("video={}", d.description());
+                    #[cfg(not(target_os = "windows"))]
+                    let id = d.name().to_owned();
+                    CameraDevice {
+                        id,
+                        name: d.description().to_owned(),
+                    }
+                })
+                .collect()
+        });
+        ffmpeg::ffi::avformat_free_context(ctx);
+        Ok(devices?)
+    }
 }
 
 fn input_format() -> anyhow::Result<*const ffmpeg::ffi::AVInputFormat> {

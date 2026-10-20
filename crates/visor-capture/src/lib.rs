@@ -18,6 +18,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_permissions;
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+
 pub use host_clock::host_now;
 
 /// Which system audio to record alongside the screen.
@@ -112,7 +115,9 @@ pub trait Backend: Send + Sync {
 pub fn backend() -> anyhow::Result<Arc<dyn Backend>> {
     #[cfg(target_os = "macos")]
     return Ok(Arc::new(macos::MacBackend));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return Ok(Arc::new(linux::LinuxBackend));
+    #[cfg(not(unix))]
     anyhow::bail!("no capture backend for this OS yet");
 }
 
