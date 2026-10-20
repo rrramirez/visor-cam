@@ -50,27 +50,63 @@ pub fn list() -> Vec<CameraDevice> {
 
 #[cfg(not(target_os = "macos"))]
 fn list_with_ffmpeg() -> anyhow::Result<Vec<CameraDevice>> {
+    use std::ffi::{CStr, c_char};
+
     let fmt = input_format()?;
-    // SAFETY: an empty input context with the device format set is all
-    // avdevice_list_devices needs; the wrapper frees it on drop.
-    let mut ctx = unsafe {
-        let ctx = ffmpeg::ffi::avformat_alloc_context();
-        (*ctx).iformat = fmt;
-        format::context::Input::wrap(ctx)
+    let mut list: *mut ffmpeg::ffi::AVDeviceInfoList = std::ptr::null_mut();
+    // SAFETY: unlike avdevice_list_devices on a bare context,
+    // avdevice_list_input_sources allocates the device's private data, which
+    // dshow's device listing dereferences. The list is freed below.
+    let ret = unsafe {
+        ffmpeg::ffi::avdevice_list_input_sources(
+            fmt,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut list,
+        )
     };
-    let devices = ffmpeg::device::extensions::DeviceExt::devices(&mut ctx)?;
-    Ok(devices
-        .map(|d| {
-            #[cfg(target_os = "windows")]
-            let id = format!("video={}", d.description());
-            #[cfg(not(target_os = "windows"))]
-            let id = d.name().to_owned();
-            CameraDevice {
-                id,
-                name: d.description().to_owned(),
+    if ret < 0 {
+        anyhow::bail!(
+            "listing {INPUT_FORMAT} devices: {}",
+            ffmpeg::Error::from(ret)
+        );
+    }
+    let text = |p: *const c_char| {
+        // SAFETY: FFmpeg device strings are null or NUL-terminated.
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    };
+    let mut cameras = Vec::new();
+    // SAFETY: `list` holds `nb_devices` valid entries until it is freed.
+    unsafe {
+        if !list.is_null() {
+            for i in 0..(*list).nb_devices.max(0) as usize {
+                let d = &**(*list).devices.add(i);
+                // dshow lists microphones too; keep devices that provide video.
+                let types = if d.media_types.is_null() {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(d.media_types, d.nb_media_types.max(0) as usize)
+                };
+                if !types.is_empty()
+                    && !types.contains(&ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO)
+                {
+                    continue;
+                }
+                let name = text(d.device_name).unwrap_or_default();
+                let description = text(d.device_description).unwrap_or_else(|| name.clone());
+                #[cfg(target_os = "windows")]
+                let id = format!("video={description}");
+                #[cfg(not(target_os = "windows"))]
+                let id = name;
+                cameras.push(CameraDevice {
+                    id,
+                    name: description,
+                });
             }
-        })
-        .collect())
+        }
+        ffmpeg::ffi::avdevice_free_list_devices(&mut list);
+    }
+    Ok(cameras)
 }
 
 fn input_format() -> anyhow::Result<*const ffmpeg::ffi::AVInputFormat> {
