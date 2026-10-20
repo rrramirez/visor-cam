@@ -15,11 +15,20 @@ pub struct Rect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureTarget {
-    Display { id: u32 },
-    Window { id: u64 },
-    App { pid: i32 },
+    Display {
+        id: u32,
+    },
+    Window {
+        id: u64,
+    },
+    App {
+        pid: i32,
+    },
     /// A region of a display, in that display's logical coordinates.
-    Area { display_id: u32, rect: Rect },
+    Area {
+        display_id: u32,
+        rect: Rect,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -46,7 +55,7 @@ impl RecordingConfig {
     pub fn display(id: u32) -> Self {
         Self {
             target: CaptureTarget::Display { id },
-            fps: 60,
+            fps: 30,
             show_cursor: true,
             audio: AudioConfig::default(),
             camera: None,

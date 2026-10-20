@@ -29,7 +29,11 @@ pub struct EditList {
 impl EditList {
     /// Keep everything in a recording of `duration`.
     pub fn full(duration: Micros) -> Self {
-        let keep = if duration > 0 { vec![Range(0, duration)] } else { Vec::new() };
+        let keep = if duration > 0 {
+            vec![Range(0, duration)]
+        } else {
+            Vec::new()
+        };
         Self { keep }
     }
 

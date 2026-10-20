@@ -9,7 +9,16 @@ fn nv12(width: u32, height: u32, stride: usize, luma: u8) -> VideoFrame {
         width,
         height,
         format: PixelFormat::Nv12,
-        planes: vec![Plane { data: vec![luma; s * h], stride: s }, Plane { data: vec![128; s * h / 2], stride: s }],
+        planes: vec![
+            Plane {
+                data: vec![luma; s * h],
+                stride: s,
+            },
+            Plane {
+                data: vec![128; s * h / 2],
+                stride: s,
+            },
+        ],
     }
 }
 
@@ -44,5 +53,81 @@ fn writes_playable_mp4_with_expected_duration() {
     let duration = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     assert!((duration - 3.0).abs() < 0.05, "duration {duration}");
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn audio_writer_fills_gaps_and_pads_to_end() {
+    use visor_core::AudioBuffer;
+    use visor_media::AudioWriter;
+
+    let dir = std::env::temp_dir().join(format!("visor-audio-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mic.m4a");
+
+    // 44.1 kHz mono tone in 10 ms buffers, starting 100 ms late, with a
+    // 300 ms hole in the middle (as during a device hiccup).
+    let mut writer = AudioWriter::create(&path).unwrap();
+    let mut t = 0usize;
+    for i in 0..100u64 {
+        let pts = 100_000 + i * 10_000;
+        if (40..70).contains(&i) {
+            continue;
+        }
+        let samples = (0..441)
+            .map(|_| {
+                t += 1;
+                (t as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5
+            })
+            .collect();
+        writer
+            .write(
+                &AudioBuffer {
+                    host_ts: 0,
+                    sample_rate: 44_100,
+                    channels: 1,
+                    samples,
+                },
+                pts,
+            )
+            .unwrap();
+    }
+    writer.finish(2_000_000).unwrap();
+
+    let input = ffmpeg::format::input(&path).unwrap();
+    let stream = input.streams().best(ffmpeg::media::Type::Audio).unwrap();
+    let params = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).unwrap();
+    let audio = params.decoder().audio().unwrap();
+    assert_eq!(audio.id(), ffmpeg::codec::Id::AAC);
+    assert_eq!((audio.rate(), audio.channels()), (48_000, 2));
+    let duration = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
+    assert!((duration - 2.0).abs() < 0.05, "duration {duration}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn converts_bgra_input() {
+    let dir = std::env::temp_dir().join(format!("visor-bgra-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("screen.mp4");
+    let (w, h, stride) = (64u32, 48u32, 320usize);
+    let mut writer = VideoWriter::create(&path, w, h, 30).unwrap();
+    for i in 0..10u64 {
+        let frame = VideoFrame {
+            host_ts: 0,
+            width: w,
+            height: h,
+            format: PixelFormat::Bgra,
+            planes: vec![Plane {
+                data: vec![(i * 20) as u8; stride * h as usize],
+                stride,
+            }],
+        };
+        writer.write(&frame, i * 33_333, false).unwrap();
+    }
+    writer.finish(333_330).unwrap();
+    let mut input = ffmpeg::format::input(&path).unwrap();
+    assert_eq!(input.packets().count(), 10);
     std::fs::remove_dir_all(&dir).unwrap();
 }

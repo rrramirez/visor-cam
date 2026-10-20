@@ -3,21 +3,32 @@
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
-use ffmpeg_next::{self as ffmpeg, Dictionary, Packet, Rational, codec, color, encoder, format, frame, picture};
+use ffmpeg_next::{
+    self as ffmpeg, Dictionary, Packet, Rational, codec, color, encoder, format, frame, picture,
+    software::scaling,
+};
 use visor_core::{Micros, PixelFormat, VideoFrame};
 
 /// Encoder timestamps are in microseconds, matching [`Micros`].
 const MICROS: Rational = Rational(1, 1_000_000);
 
 /// Hardware encoder first, software fallback second.
-const H264_ENCODERS: &[&str] = &["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_vaapi", "libx264"];
+const H264_ENCODERS: &[&str] = &[
+    "h264_videotoolbox",
+    "h264_nvenc",
+    "h264_qsv",
+    "h264_vaapi",
+    "libx264",
+];
 
-/// Encodes NV12 frames to H.264 in a fragmented MP4, so the file stays
-/// playable even if Visor crashes mid-recording.
+/// Encodes NV12 or BGRA frames to H.264 in a fragmented MP4, so the file
+/// stays playable even if Visor crashes mid-recording.
 pub struct VideoWriter {
     output: format::context::Output,
     encoder: encoder::Video,
     frame: frame::Video,
+    /// BGRA staging frame and converter, created on the first BGRA input.
+    bgra: Option<(frame::Video, scaling::Context)>,
     stream_time_base: Rational,
     last_pts: Option<Micros>,
     /// Nominal frame duration. Only the final sample's length depends on it;
@@ -26,18 +37,28 @@ pub struct VideoWriter {
     encoder_name: &'static str,
 }
 
+// SAFETY: every FFmpeg object inside is owned exclusively by the writer and
+// none has thread affinity; the writer is moved to, then used by, one thread.
+unsafe impl Send for VideoWriter {}
+
 impl VideoWriter {
     pub fn create(path: &Path, width: u32, height: u32, fps: u32) -> anyhow::Result<Self> {
         ffmpeg::init()?;
         if width % 2 != 0 || height % 2 != 0 {
             bail!("frame size {width}x{height} must be even");
         }
-        let mut output = format::output(path).with_context(|| format!("creating {}", path.display()))?;
-        let global_header = output.format().flags().contains(format::Flags::GLOBAL_HEADER);
+        let mut output =
+            format::output(path).with_context(|| format!("creating {}", path.display()))?;
+        let global_header = output
+            .format()
+            .flags()
+            .contains(format::Flags::GLOBAL_HEADER);
 
         let mut last_err = None;
         for &name in H264_ENCODERS {
-            let Some(codec) = encoder::find_by_name(name) else { continue };
+            let Some(codec) = encoder::find_by_name(name) else {
+                continue;
+            };
             match open_h264(codec, name, width, height, fps, global_header) {
                 Ok(encoder) => {
                     let mut stream = output.add_stream(codec)?;
@@ -46,12 +67,16 @@ impl VideoWriter {
                     let mut opts = Dictionary::new();
                     opts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
                     output.write_header_with(opts)?;
-                    let stream_time_base = output.stream(0).ok_or_else(|| anyhow!("stream vanished"))?.time_base();
+                    let stream_time_base = output
+                        .stream(0)
+                        .ok_or_else(|| anyhow!("stream vanished"))?
+                        .time_base();
                     tracing::info!(encoder = name, width, height, "video writer ready");
                     return Ok(Self {
                         output,
                         encoder,
                         frame: frame::Video::new(format::Pixel::NV12, width, height),
+                        bgra: None,
                         stream_time_base,
                         last_pts: None,
                         frame_duration: 1_000_000 / Micros::from(fps.max(1)),
@@ -64,7 +89,9 @@ impl VideoWriter {
                 }
             }
         }
-        Err(anyhow!("no usable H.264 encoder (last error: {last_err:?})"))
+        Err(anyhow!(
+            "no usable H.264 encoder (last error: {last_err:?})"
+        ))
     }
 
     pub fn encoder_name(&self) -> &'static str {
@@ -81,24 +108,57 @@ impl VideoWriter {
         if self.last_pts.is_some_and(|last| pts <= last) {
             return Ok(());
         }
-        if src.format != PixelFormat::Nv12 || src.planes.len() != 2 {
-            bail!("expected an NV12 frame");
-        }
         let (w, h) = (self.frame.width() as usize, self.frame.height() as usize);
         if src.width as usize != w || src.height as usize != h {
-            bail!("frame size changed from {w}x{h} to {}x{}", src.width, src.height);
+            bail!(
+                "frame size changed from {w}x{h} to {}x{}",
+                src.width,
+                src.height
+            );
         }
         // The encoder may still reference the previous frame's buffer.
         // SAFETY: valid, owned AVFrame.
         if unsafe { ffmpeg::ffi::av_frame_make_writable(self.frame.as_mut_ptr()) } < 0 {
             bail!("could not make video frame writable");
         }
-        // Y plane: h rows of w bytes. CbCr plane: h/2 rows of w bytes.
-        copy_plane(&mut self.frame, 0, &src.planes[0].data, src.planes[0].stride, w, h);
-        copy_plane(&mut self.frame, 1, &src.planes[1].data, src.planes[1].stride, w, h / 2);
+        match (src.format, src.planes.as_slice()) {
+            (PixelFormat::Nv12, [y, uv]) => {
+                // Y plane: h rows of w bytes. CbCr plane: h/2 rows of w bytes.
+                copy_plane(&mut self.frame, 0, &y.data, y.stride, w, h);
+                copy_plane(&mut self.frame, 1, &uv.data, uv.stride, w, h / 2);
+            }
+            (PixelFormat::Bgra, [bgra]) => {
+                let (stage, sws) = match &mut self.bgra {
+                    Some(b) => b,
+                    None => self.bgra.insert((
+                        frame::Video::new(format::Pixel::BGRA, w as u32, h as u32),
+                        scaling::Context::get(
+                            format::Pixel::BGRA,
+                            w as u32,
+                            h as u32,
+                            format::Pixel::NV12,
+                            w as u32,
+                            h as u32,
+                            scaling::Flags::BILINEAR,
+                        )?,
+                    )),
+                };
+                copy_plane(stage, 0, &bgra.data, bgra.stride, w * 4, h);
+                sws.run(stage, &mut self.frame)?;
+            }
+            _ => bail!(
+                "unsupported frame layout {:?} with {} planes",
+                src.format,
+                src.planes.len()
+            ),
+        }
 
         self.frame.set_pts(Some(pts as i64));
-        self.frame.set_kind(if keyframe { picture::Type::I } else { picture::Type::None });
+        self.frame.set_kind(if keyframe {
+            picture::Type::I
+        } else {
+            picture::Type::None
+        });
         self.encoder.send_frame(&self.frame)?;
         self.last_pts = Some(pts);
         self.drain()
@@ -141,7 +201,9 @@ fn open_h264(
     fps: u32,
     global_header: bool,
 ) -> Result<encoder::Video, ffmpeg::Error> {
-    let mut enc = codec::context::Context::new_with_codec(codec).encoder().video()?;
+    let mut enc = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()?;
     enc.set_width(width);
     enc.set_height(height);
     enc.set_format(format::Pixel::NV12);
@@ -175,7 +237,14 @@ fn open_h264(
     enc.open_with(opts)
 }
 
-fn copy_plane(dst: &mut frame::Video, plane: usize, src: &[u8], src_stride: usize, row_bytes: usize, rows: usize) {
+fn copy_plane(
+    dst: &mut frame::Video,
+    plane: usize,
+    src: &[u8],
+    src_stride: usize,
+    row_bytes: usize,
+    rows: usize,
+) {
     let dst_stride = dst.stride(plane);
     let dst_data = dst.data_mut(plane);
     for row in 0..rows {

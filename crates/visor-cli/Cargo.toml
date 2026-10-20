@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 visor-core.workspace = true
 visor-capture.workspace = true
-visor-media.workspace = true
+visor-recorder.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true

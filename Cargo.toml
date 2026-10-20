@@ -12,6 +12,7 @@ rust-version = "1.85"
 visor-core = { path = "crates/visor-core" }
 visor-capture = { path = "crates/visor-capture" }
 visor-media = { path = "crates/visor-media" }
+visor-recorder = { path = "crates/visor-recorder" }
 
 anyhow = "1"
 thiserror = "2"
@@ -21,3 +22,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }
+ffmpeg-next = "9.0.0"

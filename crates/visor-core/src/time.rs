@@ -4,14 +4,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current UTC time as RFC 3339, second precision.
 pub fn rfc3339_now() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     rfc3339(secs)
 }
 
 pub fn rfc3339(unix_secs: u64) -> String {
     let (days, rem) = (unix_secs / 86_400, unix_secs % 86_400);
     let (y, m, d) = civil_from_days(days as i64);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// Howard Hinnant's days-to-civil algorithm.

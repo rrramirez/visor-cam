@@ -1,0 +1,16 @@
+[package]
+name = "visor-recorder"
+description = "Recording engine: drives capture sources into per-track writers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+visor-core.workspace = true
+visor-capture.workspace = true
+visor-media.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

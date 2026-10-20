@@ -11,4 +11,4 @@ visor-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 # Links the system FFmpeg via pkg-config.
-ffmpeg-next = "9.0.0"
+ffmpeg-next.workspace = true

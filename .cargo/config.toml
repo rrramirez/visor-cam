@@ -1,0 +1,8 @@
+# screencapturekit's Swift bridge links the system Swift runtime. Link args
+# from a dependency's build script don't reach downstream binaries or test
+# executables, so every macOS target gets the rpath here.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

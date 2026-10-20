@@ -50,7 +50,13 @@ pub struct CameraOverlay {
 
 impl Default for CameraOverlay {
     fn default() -> Self {
-        Self { visible: true, shape: BubbleShape::Circle, x: 0.03, y: 0.75, size: 0.2 }
+        Self {
+            visible: true,
+            shape: BubbleShape::Circle,
+            x: 0.03,
+            y: 0.75,
+            size: 0.2,
+        }
     }
 }
 
@@ -78,7 +84,11 @@ pub enum ProjectError {
 }
 
 impl Project {
-    pub fn new(title: impl Into<String>, created_at: impl Into<String>, duration_us: Micros) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        created_at: impl Into<String>,
+        duration_us: Micros,
+    ) -> Self {
         Self {
             version: CURRENT_VERSION,
             title: title.into(),
@@ -130,12 +140,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let mut p = Project::new("Demo", "2026-10-19T18:42:00Z", 10_000_000);
-        p.tracks.screen = Some(Track { file: "screen.mp4".into(), width: Some(1920), height: Some(1080), fps: Some(60) });
+        p.tracks.screen = Some(Track {
+            file: "screen.mp4".into(),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(60),
+        });
         p.edit.cut(2_000_000, 3_000_000);
         p.save(&dir).unwrap();
 
         assert_eq!(Project::load(&dir).unwrap(), p);
-        assert_eq!(list_projects(dir.parent().unwrap()).unwrap().iter().filter(|d| **d == dir).count(), 1);
+        assert_eq!(
+            list_projects(dir.parent().unwrap())
+                .unwrap()
+                .iter()
+                .filter(|d| **d == dir)
+                .count(),
+            1
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

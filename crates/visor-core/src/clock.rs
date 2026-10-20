@@ -19,7 +19,17 @@ pub struct MediaClock {
 
 impl MediaClock {
     pub fn start(host_now: Micros) -> Self {
-        Self { t0: host_now, paused_total: 0, paused_at: None, pauses: Vec::new() }
+        Self {
+            t0: host_now,
+            paused_total: 0,
+            paused_at: None,
+            pauses: Vec::new(),
+        }
+    }
+
+    /// Number of completed pauses. Video tracks force a keyframe when it changes.
+    pub fn epoch(&self) -> usize {
+        self.pauses.len()
     }
 
     pub fn is_paused(&self) -> bool {
@@ -65,7 +75,8 @@ impl MediaClock {
     /// Recorded (non-paused) duration as of `host_now`.
     pub fn elapsed(&self, host_now: Micros) -> Micros {
         let now = self.paused_at.unwrap_or(host_now);
-        now.saturating_sub(self.t0).saturating_sub(self.paused_total)
+        now.saturating_sub(self.t0)
+            .saturating_sub(self.paused_total)
     }
 }
 

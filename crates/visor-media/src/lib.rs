@@ -1,7 +1,11 @@
 //! Encoding (track writers), preview decoding and export, built on FFmpeg.
 
+mod audio_writer;
+mod resample;
 mod writer;
 
+pub use audio_writer::AudioWriter;
+pub use resample::Resampler;
 pub use writer::VideoWriter;
 
 use visor_core::EditList;
@@ -11,7 +15,9 @@ pub enum ExportFormat {
     /// H.264 + AAC.
     Mp4,
     /// VP9 or AV1 + Opus.
-    WebM { av1: bool },
+    WebM {
+        av1: bool,
+    },
     Gif,
 }
 
@@ -24,10 +30,14 @@ pub fn trim_concat_filter(edit: &EditList, has_audio: bool) -> String {
     let mut inputs = String::new();
     for (i, r) in edit.ranges().iter().enumerate() {
         let (s, e) = (secs(r.0), secs(r.1));
-        graph.push_str(&format!("[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS[v{i}];"));
+        graph.push_str(&format!(
+            "[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS[v{i}];"
+        ));
         inputs.push_str(&format!("[v{i}]"));
         if has_audio {
-            graph.push_str(&format!("[1:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[a{i}];"));
+            graph.push_str(&format!(
+                "[1:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[a{i}];"
+            ));
             inputs.push_str(&format!("[a{i}]"));
         }
     }

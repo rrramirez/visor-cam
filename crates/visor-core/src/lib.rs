@@ -8,7 +8,7 @@ pub mod project;
 pub mod time;
 
 pub use clock::MediaClock;
-pub use config::{AudioConfig, CaptureTarget, Rect, RecordingConfig};
+pub use config::{AudioConfig, CaptureTarget, RecordingConfig, Rect};
 pub use edit::{EditList, Range};
 pub use media::{AudioBuffer, PixelFormat, Plane, VideoFrame};
 pub use project::{CameraOverlay, Project, Track, Tracks};
