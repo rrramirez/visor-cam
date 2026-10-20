@@ -227,14 +227,14 @@ again after rebuilding.
 | M3 | Editor + export: player, timeline, trim/cut, export MP4/WebM/GIF | Done (macOS) |
 | M4 | Windows backend (WGC + WASAPI) | Written; cross-compiles and lints clean; never run on Windows |
 | M5 | Linux backend (portal + PipeWire) | Written; builds, tests and lints clean in Docker (`scripts/linux-check.sh`); never run on a desktop |
-| M6 | Packaging | macOS: ad-hoc signed `.app` + `.dmg` with FFmpeg bundled. Windows/Linux installers not started |
+| M6 | Packaging | macOS: ad-hoc signed `.app` (29 MB) + `.dmg` (14 MB) with a minimal FFmpeg (`scripts/build-ffmpeg-macos.sh`). Windows/Linux installers not started |
 
 ## Known limitations and next steps
 
 - Windows and Linux backends need testing on real machines.
 - Notarization (Developer ID) isn't set up; the DMG is ad-hoc signed.
-- The bundled FFmpeg is Homebrew's full build plus its dependencies (large).
-  A minimal FFmpeg build (H.264/AAC/VP9/AV1/Opus/GIF only) would shrink the app.
+- AV1 export links Homebrew's SVT-AV1 dylib (3 MB; Homebrew ships no static
+  build). Building SVT-AV1 statically would need `cmake`.
 - App capture on Windows and Linux records one window, not every window of
   the app.
 - Linux per-app audio links PipeWire nodes outside the portal, which needs

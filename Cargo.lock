@@ -2249,7 +2249,6 @@ version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f519a8611a4982921e46e391015e5e40ceac5cc63813333ef91ada77df180d8"
 dependencies = [
- "bytemuck",
  "calloop 0.14.4",
  "cfg_aliases",
  "drm",
@@ -2258,10 +2257,8 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-renderer-femtovg",
- "i-slint-renderer-software",
  "input",
  "libseat",
- "memmap2",
  "nix",
  "raw-window-handle",
  "xkbcommon",
@@ -2276,25 +2273,11 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "i-slint-backend-linuxkms",
- "i-slint-backend-testing",
  "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
-]
-
-[[package]]
-name = "i-slint-backend-testing"
-version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01943d6c5ea5bc913d497bdaa423c309e7627afff47a6794bfd13be5c564209f"
-dependencies = [
- "cfg_aliases",
- "i-slint-common",
- "i-slint-core",
- "i-slint-renderer-software",
- "vtable",
 ]
 
 [[package]]
@@ -2307,7 +2290,6 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "block2 0.6.2",
- "bytemuck",
  "cfg-if",
  "cfg_aliases",
  "futures",
@@ -2318,8 +2300,6 @@ dependencies = [
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
- "i-slint-renderer-software",
- "imgref",
  "lyon_path",
  "muda 0.19.3",
  "objc2 0.6.5",
@@ -2329,7 +2309,6 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "pin-weak",
  "raw-window-handle",
- "rgb",
  "scoped-tls-hkt",
  "scopeguard",
  "softbuffer",
@@ -2401,7 +2380,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2ea15059d70bc31b1a8b1eb4c34f2c5df04cb7e53f36179b43c0261231d646"
 dependencies = [
  "accesskit",
- "async-channel",
  "bitflags 2.13.2",
  "cfg-if",
  "chrono",
@@ -2414,7 +2392,6 @@ dependencies = [
  "icu_normalizer",
  "image",
  "js-sys",
- "ksni",
  "lyon_algorithms",
  "lyon_extra",
  "lyon_geom",
@@ -2966,24 +2943,6 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
-
-[[package]]
-name = "ksni"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
-dependencies = [
- "async-executor",
- "async-io",
- "async-lock",
- "futures-channel",
- "futures-lite",
- "futures-util",
- "pastey",
- "serde",
- "task-local",
- "zbus",
-]
 
 [[package]]
 name = "kurbo"
@@ -4156,12 +4115,6 @@ checksum = "1567535334d6ba2d3cde19221ba9a7bd0fabb3cbd99046ddfb10ae061cfcc889"
 dependencies = [
  "icu_properties",
 ]
-
-[[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "percent-encoding"
@@ -5403,15 +5356,6 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
-
-[[package]]
-name = "task-local"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
-dependencies = [
- "pin-project-lite",
-]
 
 [[package]]
 name = "tempfile"

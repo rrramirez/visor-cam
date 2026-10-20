@@ -49,12 +49,17 @@ saved preferences.
 ### macOS
 
 ```sh
-brew install ffmpeg pkgconf
+brew install ffmpeg pkgconf x264 libvpx opus svt-av1
 curl https://sh.rustup.rs -sSf | sh      # if you don't have Rust
 cargo test --workspace
 cargo run -p visor                       # the app
 scripts/package-macos.sh                 # dist/Visor.app and dist/Visor-<version>.dmg
 ```
+
+Development builds link Homebrew's FFmpeg. Packaging instead builds a
+minimal FFmpeg 7.1 (`scripts/build-ffmpeg-macos.sh`: only the codecs, formats
+and filters Visor uses, with x264/libvpx/opus linked in) and bundles just
+those libraries, which keeps the app small.
 
 The `.app` is ad-hoc signed (not notarized): on another Mac, right-click it and
 choose *Open* the first time. macOS ties permissions to the signature, so after

@@ -23,3 +23,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "9.0.0"
+
+[profile.release]
+# Smaller app bundle: strip symbols and let LTO drop unused code.
+strip = true
+lto = "thin"

@@ -17,7 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-slint = { version = "1.18", features = ["unstable-winit-030"] }
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "accessibility", "compat-1-2", "unstable-winit-030"] }
 tray-icon = "0.26"
 dirs = "7"
 rfd = "0.17"

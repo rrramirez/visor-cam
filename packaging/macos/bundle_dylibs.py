@@ -2,7 +2,7 @@
 """Copy every non-system dylib a Mach-O binary depends on into a bundle's
 Frameworks directory and point all load commands at the bundled copies.
 
-    bundle_dylibs.py <executable> <Frameworks dir>
+    bundle_dylibs.py <executable> <Frameworks dir> [extra search dir ...]
 
 System libraries (/usr/lib, /System) and the Swift runtime stay external.
 """
@@ -33,10 +33,13 @@ def rpaths(path):
     return found
 
 
+SEARCH_DIRS = []
+
+
 def resolve(dep, loader):
     if dep.startswith("@rpath/"):
         name = dep[len("@rpath/"):]
-        for rp in rpaths(loader) + ["/opt/homebrew/lib", "/usr/local/lib"]:
+        for rp in SEARCH_DIRS + rpaths(loader) + ["/opt/homebrew/lib", "/usr/local/lib"]:
             rp = rp.replace("@loader_path", os.path.dirname(loader)).replace("@executable_path", os.path.dirname(loader))
             candidate = os.path.join(rp, name)
             if os.path.exists(candidate):
@@ -51,6 +54,7 @@ def resolve(dep, loader):
 
 def main():
     exe, frameworks = sys.argv[1], sys.argv[2]
+    SEARCH_DIRS.extend(sys.argv[3:])
     os.makedirs(frameworks, exist_ok=True)
     queue = [exe]
     seen = set()
