@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use crossbeam_channel::{Receiver, bounded};
@@ -147,8 +148,8 @@ impl CameraStream {
         let stop = Arc::new(AtomicBool::new(false));
         let (thread_tap, thread_stop) = (tap.clone(), stop.clone());
         let (ready_tx, ready_rx) = bounded(1);
-        // The read loop blocks inside FFmpeg, so the thread is detached and
-        // exits after its next frame once `stop` is set.
+        // The read loop can block inside FFmpeg, so the thread is detached and
+        // exits after its next read once `stop` is set.
         thread::Builder::new()
             .name("visor-camera".into())
             .spawn(move || {
@@ -230,11 +231,23 @@ fn read_loop(
     // first one to the host clock and keep the device's spacing from there.
     let mut anchor: Option<(i64, Micros)> = None;
 
-    for (stream, packet) in input.packets() {
-        if stop.load(Ordering::Relaxed) {
-            break;
+    // Read packets directly: `Input::packets()` ends at the first EAGAIN,
+    // which capture devices return whenever no frame is ready yet.
+    let mut packet = ffmpeg::Packet::empty();
+    while !stop.load(Ordering::Relaxed) {
+        match packet.read(&mut input) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Other {
+                errno: ffmpeg::error::EAGAIN,
+            }) => {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            Err(ffmpeg::Error::InvalidData) => continue,
+            Err(ffmpeg::Error::Eof) => break,
+            Err(e) => return Err(e).context("reading from camera"),
         }
-        if stream.index() != index {
+        if packet.stream() != index {
             continue;
         }
         let arrived = host_now();

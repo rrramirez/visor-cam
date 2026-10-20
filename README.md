@@ -41,8 +41,9 @@ in Preferences) as separate tracks plus `project.json`, so edits are
 non-destructive and you can always re-export.
 
 Command line: `visor --edit <recording folder>` opens a recording;
-`visor --record [--stop-after SECONDS]` starts recording immediately with the
-saved preferences.
+`visor --record [--stop-after SECONDS]` starts recording with the saved
+preferences as soon as the saved camera is ready, optionally stopping after
+that many seconds of recorded time.
 
 ## Building
 

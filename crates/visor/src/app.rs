@@ -471,10 +471,10 @@ impl App {
         self.settings.borrow_mut().last_camera = id.clone();
         self.settings.borrow().save();
         let Some(id) = id else {
+            self.close_bubble();
             let mut d = self.devices.borrow_mut();
             d.camera = None;
             d.camera_pending = None;
-            d.bubble = None;
             return;
         };
         if self
@@ -511,6 +511,7 @@ impl App {
                 self.set_panel_error("");
             }
             Err(e) => {
+                self.close_bubble();
                 self.devices.borrow_mut().camera = None;
                 self.set_panel_error(&format!("Camera unavailable: {e:#}"));
             }
@@ -518,6 +519,7 @@ impl App {
     }
 
     fn show_bubble(&self, stream: &Arc<CameraStream>) {
+        self.close_bubble();
         let Ok(ui) = CameraBubble::new() else { return };
         let rx = stream.subscribe();
         let size_step = 1;
@@ -572,7 +574,17 @@ impl App {
     }
 
     fn release_devices(&self) {
+        self.close_bubble();
         *self.devices.borrow_mut() = Devices::default();
+    }
+
+    /// Hides and drops the camera bubble. A shown Slint window outlives its
+    /// handle, so dropping it alone would leave it on screen.
+    fn close_bubble(&self) {
+        let bubble = self.devices.borrow_mut().bubble.take();
+        if let Some(b) = bubble {
+            let _ = b.ui.hide();
+        }
     }
 
     /// Returns true if access is granted now. Otherwise asks (once) and calls
@@ -1017,6 +1029,19 @@ impl App {
             bar.set_paused(recorder.is_paused());
         }
         self.refresh_tray();
+    }
+
+    /// Whether the chosen devices are open, so a recording can start.
+    pub fn devices_ready(&self) -> bool {
+        self.devices.borrow().camera_pending.is_none()
+    }
+
+    /// Recorded time of the running recording, if one is running.
+    pub fn recorded(&self) -> Option<Duration> {
+        match &*self.session.borrow() {
+            Session::Recording { recorder, .. } => Some(Duration::from_micros(recorder.elapsed())),
+            _ => None,
+        }
     }
 
     pub fn stop_recording(&self, discard: bool) {

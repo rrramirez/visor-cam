@@ -48,13 +48,34 @@ fn main() -> anyhow::Result<()> {
             Args::Edit(dir) => app.open_editor(dir),
             Args::Record { stop_after } => {
                 app.open_panel();
-                app.start_recording();
-                if let Some(secs) = stop_after {
-                    let countdown = u64::from(app.settings.borrow().countdown_secs);
-                    slint::Timer::single_shot(Duration::from_secs(secs + countdown + 1), || {
-                        app::app().stop_recording(false);
-                    });
-                }
+                // Starts once the saved camera is open, then stops after
+                // `stop_after` seconds of recorded time (excluding the countdown).
+                let timer = std::rc::Rc::new(slint::Timer::default());
+                let this = timer.clone();
+                let started = std::cell::Cell::new(false);
+                timer.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(20),
+                    move || {
+                        let app = app::app();
+                        if !started.get() {
+                            if app.devices_ready() {
+                                app.start_recording();
+                                started.set(true);
+                            }
+                        } else if let Some(secs) = stop_after {
+                            if app
+                                .recorded()
+                                .is_some_and(|t| t.as_secs_f64() >= secs as f64)
+                            {
+                                app.stop_recording(false);
+                                this.stop();
+                            }
+                        } else {
+                            this.stop();
+                        }
+                    },
+                );
             }
             Args::Panel => app.open_panel(),
         }

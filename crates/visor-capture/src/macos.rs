@@ -1,5 +1,9 @@
 //! ScreenCaptureKit backend (macOS 14+).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use anyhow::{Context, anyhow};
 use crossbeam_channel::{Sender, TrySendError, bounded};
 use screencapturekit::cm::SCFrameStatus;
@@ -143,8 +147,13 @@ impl Backend for MacBackend {
         };
 
         let mut source_rect = None;
+        // Display-wide captures that should hide Visor's own windows.
+        let mut excluding_on = None;
         let filter = match &request.target {
-            CaptureTarget::Display { id } => display_filter(find_display(*id)?),
+            CaptureTarget::Display { id } => {
+                excluding_on = Some(*id);
+                display_filter(find_display(*id)?)
+            }
             CaptureTarget::Window { id } => {
                 let window = windows
                     .iter()
@@ -172,6 +181,7 @@ impl Backend for MacBackend {
                     rect.width,
                     rect.height,
                 ));
+                excluding_on = Some(*display_id);
                 display_filter(display)
             }
         }
@@ -241,6 +251,19 @@ impl Backend for MacBackend {
             .start_capture()
             .map_err(sc_err)
             .context("starting screen capture (is Screen Recording permission granted?)")?;
+        // ScreenCaptureKit only lists an app once it has a window, so Visor
+        // may not have been excludable yet (its control bar opens after
+        // capture starts). Switch to the excluding filter once it can be.
+        let stop_watch = Arc::new(AtomicBool::new(false));
+        if let Some(display_id) =
+            excluding_on.filter(|_| request.exclude_self && own_app.is_empty())
+        {
+            let (stream, stop) = (stream.clone(), stop_watch.clone());
+            std::thread::Builder::new()
+                .name("visor-sck-exclude".into())
+                .spawn(move || exclude_own_windows_when_listed(&stream, display_id, &stop))
+                .context("spawning exclusion watcher")?;
+        }
         let (audio_rx, audio_stream) = match audio {
             Some((rx, s)) => {
                 s.start_capture()
@@ -262,12 +285,43 @@ impl Backend for MacBackend {
             (width, height),
             audio_rx,
             move || {
+                stop_watch.store(true, Ordering::Relaxed);
                 if let Some(s) = audio_stream {
                     s.stop_capture().map_err(sc_err)?;
                 }
                 stream.stop_capture().map_err(sc_err)
             },
         ))
+    }
+}
+
+/// Polls until Visor's process shows up in the shareable content, then makes
+/// `stream` (a capture of `display_id`) exclude it.
+fn exclude_own_windows_when_listed(stream: &SCStream, display_id: u32, stop: &AtomicBool) {
+    let own_pid = std::process::id() as i32;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(50));
+        let Ok(content) = SCShareableContent::get() else {
+            continue;
+        };
+        let apps = content.applications();
+        let Some(own) = apps.iter().find(|a| a.process_id() == own_pid) else {
+            continue;
+        };
+        let displays = content.displays();
+        let Some(display) = displays.iter().find(|d| d.display_id() == display_id) else {
+            return;
+        };
+        let result = SCContentFilter::create()
+            .with_display(display)
+            .with_excluding_applications(&[own], &[])
+            .build()
+            .and_then(|filter| stream.update_content_filter(&filter));
+        match result {
+            Ok(()) => tracing::info!("now excluding Visor's windows from capture"),
+            Err(e) => tracing::warn!("could not exclude Visor's windows from capture: {e}"),
+        }
+        return;
     }
 }
 

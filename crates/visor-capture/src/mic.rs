@@ -113,11 +113,17 @@ impl MicStream {
                     .build_input_stream_raw(config.into(), format, on_data, on_error, None)
                     .context("opening microphone")
                     .and_then(|s| s.play().map(|()| s).context("starting microphone"));
-                let ok = stream.is_ok();
-                let _ = ready_tx.send(stream.map(drop));
-                if ok {
-                    // Blocks until the MicStream (and its stop sender) is dropped.
-                    let _ = stop_rx.recv();
+                match stream {
+                    Ok(stream) => {
+                        let _ = ready_tx.send(Ok(()));
+                        // Keeps the stream running until the MicStream (and
+                        // its stop sender) is dropped.
+                        let _ = stop_rx.recv();
+                        drop(stream);
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                    }
                 }
             })?;
         ready_rx.recv().context("microphone thread exited")??;
