@@ -7,22 +7,32 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use crossbeam_channel::{Sender, TrySendError, bounded};
 use screencapturekit::cm::SCFrameStatus;
-use screencapturekit::cv::CVPixelBufferLockFlags;
+use screencapturekit::cv::{CVPixelBuffer, CVPixelBufferLockFlags};
 use screencapturekit::prelude::*;
 use screencapturekit::stream::configuration::{
     PixelFormat as ScPixelFormat, color_matrix, color_space,
 };
-use visor_core::{AudioBuffer, CaptureTarget, Micros, PixelFormat, Plane, Rect, VideoFrame};
+use visor_core::{
+    AudioBuffer, CaptureTarget, Micros, PixelFormat, Plane, PlaneData, Rect, VideoFrame,
+};
 
+use crate::Drops;
 use crate::camera::CameraDevice;
 use crate::{
     AppInfo, Backend, DisplayInfo, ScreenRequest, ScreenSession, Shareable, SystemAudio, WindowInfo,
 };
 
+/// Capture buffers in ScreenCaptureKit's pool (its maximum).
+const QUEUE_DEPTH: u32 = 8;
 /// Frames buffered between capture and encoder before new ones are dropped.
-const FRAME_QUEUE: usize = 8;
+/// Frames hold their capture buffer until encoded, so this leaves the pool
+/// a few buffers to capture into while the encoder holds one.
+const FRAME_QUEUE: usize = 5;
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u16 = 2;
+
+static SCREEN_DROPS: Drops = Drops::new("encoder is behind, dropping screen frames");
+static AUDIO_DROPS: Drops = Drops::new("audio writer is behind, dropping system audio");
 
 pub struct MacBackend;
 
@@ -198,7 +208,7 @@ impl Backend for MacBackend {
             .with_pixel_format(ScPixelFormat::YCbCr_420v)
             .with_minimum_frame_interval(&CMTime::new(1, request.fps.max(1) as i32))
             .with_shows_cursor(request.show_cursor)
-            .with_queue_depth(FRAME_QUEUE as u32)
+            .with_queue_depth(QUEUE_DEPTH)
             // Pin the output to sRGB primaries with the BT.709 matrix in video
             // range, which is what the encoder tags the stream as.
             .with_color_space_name(color_space::SRGB)?
@@ -396,33 +406,81 @@ fn on_screen_sample(tx: &Sender<VideoFrame>, sample: CMSampleBuffer, kind: SCStr
     let Some(host_ts) = cmtime_micros(sample.presentation_timestamp()) else {
         return;
     };
-    let Some(pixels) = sample.pixel_buffer() else {
+    let Some(pixels) = sample.pixel_buffer().and_then(LockedPixels::new) else {
         return;
     };
-    let Ok(guard) = pixels.lock(CVPixelBufferLockFlags::READ_ONLY) else {
-        return;
-    };
-
-    let mut planes = Vec::with_capacity(2);
-    for i in 0..guard.plane_count() {
-        // SAFETY: the buffer stays locked for the lifetime of `guard`.
-        let Some(data) = (unsafe { guard.plane_data(i) }) else {
-            return;
-        };
-        planes.push(Plane {
-            data: data.to_vec(),
-            stride: guard.bytes_per_row_of_plane(i),
-        });
-    }
+    let pixels = Arc::new(pixels);
+    let planes = (0..pixels.planes.len())
+        .map(|i| Plane {
+            data: PlaneData::new(PlaneView(pixels.clone(), i)),
+            stride: pixels.buffer.bytes_per_row_of_plane(i),
+        })
+        .collect();
     let frame = VideoFrame {
         host_ts,
-        width: guard.width() as u32,
-        height: guard.height() as u32,
+        width: pixels.buffer.width() as u32,
+        height: pixels.buffer.height() as u32,
         format: PixelFormat::Nv12,
         planes,
     };
     if let Err(TrySendError::Full(_)) = tx.try_send(frame) {
-        tracing::warn!("encoder is behind; dropped a screen frame");
+        SCREEN_DROPS.record();
+    }
+}
+
+/// A capture buffer kept locked for reading until the last plane using it
+/// is dropped, so the encoder reads ScreenCaptureKit's memory directly
+/// instead of a copy made for every frame.
+struct LockedPixels {
+    buffer: CVPixelBuffer,
+    /// Each plane's bytes, valid while `buffer` is locked.
+    planes: Vec<(*const u8, usize)>,
+}
+
+// SAFETY: the pointers point into `buffer`, which is retained and stays
+// locked read-only until drop; nothing writes through them. CVPixelBuffer
+// itself is Send + Sync.
+unsafe impl Send for LockedPixels {}
+unsafe impl Sync for LockedPixels {}
+
+impl LockedPixels {
+    fn new(buffer: CVPixelBuffer) -> Option<Self> {
+        // SAFETY: balanced by the unlock in `drop`, which runs from here on.
+        unsafe { buffer.lock_raw(CVPixelBufferLockFlags::READ_ONLY) }.ok()?;
+        let mut this = Self {
+            buffer,
+            planes: Vec::new(),
+        };
+        // A nested lock, just to read the plane addresses.
+        let guard = this.buffer.lock(CVPixelBufferLockFlags::READ_ONLY).ok()?;
+        let mut planes = Vec::with_capacity(guard.plane_count());
+        for i in 0..guard.plane_count() {
+            // SAFETY: the buffer is locked; the slice is only kept as a raw
+            // pointer and length, used while our own lock is held.
+            let data = unsafe { guard.plane_data(i) }?;
+            planes.push((data.as_ptr(), data.len()));
+        }
+        drop(guard);
+        this.planes = planes;
+        Some(this)
+    }
+}
+
+impl Drop for LockedPixels {
+    fn drop(&mut self) {
+        // SAFETY: locked in `new`.
+        let _ = unsafe { self.buffer.unlock_raw(CVPixelBufferLockFlags::READ_ONLY) };
+    }
+}
+
+/// One plane of a [`LockedPixels`].
+struct PlaneView(Arc<LockedPixels>, usize);
+
+impl AsRef<[u8]> for PlaneView {
+    fn as_ref(&self) -> &[u8] {
+        let (ptr, len) = self.0.planes[self.1];
+        // SAFETY: see `LockedPixels`.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 }
 
@@ -471,7 +529,7 @@ fn on_audio_sample(tx: &Sender<AudioBuffer>, sample: CMSampleBuffer, kind: SCStr
         samples,
     };
     if let Err(TrySendError::Full(_)) = tx.try_send(buffer) {
-        tracing::warn!("audio writer is behind; dropped a system audio buffer");
+        AUDIO_DROPS.record();
     }
 }
 

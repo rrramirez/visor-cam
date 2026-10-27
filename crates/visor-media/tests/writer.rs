@@ -11,11 +11,11 @@ fn nv12(width: u32, height: u32, stride: usize, luma: u8) -> VideoFrame {
         format: PixelFormat::Nv12,
         planes: vec![
             Plane {
-                data: vec![luma; s * h],
+                data: vec![luma; s * h].into(),
                 stride: s,
             },
             Plane {
-                data: vec![128; s * h / 2],
+                data: vec![128; s * h / 2].into(),
                 stride: s,
             },
         ],
@@ -120,7 +120,7 @@ fn converts_bgra_input() {
             height: h,
             format: PixelFormat::Bgra,
             planes: vec![Plane {
-                data: vec![(i * 20) as u8; stride * h as usize],
+                data: vec![(i * 20) as u8; stride * h as usize].into(),
                 stride,
             }],
         };
@@ -129,5 +129,48 @@ fn converts_bgra_input() {
     writer.finish(333_330).unwrap();
     let mut input = ffmpeg::format::input(&path).unwrap();
     assert_eq!(input.packets().count(), 10);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn converts_rgbx_like_bgra() {
+    let dir = std::env::temp_dir().join(format!("visor-rgbx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (w, h, stride) = (64u32, 48u32, 256usize);
+    // Pure red in each byte order.
+    let mut bgra = vec![0u8; stride * h as usize];
+    let mut rgbx = vec![0u8; stride * h as usize];
+    for px in 0..stride * h as usize / 4 {
+        bgra[px * 4..px * 4 + 4].copy_from_slice(&[0, 0, 255, 255]);
+        rgbx[px * 4..px * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+    }
+    let mut decoded = Vec::new();
+    for (name, format, data) in [
+        ("bgra", PixelFormat::Bgra, bgra),
+        ("rgbx", PixelFormat::Rgbx, rgbx),
+    ] {
+        let path = dir.join(format!("{name}.mp4"));
+        let mut writer = VideoWriter::create(&path, w, h, 30).unwrap();
+        let frame = VideoFrame {
+            host_ts: 0,
+            width: w,
+            height: h,
+            format,
+            planes: vec![Plane {
+                data: data.into(),
+                stride,
+            }],
+        };
+        writer.write(&frame, 0, false).unwrap();
+        writer.finish(33_333).unwrap();
+        let target = Some((ffmpeg::format::Pixel::RGBA, w, h));
+        let mut reader = visor_media::decode::VideoReader::open(&path, target).unwrap();
+        let (_, f) = reader.next_frame().unwrap().unwrap();
+        let px = &f.data(0)[..4];
+        decoded.push((px[0], px[1], px[2]));
+    }
+    for (r, g, b) in &decoded {
+        assert!(*r > 230 && *g < 25 && *b < 25, "{decoded:?}");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

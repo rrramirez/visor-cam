@@ -325,7 +325,7 @@ fn to_video_frame(f: &frame::Video, width: u32, height: u32, host_ts: Micros) ->
     let plane = |i: usize, rows: usize| {
         let stride = f.stride(i);
         Plane {
-            data: f.data(i)[..stride * rows].to_vec(),
+            data: f.data(i)[..stride * rows].to_vec().into(),
             stride,
         }
     };

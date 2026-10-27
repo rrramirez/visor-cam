@@ -73,11 +73,14 @@ use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Recta
 use visor_core::{AudioBuffer, CaptureTarget, Micros, PixelFormat, Plane, Rect, VideoFrame};
 
 use crate::{
-    AppInfo, Backend, DisplayInfo, ScreenRequest, ScreenSession, Shareable, SystemAudio, host_now,
+    AppInfo, Backend, DisplayInfo, Drops, ScreenRequest, ScreenSession, Shareable, SystemAudio,
+    host_now,
 };
 
 /// Frames buffered between capture and encoder before new ones are dropped.
 const FRAME_QUEUE: usize = 8;
+static SCREEN_DROPS: Drops = Drops::new("encoder is behind, dropping screen frames");
+static AUDIO_DROPS: Drops = Drops::new("audio writer is behind, dropping system audio");
 const AUDIO_QUEUE: usize = 256;
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u32 = 2;
@@ -561,19 +564,24 @@ impl VideoState {
             height,
         };
         let region = self.area_px.or(crop).map_or(full, |r| r.intersect(&full));
-        let pixels = copy_to_bgra(src, stride, fmt, region, out);
+        let pixels = crop_pixels(src, stride, region, out);
         let frame = VideoFrame {
             host_ts,
             width: out.0,
             height: out.1,
-            format: PixelFormat::Bgra,
+            // The encoder converts either byte order; no swizzle here.
+            format: if fmt.is_rgb_order() {
+                PixelFormat::Rgbx
+            } else {
+                PixelFormat::Bgra
+            },
             planes: vec![Plane {
-                data: pixels,
+                data: pixels.into(),
                 stride: out.0 as usize * 4,
             }],
         };
         if let Err(TrySendError::Full(_)) = self.tx.try_send(frame) {
-            tracing::warn!("encoder is behind; dropped a screen frame");
+            SCREEN_DROPS.record();
         }
     }
 }
@@ -810,7 +818,7 @@ fn run_audio(
                 samples,
             };
             if let Err(TrySendError::Full(_)) = st.tx.try_send(buffer) {
-                tracing::warn!("audio writer is behind; dropped a system audio buffer");
+                AUDIO_DROPS.record();
             }
         })
         .register()?;
@@ -1168,29 +1176,26 @@ fn area_crop(
 /// of `out` size, swizzling RGB-ordered input. The region is anchored
 /// top-left: it is cropped if larger than `out` and padded with black if
 /// smaller. Rows missing from a short `src` are left black.
-fn copy_to_bgra(
-    src: &[u8],
-    stride: usize,
-    fmt: SrcFormat,
-    region: PixelRect,
-    out: (u32, u32),
-) -> Vec<u8> {
+/// Copies `region` of a 4-byte-per-pixel image into a tightly packed
+/// `out`-sized one, padding with black if the region is smaller.
+fn crop_pixels(src: &[u8], stride: usize, region: PixelRect, out: (u32, u32)) -> Vec<u8> {
     let (out_w, out_h) = (out.0 as usize, out.1 as usize);
-    let mut dst = vec![0u8; out_w * out_h * 4];
     let w = (region.width as usize).min(out_w);
     let h = (region.height as usize).min(out_h);
-    for row in 0..h {
+    let rows = (0..h).map_while(|row| {
         let start = (region.y as usize + row) * stride + region.x as usize * 4;
-        let Some(line) = src.get(start..start + w * 4) else {
-            break;
-        };
-        let target = &mut dst[row * out_w * 4..][..w * 4];
-        target.copy_from_slice(line);
-        if fmt.is_rgb_order() {
-            for px in target.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-        }
+        src.get(start..start + w * 4)
+    });
+    if (w, h) == (out_w, out_h) {
+        let mut dst = Vec::with_capacity(out_w * out_h * 4);
+        rows.for_each(|line| dst.extend_from_slice(line));
+        // A short source leaves the rest black.
+        dst.resize(out_w * out_h * 4, 0);
+        return dst;
+    }
+    let mut dst = vec![0u8; out_w * out_h * 4];
+    for (row, line) in rows.enumerate() {
+        dst[row * out_w * 4..][..w * 4].copy_from_slice(line);
     }
     dst
 }
@@ -1357,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_swizzles_rgb_and_crops_region() {
+    fn crop_keeps_byte_order_and_crops_region() {
         // 3x2 RGBA frame with stride padding of 4 bytes.
         let stride = 16;
         let mut src = vec![0u8; stride * 2];
@@ -1373,16 +1378,14 @@ mod tests {
             width: 2,
             height: 2,
         };
-        let out = copy_to_bgra(&src, stride, SrcFormat::Rgba, region, (2, 2));
+        let out = crop_pixels(&src, stride, region, (2, 2));
         assert_eq!(
             out,
             [
-                100, 1, 10, 255, 100, 1, 20, 255, //
-                101, 1, 10, 255, 101, 1, 20, 255,
+                10, 1, 100, 255, 20, 1, 100, 255, //
+                10, 1, 101, 255, 20, 1, 101, 255,
             ]
         );
-        let same = copy_to_bgra(&src, stride, SrcFormat::Bgra, region, (2, 2));
-        assert_eq!(&same[..4], &[10, 1, 100, 255]);
     }
 
     #[test]
@@ -1394,7 +1397,7 @@ mod tests {
             width: 2,
             height: 2,
         };
-        let out = copy_to_bgra(&src, 8, SrcFormat::Bgrx, full, (4, 3));
+        let out = crop_pixels(&src, 8, full, (4, 3));
         assert_eq!(out.len(), 4 * 3 * 4);
         assert_eq!(&out[..8], &[7; 8]);
         assert_eq!(&out[8..16], &[0; 8]);
@@ -1410,7 +1413,7 @@ mod tests {
             width: 4,
             height: 2,
         };
-        let out = copy_to_bgra(&src, 16, SrcFormat::Bgrx, full, (4, 2));
+        let out = crop_pixels(&src, 16, full, (4, 2));
         assert!(out[..16].iter().all(|&b| b == 1));
         assert!(out[16..].iter().all(|&b| b == 0));
     }

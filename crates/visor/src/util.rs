@@ -47,27 +47,32 @@ pub fn nv12_square_preview(frame: &VideoFrame, size: u32) -> Option<SharedPixelB
     let side = w.min(h);
     let (x0, y0) = ((w - side) / 2, (h - side) / 2);
     let (y_plane, uv_plane) = (&frame.planes[0], &frame.planes[1]);
-    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(size, size);
-    let out = buf.make_mut_slice();
     let n = size as usize;
-    for oy in 0..n {
+    // Source column of each output column, mirrored horizontally like a
+    // selfie camera.
+    let cols: Vec<usize> = (0..n).map(|ox| x0 + (n - 1 - ox) * side / n).collect();
+    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(size, size);
+    for (oy, row) in buf.make_mut_slice().chunks_exact_mut(n).enumerate() {
         let sy = y0 + oy * side / n;
-        for ox in 0..n {
-            // Mirror horizontally, like a selfie camera.
-            let sx = x0 + (n - 1 - ox) * side / n;
-            let luma = f32::from(y_plane.data[sy * y_plane.stride + sx]);
-            let uv = (sy / 2) * uv_plane.stride + (sx & !1);
-            let cb = f32::from(uv_plane.data[uv]) - 128.0;
-            let cr = f32::from(uv_plane.data[uv + 1]) - 128.0;
-            let c = (luma - 16.0) * 1.164;
-            let px = &mut out[oy * n + ox];
-            px.r = (c + 1.793 * cr).clamp(0.0, 255.0) as u8;
-            px.g = (c - 0.213 * cb - 0.533 * cr).clamp(0.0, 255.0) as u8;
-            px.b = (c + 2.112 * cb).clamp(0.0, 255.0) as u8;
+        let luma = &y_plane.data[sy * y_plane.stride..];
+        let chroma = &uv_plane.data[(sy / 2) * uv_plane.stride..];
+        for (px, &sx) in row.iter_mut().zip(&cols) {
+            // BT.709 video range to RGB in 10-bit fixed point: this runs on
+            // the UI thread for every pixel of every camera frame.
+            let c = (i32::from(luma[sx]) - 16) * 1192;
+            let cb = i32::from(chroma[sx & !1]) - 128;
+            let cr = i32::from(chroma[sx | 1]) - 128;
+            px.r = clamp_u8((c + 1836 * cr) >> 10);
+            px.g = clamp_u8((c - 218 * cb - 546 * cr) >> 10);
+            px.b = clamp_u8((c + 2163 * cb) >> 10);
             px.a = 255;
         }
     }
     Some(buf)
+}
+
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
 }
 
 /// SVG path (viewbox 1000 x 100) of a mirrored waveform from peak levels.
@@ -120,11 +125,11 @@ mod tests {
             format: PixelFormat::Nv12,
             planes: vec![
                 Plane {
-                    data: vec![235; 32],
+                    data: vec![235; 32].into(),
                     stride: 8,
                 },
                 Plane {
-                    data: vec![128; 16],
+                    data: vec![128; 16].into(),
                     stride: 8,
                 },
             ],

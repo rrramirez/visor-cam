@@ -31,11 +31,11 @@ pub fn nv12(w: u32, h: u32, y: u8, uv: u8) -> VideoFrame {
         format: PixelFormat::Nv12,
         planes: vec![
             Plane {
-                data: vec![y; w * h],
+                data: vec![y; w * h].into(),
                 stride: w,
             },
             Plane {
-                data: vec![uv; w * h / 2],
+                data: vec![uv; w * h / 2].into(),
                 stride: w,
             },
         ],

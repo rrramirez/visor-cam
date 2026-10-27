@@ -87,9 +87,24 @@ impl MicStream {
         let (stop_tx, stop_rx) = bounded::<()>(0);
         let (ready_tx, ready_rx) = bounded(1);
 
+        // The callback runs on the OS's real-time audio thread, so it only
+        // converts, meters and hands the buffer over without locking; this
+        // thread fans it out to subscribers. It ends with the stream.
+        let (raw_tx, raw_rx) = bounded::<AudioBuffer>(256);
+        {
+            let tap = tap.clone();
+            thread::Builder::new()
+                .name("visor-mic-fanout".into())
+                .spawn(move || {
+                    for buffer in raw_rx {
+                        tap.send(Arc::new(buffer));
+                    }
+                })?;
+        }
+
         // cpal streams are not Send on every platform, so the stream lives on
         // its own thread until the MicStream is dropped.
-        let (cb_tap, cb_peak) = (tap.clone(), peak.clone());
+        let cb_peak = peak.clone();
         thread::Builder::new()
             .name("visor-mic".into())
             .spawn(move || {
@@ -101,12 +116,12 @@ impl MicStream {
                     let latency = ts.callback.duration_since(ts.capture).as_micros() as Micros;
                     let level = samples.iter().fold(0f32, |m, s| m.max(s.abs())).min(1.0);
                     cb_peak.fetch_max(level.to_bits(), Ordering::Relaxed);
-                    cb_tap.send(Arc::new(AudioBuffer {
+                    let _ = raw_tx.try_send(AudioBuffer {
                         host_ts: host_now().saturating_sub(latency),
                         sample_rate,
                         channels,
                         samples,
-                    }));
+                    });
                 };
                 let on_error = |e| tracing::error!("microphone stream error: {e}");
                 let stream = device

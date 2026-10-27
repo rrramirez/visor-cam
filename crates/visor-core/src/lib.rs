@@ -10,7 +10,7 @@ pub mod time;
 pub use clock::MediaClock;
 pub use config::{AudioConfig, CaptureTarget, RecordingConfig, Rect};
 pub use edit::{EditList, Range};
-pub use media::{AudioBuffer, PixelFormat, Plane, VideoFrame};
+pub use media::{AudioBuffer, PixelFormat, Plane, PlaneData, VideoFrame};
 pub use project::{CameraOverlay, Project, Track, Tracks};
 
 /// Microseconds. Every timestamp and duration in Visor uses this unit.

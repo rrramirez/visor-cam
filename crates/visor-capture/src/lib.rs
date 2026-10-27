@@ -4,6 +4,7 @@
 //! Every buffer is stamped with [`host_now`]'s clock so tracks recorded by
 //! different sources line up.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
@@ -128,6 +129,39 @@ pub fn backend() -> anyhow::Result<Arc<dyn Backend>> {
     return Ok(Arc::new(linux::LinuxBackend));
     #[cfg(not(any(unix, target_os = "windows")))]
     anyhow::bail!("no capture backend for this OS yet");
+}
+
+/// Counts items a capture callback dropped because its consumer fell
+/// behind, and logs a summary at most once a second. Logging every drop
+/// from the callback would add work exactly when the system is behind.
+pub(crate) struct Drops {
+    what: &'static str,
+    count: AtomicU64,
+    last_log: AtomicU64,
+}
+
+impl Drops {
+    pub const fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            count: AtomicU64::new(0),
+            last_log: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record(&self) {
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = host_now();
+        let last = self.last_log.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 1_000_000
+            && self
+                .last_log
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!("{}; {count} dropped so far", self.what);
+        }
+    }
 }
 
 /// Fans one producer out to any number of subscribers. Slow subscribers lose

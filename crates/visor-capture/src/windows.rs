@@ -69,12 +69,14 @@ use crate::capture_math::{
     hns_to_micros,
 };
 use crate::{
-    AppInfo, Backend, DisplayInfo, ScreenRequest, ScreenSession, Shareable, SystemAudio,
+    AppInfo, Backend, DisplayInfo, Drops, ScreenRequest, ScreenSession, Shareable, SystemAudio,
     WindowInfo, host_now,
 };
 
 /// Frames buffered between capture and encoder before new ones are dropped.
 const FRAME_QUEUE: usize = 8;
+static SCREEN_DROPS: Drops = Drops::new("encoder is behind, dropping screen frames");
+static AUDIO_DROPS: Drops = Drops::new("audio writer is behind, dropping system audio");
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u16 = 2;
 /// WASAPI buffer length, in 100 ns units (200 ms).
@@ -350,14 +352,14 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
         let raw = buffer.as_raw_buffer();
         let plane = if (bw, bh) == self.size && raw.len() >= pitch * bh as usize {
             Plane {
-                data: raw[..pitch * bh as usize].to_vec(),
+                data: raw[..pitch * bh as usize].to_vec().into(),
                 stride: pitch,
             }
         } else {
             // The source changed size (window resized, display mode change):
             // keep the session's size by cropping or padding.
             Plane {
-                data: blit_bgra(raw, pitch, (bw, bh), self.size),
+                data: blit_bgra(raw, pitch, (bw, bh), self.size).into(),
                 stride: width as usize * 4,
             }
         };
@@ -369,9 +371,7 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
             planes: vec![plane],
         };
         match tx.try_send(frame) {
-            Err(TrySendError::Full(_)) => {
-                tracing::warn!("encoder is behind; dropped a screen frame");
-            }
+            Err(TrySendError::Full(_)) => SCREEN_DROPS.record(),
             Err(TrySendError::Disconnected(_)) => self.tx = None,
             Ok(()) => {}
         }
@@ -829,9 +829,7 @@ fn audio_loop(
                 samples,
             };
             match tx.try_send(buffer) {
-                Err(TrySendError::Full(_)) => {
-                    tracing::warn!("audio writer is behind; dropped a system audio buffer");
-                }
+                Err(TrySendError::Full(_)) => AUDIO_DROPS.record(),
                 Err(TrySendError::Disconnected(_)) => return Ok(()),
                 Ok(()) => {}
             }

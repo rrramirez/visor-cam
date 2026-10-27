@@ -1,5 +1,6 @@
 //! Per-track encoders used while recording.
 
+use std::ffi::c_void;
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
@@ -7,7 +8,9 @@ use ffmpeg_next::{
     self as ffmpeg, Dictionary, Packet, Rational, codec, color, encoder, format, frame, picture,
     software::scaling,
 };
-use visor_core::{Micros, PixelFormat, VideoFrame};
+use visor_core::{Micros, PixelFormat, Plane, PlaneData, VideoFrame};
+
+use crate::scale::Scaler;
 
 /// Encoder timestamps are in microseconds, matching [`Micros`].
 const MICROS: Rational = Rational(1, 1_000_000);
@@ -17,6 +20,7 @@ const H264_ENCODERS: &[&str] = &[
     "h264_videotoolbox",
     "h264_nvenc",
     "h264_qsv",
+    "h264_amf",
     "h264_vaapi",
     "libx264",
 ];
@@ -27,8 +31,8 @@ pub struct VideoWriter {
     output: format::context::Output,
     encoder: encoder::Video,
     frame: frame::Video,
-    /// BGRA staging frame and converter, created on the first BGRA input.
-    bgra: Option<(frame::Video, scaling::Context)>,
+    /// RGB to NV12 converter, created on the first RGB input.
+    rgb: Option<Scaler>,
     stream_time_base: Rational,
     last_pts: Option<Micros>,
     /// Nominal frame duration. Only the final sample's length depends on it;
@@ -76,7 +80,7 @@ impl VideoWriter {
                         output,
                         encoder,
                         frame: frame::Video::new(format::Pixel::NV12, width, height),
-                        bgra: None,
+                        rgb: None,
                         stream_time_base,
                         last_pts: None,
                         frame_duration: 1_000_000 / Micros::from(fps.max(1)),
@@ -127,24 +131,28 @@ impl VideoWriter {
                 copy_plane(&mut self.frame, 0, &y.data, y.stride, w, h);
                 copy_plane(&mut self.frame, 1, &uv.data, uv.stride, w, h / 2);
             }
-            (PixelFormat::Bgra, [bgra]) => {
-                let (stage, sws) = match &mut self.bgra {
-                    Some(b) => b,
-                    None => self.bgra.insert((
-                        frame::Video::new(format::Pixel::BGRA, w as u32, h as u32),
-                        scaling::Context::get(
-                            format::Pixel::BGRA,
-                            w as u32,
-                            h as u32,
-                            format::Pixel::NV12,
-                            w as u32,
-                            h as u32,
-                            scaling::Flags::BILINEAR,
-                        )?,
-                    )),
+            (PixelFormat::Bgra | PixelFormat::Rgbx, [plane]) => {
+                let fmt = if src.format == PixelFormat::Bgra {
+                    format::Pixel::BGRA
+                } else {
+                    format::Pixel::RGBA
                 };
-                copy_plane(stage, 0, &bgra.data, bgra.stride, w * 4, h);
-                sws.run(stage, &mut self.frame)?;
+                let input = (fmt, w as u32, h as u32);
+                if self.rgb.as_ref().is_none_or(|s| s.input() != input) {
+                    // Half the cores: at 4K60 one core can't keep up.
+                    let threads = std::thread::available_parallelism().map_or(2, |n| n.get() / 2);
+                    self.rgb = Some(Scaler::new(
+                        input,
+                        (format::Pixel::NV12, w as u32, h as u32),
+                        scaling::Flags::FAST_BILINEAR,
+                        threads.max(1),
+                    )?);
+                }
+                let src_frame = borrow_plane(plane, fmt, w, h)?;
+                self.rgb
+                    .as_mut()
+                    .unwrap()
+                    .run(&src_frame, &mut self.frame)?;
             }
             _ => bail!(
                 "unsupported frame layout {:?} with {} planes",
@@ -235,6 +243,58 @@ fn open_h264(
         _ => {}
     }
     enc.open_with(opts)
+}
+
+/// A frame that reads `plane`'s pixels where they are, instead of copying
+/// them into a staging frame. The frame's buffer keeps the plane alive.
+fn borrow_plane(
+    plane: &Plane,
+    fmt: format::Pixel,
+    width: usize,
+    height: usize,
+) -> anyhow::Result<frame::Video> {
+    let row = width * 4;
+    if height == 0 || plane.stride < row || plane.data.len() < plane.stride * (height - 1) + row {
+        bail!(
+            "{width}x{height} frame doesn't fit its {} byte plane",
+            plane.data.len()
+        );
+    }
+    unsafe extern "C" fn release(opaque: *mut c_void, _data: *mut u8) {
+        // SAFETY: `opaque` is the box leaked below, freed once, here.
+        drop(unsafe { Box::from_raw(opaque.cast::<PlaneData>()) });
+    }
+    let data = Box::new(plane.data.clone());
+    let (ptr, len) = (data.as_ptr().cast_mut(), data.len());
+    let opaque = Box::into_raw(data);
+    // SAFETY: the buffer is read-only and owns the PlaneData it points into.
+    let buf = unsafe {
+        ffmpeg::ffi::av_buffer_create(
+            ptr,
+            len,
+            Some(release),
+            opaque.cast(),
+            ffmpeg::ffi::AV_BUFFER_FLAG_READONLY,
+        )
+    };
+    if buf.is_null() {
+        // SAFETY: not handed to FFmpeg.
+        drop(unsafe { Box::from_raw(opaque) });
+        bail!("could not wrap a frame buffer");
+    }
+    let mut f = frame::Video::empty();
+    // SAFETY: an empty frame takes ownership of `buf`; the fields describe
+    // the plane checked above.
+    unsafe {
+        let raw = f.as_mut_ptr();
+        (*raw).buf[0] = buf;
+        (*raw).data[0] = ptr;
+        (*raw).linesize[0] = plane.stride as i32;
+        (*raw).format = ffmpeg::ffi::AVPixelFormat::from(fmt) as i32;
+        (*raw).width = width as i32;
+        (*raw).height = height as i32;
+    }
+    Ok(f)
 }
 
 fn copy_plane(
