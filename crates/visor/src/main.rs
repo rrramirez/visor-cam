@@ -7,6 +7,9 @@
 //!                                 start recording right away with the saved
 //!                                 preferences (optionally stopping after S s)
 
+// A windowed app on Windows (no console window); logs go to visor.log.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod editor;
 mod platform;

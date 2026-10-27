@@ -1,0 +1,79 @@
+# Builds Visor for Windows and packages the installer (Visor-Setup-<version>.exe).
+# Runs on demand (Actions › Windows › Run workflow) and for version tags.
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_TERM_COLOR: always
+      # Link the C runtime into visor.exe so it doesn't need the VC++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+      FFMPEG_ASSET: ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: FFmpeg (BtbN build, checksum-verified)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = Invoke-RestMethod https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest `
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
+          $asset = $release.assets | Where-Object name -eq $env:FFMPEG_ASSET
+          if (-not $asset) { throw "$env:FFMPEG_ASSET not in BtbN's latest release" }
+          $expected = $asset.digest -replace '^sha256:', ''
+          Invoke-WebRequest $asset.browser_download_url -OutFile ffmpeg.zip
+          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "FFmpeg checksum mismatch: $actual" }
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-x
+          Move-Item (Get-ChildItem ffmpeg-x -Directory | Select-Object -First 1).FullName C:\ffmpeg
+          "FFMPEG_DIR=C:\ffmpeg" >> $env:GITHUB_ENV
+          "C:\ffmpeg\bin" >> $env:GITHUB_PATH
+          # bindgen (ffmpeg-sys) needs libclang; the runner image ships LLVM.
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Build
+        run: cargo build --release -p visor
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $stage = "dist\windows\Visor"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target\release\visor.exe $stage
+          Copy-Item C:\ffmpeg\bin\*.dll $stage
+          Copy-Item LICENSE "$stage\LICENSE.txt"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          & $iscc "/DAppVersion=$version" "/DSourceDir=$PWD\$stage" packaging\windows\visor.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem dist\windows\*.exe
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Visor-Windows
+          path: dist/windows/Visor-Setup-*.exe
+          if-no-files-found: error
