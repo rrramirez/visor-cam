@@ -1,3 +1,5 @@
+mod common;
+
 use ffmpeg_next as ffmpeg;
 use visor_core::{PixelFormat, Plane, VideoFrame};
 use visor_media::VideoWriter;
@@ -53,7 +55,7 @@ fn writes_playable_mp4_with_expected_duration() {
     let duration = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     assert!((duration - 3.0).abs() < 0.05, "duration {duration}");
 
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -103,7 +105,7 @@ fn audio_writer_fills_gaps_and_pads_to_end() {
     let duration = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     assert!((duration - 2.0).abs() < 0.05, "duration {duration}");
 
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -129,7 +131,7 @@ fn converts_bgra_input() {
     writer.finish(333_330).unwrap();
     let mut input = ffmpeg::format::input(&path).unwrap();
     assert_eq!(input.packets().count(), 10);
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -172,5 +174,5 @@ fn converts_rgbx_like_bgra() {
     for (r, g, b) in &decoded {
         assert!(*r > 230 && *g < 25 && *b < 25, "{decoded:?}");
     }
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }

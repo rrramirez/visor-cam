@@ -32,7 +32,7 @@ fn seeks_frame_accurately_in_fragmented_mp4() {
         );
         assert!(took.as_millis() < 1500, "seek took {took:?}");
     }
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn reads_audio_as_48k_stereo() {
     reader.seek(1_000_000).unwrap();
     let (at, _) = reader.next_chunk().unwrap().unwrap();
     assert!(at <= 1_000_000 && at > 900_000, "seek landed at {at}");
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -65,5 +65,5 @@ fn refuses_file_lists_posing_as_tracks() {
     std::fs::write(&fake, "ffconcat version 1.0\nfile real.mp4\n").unwrap();
     assert!(VideoReader::open(&real, None).is_ok());
     assert!(VideoReader::open(&fake, None).is_err());
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }

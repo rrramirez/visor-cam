@@ -68,7 +68,7 @@ fn scrubs_plays_through_cuts_and_stops_at_end() {
         "end position {}",
         player.position()
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn builds_thumbnails_and_waveform() {
     let wave = visor_media::preview::waveform(&[&mic, &system], project.duration_us, 30).unwrap();
     assert_eq!(wave.len(), 30);
     assert!(wave.iter().all(|&p| (0.3..0.5).contains(&p)), "{wave:?}");
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -113,5 +113,5 @@ fn plays_at_the_project_speed() {
         (120_000..320_000).contains(&advanced),
         "advanced {advanced} at 0.5x"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }

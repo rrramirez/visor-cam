@@ -65,7 +65,7 @@ fn exports_mp4_with_cuts_and_bubble() {
     let u = |x: usize, y: usize| f.data(1)[y * f.stride(1) + x];
     assert!(u(50, 155) > 180, "bubble chroma {}", u(50, 155));
     assert!(u(300, 20) < 140, "screen chroma {}", u(300, 20));
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn exports_webm_vp9_and_av1() {
         };
         assert_eq!(codecs, [video, ffmpeg::codec::Id::OPUS]);
     }
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn exports_gif_and_honours_cancel() {
     );
     assert!(err.is_err());
     assert!(!cancelled.exists(), "partial file must be removed");
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }
 
 #[test]
@@ -170,5 +170,5 @@ fn exports_sped_up_video_and_audio() {
         "{} vs {expected}",
         top_luma(&f)
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    common::cleanup(&dir);
 }

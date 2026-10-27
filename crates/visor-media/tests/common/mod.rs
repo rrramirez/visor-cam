@@ -15,6 +15,13 @@ pub fn luma(i: u64) -> u8 {
     (16 + (i * 7) % 200) as u8
 }
 
+/// Removes a test folder, best effort: on Windows it fails while a decoder
+/// or player thread still has a file in it open, which doesn't matter for a
+/// temporary folder.
+pub fn cleanup(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 pub fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("visor-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
