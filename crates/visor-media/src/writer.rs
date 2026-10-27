@@ -48,7 +48,7 @@ unsafe impl Send for VideoWriter {}
 impl VideoWriter {
     pub fn create(path: &Path, width: u32, height: u32, fps: u32) -> anyhow::Result<Self> {
         ffmpeg::init()?;
-        if width % 2 != 0 || height % 2 != 0 {
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             bail!("frame size {width}x{height} must be even");
         }
         let mut output =

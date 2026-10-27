@@ -308,6 +308,17 @@ impl Backend for MacBackend {
 /// The names macOS shows for displays ("Built-in Retina Display", the
 /// monitor's model), by display id. Empty off the main thread, where AppKit
 /// can't be asked. Identical monitors get a number to tell them apart.
+/// Renames `shareable`'s displays to their macOS names (main thread only;
+/// elsewhere the names are left as they are).
+pub(crate) fn name_displays(shareable: &mut Shareable) {
+    let names = display_names();
+    for d in &mut shareable.displays {
+        if let Some(name) = names.get(&d.id) {
+            d.name.clone_from(name);
+        }
+    }
+}
+
 fn display_names() -> std::collections::HashMap<u32, String> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;

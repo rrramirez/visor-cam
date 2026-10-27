@@ -119,6 +119,16 @@ pub trait Backend: Send + Sync {
     fn start(&self, request: &ScreenRequest) -> anyhow::Result<ScreenSession>;
 }
 
+/// Gives displays the names the OS shows. On macOS those come from AppKit,
+/// which only answers on the main thread: a [`Backend::shareable`] listing
+/// made on another thread has generic names until this runs on the main one.
+pub fn name_displays(shareable: &mut Shareable) {
+    #[cfg(target_os = "macos")]
+    macos::name_displays(shareable);
+    #[cfg(not(target_os = "macos"))]
+    let _ = shareable;
+}
+
 /// The capture backend for the current OS.
 pub fn backend() -> anyhow::Result<Arc<dyn Backend>> {
     #[cfg(target_os = "macos")]

@@ -12,6 +12,7 @@
 
 mod app;
 mod editor;
+mod instance;
 mod platform;
 mod settings;
 mod tray;
@@ -28,6 +29,19 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     init_logging();
     log_panics();
+    let args = parse_args();
+
+    // Launching Visor while it runs shows the running one instead.
+    let request = match &args {
+        Args::Edit(dir) => instance::Request::Edit(dir.clone()),
+        _ => instance::Request::ShowPanel,
+    };
+    let instance = instance::claim(&request);
+    if matches!(instance, instance::Instance::HandedOver) {
+        tracing::info!("Visor is already running; handed this launch to it");
+        return Ok(());
+    }
+
     visor_media::init()?;
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -44,7 +58,14 @@ fn main() -> anyhow::Result<()> {
     backend_selector.select()?;
 
     let app = app::App::install(visor_capture::backend()?);
-    let args = parse_args();
+    if let instance::Instance::Primary(primary) = instance {
+        primary.serve(|request| {
+            app::post(move |app| match request {
+                instance::Request::ShowPanel => app.open_panel(),
+                instance::Request::Edit(dir) => app.open_editor(dir),
+            })
+        });
+    }
 
     // The tray needs a running event loop on macOS.
     slint::Timer::single_shot(Duration::ZERO, move || {

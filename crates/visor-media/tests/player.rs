@@ -12,7 +12,13 @@ fn grey(y: u8) -> f64 {
 }
 
 fn mean_red(f: &PreviewFrame) -> f64 {
-    f.rgba.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / f64::from(f.width * f.height)
+    f.rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| f64::from(p[0]))
+        .sum::<f64>()
+        / f64::from(f.width * f.height)
 }
 
 fn wait_frame(p: &mut Player) -> Arc<PreviewFrame> {

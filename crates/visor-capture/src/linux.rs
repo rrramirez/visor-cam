@@ -1063,10 +1063,11 @@ fn list_audio_apps() -> anyhow::Result<Vec<AppInfo>> {
     let _core_listener = core
         .add_listener_local()
         .done(move |id, seq| {
-            if id == pw::core::PW_ID_CORE && seq == pending {
-                if let Some(l) = weak.upgrade() {
-                    l.quit();
-                }
+            if id == pw::core::PW_ID_CORE
+                && seq == pending
+                && let Some(l) = weak.upgrade()
+            {
+                l.quit();
             }
         })
         .register();
@@ -1247,8 +1248,10 @@ fn pts_to_host(pts_ns: i64, now: Micros) -> Micros {
 
 fn f32_le_samples(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| f32::from_le_bytes(b))
         .collect()
 }
 

@@ -65,6 +65,8 @@ pub struct App {
     /// Border around the display chosen in the panel, with several displays.
     screen_highlight: RefCell<Option<Highlight>>,
     next_start_id: std::cell::Cell<u64>,
+    /// A background source listing is running (see `poll_sources`).
+    polling: std::cell::Cell<bool>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
 }
@@ -84,6 +86,8 @@ struct Panel {
     /// Chosen capture area: display id and global logical rect.
     area: Option<(u32, Rect)>,
     _meter: Timer,
+    /// Re-lists sources while the panel is open.
+    _source_poll: Timer,
 }
 
 #[derive(Default)]
@@ -140,6 +144,7 @@ impl App {
             area_window: RefCell::default(),
             screen_highlight: RefCell::default(),
             next_start_id: std::cell::Cell::new(1),
+            polling: std::cell::Cell::new(false),
             quit_pending: std::cell::Cell::new(false),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
@@ -304,6 +309,13 @@ impl App {
             mics: Vec::new(),
             area: None,
             _meter: meter,
+            _source_poll: {
+                let poll = Timer::default();
+                poll.start(TimerMode::Repeated, Duration::from_secs(2), || {
+                    app().poll_sources()
+                });
+                poll
+            },
         });
         self.refresh_sources();
         self.restore_device_choices();
@@ -438,19 +450,89 @@ impl App {
         });
     }
 
+    /// Lists screens, windows, apps, cameras and mics now and shows them.
     fn refresh_sources(&self) {
-        let sources = match self.backend.shareable() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("listing capture sources failed: {e:#}");
-                Shareable::default()
-            }
+        self.apply_sources(list_sources(self.backend.as_ref()));
+    }
+
+    /// Re-lists sources in the background while the panel is open, so newly
+    /// connected screens, cameras and mics (and new windows) show up without
+    /// a restart. Results are applied only when something changed.
+    fn poll_sources(&self) {
+        let open = self
+            .panel
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.ui.window().is_visible());
+        if !open || !matches!(*self.session.borrow(), Session::Idle) || self.polling.get() {
+            return;
+        }
+        self.polling.set(true);
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let sources = list_sources(backend.as_ref());
+            post(move |app| {
+                app.polling.set(false);
+                app.sources_polled(sources)
+            });
+        });
+    }
+
+    fn sources_polled(&self, mut sources: Sources) {
+        if !matches!(*self.session.borrow(), Session::Idle) {
+            return;
+        }
+        visor_capture::name_displays(&mut sources.shareable);
+        let (unchanged, devices_changed) = {
+            let panel = self.panel.borrow();
+            let Some(p) = panel.as_ref() else { return };
+            let devices_changed = p.cameras != sources.cameras || p.mics != sources.mics;
+            let unchanged = !devices_changed
+                && format!("{:?}", p.sources) == format!("{:?}", sources.shareable);
+            (unchanged, devices_changed)
         };
-        let cameras = camera::list();
-        let mics = mic::list();
+        if unchanged {
+            return;
+        }
+        tracing::debug!(devices_changed, "capture sources changed");
+        self.apply_sources(sources);
+        if devices_changed {
+            // Reopens the chosen camera and mic if they came back, and lets
+            // go of ones that were unplugged.
+            self.restore_device_choices();
+        }
+        self.update_screen_highlight();
+    }
+
+    /// Shows listed sources in the panel, keeping each choice on the same
+    /// screen, window or app (by id) when the lists change around it.
+    fn apply_sources(&self, sources: Sources) {
+        let Sources {
+            shareable: mut sources,
+            cameras,
+            mics,
+        } = sources;
+        visor_capture::name_displays(&mut sources);
         let mut panel = self.panel.borrow_mut();
         let Some(panel) = panel.as_mut() else { return };
         let ui = &panel.ui;
+        let pick = |i: i32| usize::try_from(i).ok();
+        let old = &panel.sources;
+        let display = pick(ui.get_display_index())
+            .and_then(|i| old.displays.get(i))
+            .map(|d| d.id);
+        let window = pick(ui.get_window_index())
+            .and_then(|i| old.windows.get(i))
+            .map(|w| w.id);
+        let app_pid = pick(ui.get_app_index())
+            .and_then(|i| old.apps.get(i))
+            .map(|a| a.pid);
+        // Index 0 is "All apps".
+        let audio_pid = pick(ui.get_audio_app_index())
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| old.apps.get(i))
+            .map(|a| a.pid);
+
         ui.set_displays(strings(sources.displays.iter().map(|d| {
             format!(
                 "{} — {}×{}",
@@ -474,18 +556,32 @@ impl App {
         ui.set_mics(strings(
             std::iter::once("No microphone".to_string()).chain(mics.iter().map(|m| m.name.clone())),
         ));
-        clamp_index(ui.get_display_index(), sources.displays.len(), |i| {
-            ui.set_display_index(i)
-        });
-        clamp_index(ui.get_window_index(), sources.windows.len(), |i| {
-            ui.set_window_index(i)
-        });
-        clamp_index(ui.get_app_index(), sources.apps.len(), |i| {
-            ui.set_app_index(i)
-        });
-        clamp_index(ui.get_audio_app_index(), sources.apps.len() + 1, |i| {
-            ui.set_audio_app_index(i)
-        });
+
+        let position = |found: Option<usize>| found.map(|i| i as i32);
+        match position(display.and_then(|id| sources.displays.iter().position(|d| d.id == id))) {
+            Some(i) => ui.set_display_index(i),
+            None => clamp_index(ui.get_display_index(), sources.displays.len(), |i| {
+                ui.set_display_index(i)
+            }),
+        }
+        match position(window.and_then(|id| sources.windows.iter().position(|w| w.id == id))) {
+            Some(i) => ui.set_window_index(i),
+            None => clamp_index(ui.get_window_index(), sources.windows.len(), |i| {
+                ui.set_window_index(i)
+            }),
+        }
+        match position(app_pid.and_then(|pid| sources.apps.iter().position(|a| a.pid == pid))) {
+            Some(i) => ui.set_app_index(i),
+            None => clamp_index(ui.get_app_index(), sources.apps.len(), |i| {
+                ui.set_app_index(i)
+            }),
+        }
+        match position(audio_pid.and_then(|pid| sources.apps.iter().position(|a| a.pid == pid))) {
+            Some(i) => ui.set_audio_app_index(i + 1),
+            None => clamp_index(ui.get_audio_app_index(), sources.apps.len() + 1, |i| {
+                ui.set_audio_app_index(i)
+            }),
+        }
 
         #[cfg(target_os = "macos")]
         {
@@ -1413,6 +1509,26 @@ fn strings(items: impl Iterator<Item = String>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
         items.map(SharedString::from).collect::<Vec<_>>(),
     ))
+}
+
+/// Everything the recorder panel can choose from.
+struct Sources {
+    shareable: Shareable,
+    cameras: Vec<CameraDevice>,
+    mics: Vec<MicDevice>,
+}
+
+/// Lists capture sources and devices; can run on any thread.
+fn list_sources(backend: &dyn Backend) -> Sources {
+    let shareable = backend.shareable().unwrap_or_else(|e| {
+        tracing::warn!("listing capture sources failed: {e:#}");
+        Shareable::default()
+    });
+    Sources {
+        shareable,
+        cameras: camera::list(),
+        mics: mic::list(),
+    }
 }
 
 fn clamp_index(current: i32, len: usize, set: impl FnOnce(i32)) {

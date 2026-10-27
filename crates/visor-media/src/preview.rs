@@ -45,7 +45,7 @@ pub fn waveform(paths: &[&Path], duration: Micros, buckets: usize) -> anyhow::Re
     for path in paths {
         let mut reader = AudioReader::open(path)?;
         while let Some((at, samples)) = reader.next_chunk()? {
-            for (i, pair) in samples.chunks_exact(2).enumerate() {
+            for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
                 let t = at + (i as u64 * 1_000_000 / 48_000);
                 let b = ((u128::from(t) * buckets as u128 / u128::from(duration)) as usize)
                     .min(buckets - 1);

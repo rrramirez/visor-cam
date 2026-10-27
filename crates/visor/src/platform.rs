@@ -101,16 +101,24 @@ pub fn activate() {
 
 /// Opens the file manager with `path` selected.
 pub fn reveal(path: &Path) {
-    let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-    } else if cfg!(target_os = "windows") {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "windows")]
+    let result = {
+        use std::os::windows::process::CommandExt;
+        // Explorer parses its command line itself and wants
+        // `/select,"C:\a b\c.mp4"`. The usual quoting of the whole argument
+        // (`"/select,C:\a b\c.mp4"`) makes it ignore the path and open
+        // Documents. Windows paths can't contain `"`, so this quoting is safe.
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
+            .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn()
-    } else {
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = {
         let dir = if path.is_dir() {
             path
         } else {

@@ -75,8 +75,8 @@ impl Tempo {
         f.set_pts(Some(self.pts));
         self.pts += samples as i64;
         let bytes = &mut f.data_mut(0)[..samples * channels * 4];
-        for (chunk, s) in bytes.chunks_exact_mut(4).zip(input) {
-            chunk.copy_from_slice(&s.to_ne_bytes());
+        for (chunk, s) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(input) {
+            *chunk = s.to_ne_bytes();
         }
         graph.get("in").context("tempo input")?.source().add(&f)?;
         drain(graph, out)
@@ -99,8 +99,10 @@ fn drain(graph: &mut filter::Graph, out: &mut Vec<f32>) -> anyhow::Result<()> {
         let n = f.samples() * usize::from(CHANNELS);
         out.extend(
             f.data(0)[..n * 4]
-                .chunks_exact(4)
-                .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]])),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_ne_bytes(b)),
         );
     }
     Ok(())
