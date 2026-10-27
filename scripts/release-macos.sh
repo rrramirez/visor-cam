@@ -31,7 +31,8 @@ scripts/package-macos.sh
 dmg="dist/Visor-$version.dmg"
 
 if ! $adhoc; then
-    codesign -dv dist/Visor.app 2>&1 | grep -q "Authority=Developer ID Application" || {
+    signature="$(codesign -dvv dist/Visor.app 2>&1)"
+    grep -q "Authority=Developer ID Application" <<<"$signature" || {
         echo "error: not signed with a Developer ID (pass --adhoc to release anyway)" >&2
         exit 1
     }
