@@ -13,12 +13,9 @@ the steps below, and when something goes wrong, send the log file (see
 ### Mac (Apple Silicon, macOS 14 or later)
 
 1. Open `Visor-<version>.dmg` and drag **Visor** to **Applications**.
-2. Open Visor. macOS warns it can't verify the app (it isn't notarized yet).
-   Close the warning.
-3. Open **System Settings › Privacy & Security**, scroll down and click
-   **Open Anyway** next to the message about Visor, then confirm.
-   (On macOS 14: right-click Visor in Applications › **Open** instead.)
-4. Visor lives in the menu bar. When asked, allow **Screen Recording**
+2. Open Visor and confirm that you want to open an app downloaded from the
+   internet. (Visor is signed and notarized by Apple.)
+3. Visor lives in the menu bar. When asked, allow **Screen Recording**
    (System Settings may need you to quit and reopen Visor), then camera and
    microphone when you pick them.
 
