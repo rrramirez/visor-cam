@@ -56,7 +56,9 @@ pc aom "$(pkg-config --modversion aom)" "-l:libaom.a -l:libwinpthread.a" "-I$inc
 cp /mingw64/lib/pkgconfig/ffnvcodec.pc "$static/lib/pkgconfig/"
 
 echo "==> Configuring"
-PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" ./configure \
+# MSYS2 sets PKG_CONFIG_PATH to its own folders, which pkg-config searches
+# before PKG_CONFIG_LIBDIR; clear it so only the files above are seen.
+PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" ./configure \
     --prefix="$prefix" \
     --enable-shared --disable-static \
     --enable-gpl --enable-version3 \
@@ -81,7 +83,7 @@ PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" ./configure \
 
 # Which libraries configure chose, for the log.
 grep -E "^EXTRALIBS" ffbuild/config.mak || true
-PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" pkg-config --libs x264 vpx opus aom || true
+PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" pkg-config --libs x264 vpx opus aom || true
 
 echo "==> Building"
 make -j"$(nproc)"
