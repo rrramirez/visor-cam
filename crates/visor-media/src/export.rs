@@ -12,13 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, anyhow, bail};
 use ffmpeg_next::{
     self as ffmpeg, ChannelLayout, Dictionary, Packet, Rational, codec, encoder, filter, format,
-    format::sample::Type, frame,
+    format::sample::Type, frame, software::scaling,
 };
 use visor_core::{EditList, Micros, Project};
 
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::composite::Bubble;
-use crate::decode::{AudioReader, VideoReader};
+use crate::decode::{AudioReader, VideoReader, new_ref, reuse_or_alloc};
 use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
@@ -109,10 +109,11 @@ fn run(
         screen_track.fps.unwrap_or(30).clamp(1, 120)
     };
 
-    let screen = FrameCursor::new(VideoReader::open(
-        &screen_path,
-        Some((format::Pixel::YUV420P, out_w, out_h)),
-    )?);
+    let mut screen_reader =
+        VideoReader::open(&screen_path, Some((format::Pixel::YUV420P, out_w, out_h)))?;
+    // Half the cores, like the encoder.
+    screen_reader.set_scaling(scaling::Flags::BILINEAR, encoder_threads());
+    let screen = FrameCursor::new(screen_reader);
     let camera = match &project.tracks.camera {
         Some(track) => match Bubble::new(&project.camera_overlay, out_w, out_h) {
             Some(bubble) => {
@@ -148,16 +149,18 @@ fn run(
         speed,
         screen,
         camera,
+        composed: frame::Video::empty(),
     };
 
     if gif {
-        // Pass 1: build an optimal palette over every frame.
+        // Pass 1: build a palette from a sample of the frames; neighbouring
+        // frames of screen video add almost no new colors.
         let mut palette_graph = gif_palette_graph(out_w, out_h, fps)?;
-        for k in 0..total_frames {
+        for k in (0..total_frames).step_by(GIF_PALETTE_STEP) {
             check(cancel)?;
-            let f = renderer.render(k)?;
+            let f = new_ref(renderer.render(k)?)?;
             palette_graph.get("in").unwrap().source().add(&f)?;
-            progress(0.5 * (k + 1) as f32 / total_frames as f32);
+            progress(0.25 * (k + 1) as f32 / total_frames as f32);
         }
         palette_graph.get("in").unwrap().source().flush()?;
         let mut palette = frame::Video::empty();
@@ -177,12 +180,12 @@ fn run(
         let mut mapped = frame::Video::empty();
         for k in 0..total_frames {
             check(cancel)?;
-            let f = renderer.render(k)?;
+            let f = new_ref(renderer.render(k)?)?;
             graph.get("in").unwrap().source().add(&f)?;
             while graph.get("out").unwrap().sink().frame(&mut mapped).is_ok() {
                 muxer.video(&mapped)?;
             }
-            progress(0.5 + 0.5 * (k + 1) as f32 / total_frames as f32);
+            progress(0.25 + 0.75 * (k + 1) as f32 / total_frames as f32);
         }
         graph.get("in").unwrap().source().flush()?;
         while graph.get("out").unwrap().sink().frame(&mut mapped).is_ok() {
@@ -197,24 +200,42 @@ fn run(
     let mut stretched = Vec::new();
     // Edit-time samples read so far (before the speed change).
     let mut audio_read = 0i64;
-    for k in 0..total_frames {
-        check(cancel)?;
-        muxer.video(&renderer.render(k)?)?;
-        if let Some(mix) = &mut audio {
-            // Audio through the end of this frame.
-            let end = segments
-                .total
-                .min(micros_to_samples(edit_us(k + 1)))
-                .max(audio_read);
-            for (src, len) in segments.pieces(audio_read, end - audio_read) {
-                stretched.clear();
-                tempo.process(&mix.read(src, len)?, &mut stretched)?;
-                muxer.audio(&stretched)?;
+    // Frames are rendered (decode, scale, composite) on their own thread,
+    // so that work overlaps with encoding.
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let (tx, rx) = crossbeam_channel::bounded(RENDER_AHEAD);
+        scope.spawn(move || {
+            for k in 0..total_frames {
+                let frame = renderer.render(k).and_then(new_ref);
+                let failed = frame.is_err();
+                // Stops when the encoder side has given up.
+                if tx.send(frame).is_err() || failed || cancel.load(Ordering::Relaxed) {
+                    break;
+                }
             }
-            audio_read = end;
+        });
+        for k in 0..total_frames {
+            check(cancel)?;
+            let frame = rx.recv().context("rendering stopped")??;
+            muxer.video(&frame)?;
+            drop(frame);
+            if let Some(mix) = &mut audio {
+                // Audio through the end of this frame.
+                let end = segments
+                    .total
+                    .min(micros_to_samples(edit_us(k + 1)))
+                    .max(audio_read);
+                for (src, len) in segments.pieces(audio_read, end - audio_read) {
+                    stretched.clear();
+                    tempo.process(&mix.read(src, len)?, &mut stretched)?;
+                    muxer.audio(&stretched)?;
+                }
+                audio_read = end;
+            }
+            progress((k + 1) as f32 / total_frames as f32);
         }
-        progress((k + 1) as f32 / total_frames as f32);
-    }
+        Ok(())
+    })?;
     if let Some(mix) = &mut audio {
         stretched.clear();
         for (src, len) in segments.pieces(audio_read, segments.total - audio_read) {
@@ -226,6 +247,12 @@ fn run(
     muxer.finish()
 }
 
+/// Frames rendered ahead of the encoder.
+const RENDER_AHEAD: usize = 3;
+
+/// GIF palettes are built from every this many frames.
+const GIF_PALETTE_STEP: usize = 3;
+
 /// Produces composited output frames (YUV420P at output size).
 struct Renderer<'a> {
     edit: &'a EditList,
@@ -233,29 +260,38 @@ struct Renderer<'a> {
     speed: f64,
     screen: FrameCursor,
     camera: Option<(FrameCursor, Bubble)>,
+    /// Screen frame with the camera bubble on it; reused across frames.
+    composed: frame::Video,
 }
 
 impl Renderer<'_> {
     /// Output frame `k`, stamped with pts `k`.
-    fn render(&mut self, k: u64) -> anyhow::Result<frame::Video> {
+    fn render(&mut self, k: u64) -> anyhow::Result<&frame::Video> {
         // Output frame time, sped up or slowed down into edit time.
         let t_out = (k as f64 * 1e6 / f64::from(self.fps) * self.speed) as Micros;
         let t_src = self
             .edit
             .to_source(t_out)
             .unwrap_or_else(|| self.edit.ranges().last().map_or(0, |r| r.1));
-        let mut composed = self
+        let (_, screen) = self
             .screen
             .at(t_src)?
-            .context("screen track has no frames")?
-            .clone();
-        if let Some((cam, bubble)) = &mut self.camera
-            && let Some(cam_frame) = cam.at(t_src)?
-        {
-            bubble.blend(&mut composed, cam_frame);
-        }
-        composed.set_pts(Some(k as i64));
-        Ok(composed)
+            .context("screen track has no frames")?;
+        // The screen frame is passed on as is unless a bubble goes on top;
+        // then it's copied, as the same frame may be shown again.
+        let frame = match &mut self.camera {
+            Some((cam, bubble)) => match cam.at(t_src)? {
+                Some((_, cam_frame)) => {
+                    copy_frame(&mut self.composed, screen);
+                    bubble.blend(&mut self.composed, cam_frame);
+                    &mut self.composed
+                }
+                None => screen,
+            },
+            None => screen,
+        };
+        frame.set_pts(Some(k as i64));
+        Ok(frame)
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
@@ -265,6 +301,13 @@ impl Renderer<'_> {
         }
         Ok(())
     }
+}
+
+/// Copies `src` into `dst`, reusing `dst`'s buffer when it fits and nothing
+/// else holds it.
+fn copy_frame(dst: &mut frame::Video, src: &frame::Video) {
+    reuse_or_alloc(dst, src.format(), src.width(), src.height());
+    dst.clone_from(src);
 }
 
 fn check(cancel: &AtomicBool) -> anyhow::Result<()> {

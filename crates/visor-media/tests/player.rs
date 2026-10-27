@@ -1,5 +1,6 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -14,7 +15,7 @@ fn mean_red(f: &PreviewFrame) -> f64 {
     f.rgba.chunks_exact(4).map(|p| f64::from(p[0])).sum::<f64>() / f64::from(f.width * f.height)
 }
 
-fn wait_frame(p: &mut Player) -> PreviewFrame {
+fn wait_frame(p: &mut Player) -> Arc<PreviewFrame> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some((Some(screen), _)) = p.take_frames() {

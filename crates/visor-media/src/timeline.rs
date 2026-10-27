@@ -52,13 +52,18 @@ impl SampleMap {
 }
 
 /// Holds the latest decoded frame at or before a requested time, seeking
-/// when a request jumps backwards or far ahead.
+/// when a request jumps backwards or far ahead. Frames are kept as decoded;
+/// only the one returned is converted, so frames skipped on the way to a
+/// target cost a decode but no scaling.
 pub(crate) struct FrameCursor {
     reader: VideoReader,
     current: Option<(Micros, frame::Video)>,
     upcoming: Option<(Micros, frame::Video)>,
     ended: bool,
     fresh: bool,
+    /// `current` converted to the reader's target; reused across frames.
+    out: frame::Video,
+    out_pts: Option<Micros>,
 }
 
 impl FrameCursor {
@@ -69,6 +74,8 @@ impl FrameCursor {
             upcoming: None,
             ended: false,
             fresh: true,
+            out: frame::Video::empty(),
+            out_pts: None,
         }
     }
 
@@ -82,7 +89,9 @@ impl FrameCursor {
         Ok(())
     }
 
-    pub fn at(&mut self, t: Micros) -> anyhow::Result<Option<&frame::Video>> {
+    /// The frame shown at `t` and its source time. The time only changes
+    /// when the frame does.
+    pub fn at(&mut self, t: Micros) -> anyhow::Result<Option<(Micros, &mut frame::Video)>> {
         let behind = self.current.as_ref().is_some_and(|(pts, _)| t < *pts);
         let far = self
             .current
@@ -98,7 +107,7 @@ impl FrameCursor {
         self.fresh = false;
         loop {
             if self.upcoming.is_none() && !self.ended {
-                self.upcoming = self.reader.next_frame()?;
+                self.upcoming = self.reader.next_decoded()?;
                 self.ended = self.upcoming.is_none();
             }
             match &self.upcoming {
@@ -112,7 +121,15 @@ impl FrameCursor {
                 _ => break,
             }
         }
-        Ok(self.current.as_ref().map(|(_, f)| f))
+        let Some((pts, raw)) = &self.current else {
+            return Ok(None);
+        };
+        if self.out_pts != Some(*pts) {
+            self.out_pts = None;
+            self.reader.convert_into(raw, &mut self.out)?;
+            self.out_pts = Some(*pts);
+        }
+        Ok(Some((*pts, &mut self.out)))
     }
 }
 

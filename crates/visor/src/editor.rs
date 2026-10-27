@@ -1,7 +1,7 @@
 //! The editor window: preview playback, trim/cut editing with undo, camera
 //! bubble layout and export.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell, RefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -21,6 +21,8 @@ use crate::{Editor, Region, Thumb};
 
 const THUMBNAILS: usize = 24;
 const WAVE_BUCKETS: usize = 600;
+/// Ticks with nothing to update before the UI timer stops.
+const IDLE_TICKS: u32 = 2;
 
 pub struct EditorWindow {
     ui: Editor,
@@ -31,7 +33,10 @@ pub struct EditorWindow {
     redo: RefCell<Vec<EditList>>,
     export: RefCell<Option<ExportJob>>,
     last_export: RefCell<Option<PathBuf>>,
-    _timer: Timer,
+    /// Polls the player and export while something is happening; stopped
+    /// when idle so an open editor doesn't keep waking the CPU.
+    timer: Timer,
+    idle_ticks: Cell<u32>,
 }
 
 struct ExportJob {
@@ -97,7 +102,8 @@ impl EditorWindow {
                 redo: RefCell::default(),
                 export: RefCell::default(),
                 last_export: RefCell::default(),
-                _timer: timer,
+                timer,
+                idle_ticks: Cell::new(0),
             }
         });
         this.wire(Rc::downgrade(&this));
@@ -127,12 +133,10 @@ impl EditorWindow {
                 });
             }};
         }
-        on!(on_toggle_play, |e| e.player.borrow_mut().toggle());
+        on!(on_toggle_play, |e| e.control().toggle());
         on!(on_seek, |e, f| {
             let d = e.duration();
-            e.player
-                .borrow_mut()
-                .seek((f64::from(f) * d as f64) as Micros);
+            e.control().seek((f64::from(f) * d as f64) as Micros);
         });
         on!(on_selection_changed, |e, _a, _b| e
             .ui
@@ -172,7 +176,7 @@ impl EditorWindow {
         on!(on_step, |e, frames| {
             let pos = e.player.borrow().position() as i64;
             let to = (pos + i64::from(frames) * 33_333).max(0) as Micros;
-            e.player.borrow_mut().seek(to);
+            e.control().seek(to);
         });
         on!(on_bubble_changed, |e| {
             {
@@ -209,7 +213,7 @@ impl EditorWindow {
         on!(on_speed_changed, |e| {
             let speed = f64::from(e.ui.get_speed()).clamp(0.5, 2.0);
             e.project.borrow_mut().speed = speed;
-            e.player.borrow_mut().set_speed(speed);
+            e.control().set_speed(speed);
             e.save();
             e.refresh_edit_ui();
         });
@@ -263,10 +267,20 @@ impl EditorWindow {
         if let Some(job) = &*self.export.borrow() {
             job.cancel.store(true, Ordering::Relaxed);
         }
-        self.player.borrow_mut().pause();
+        self.control().pause();
         let dir = self.dir.clone();
         // Drop the window (and its player threads) after this callback.
         slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir));
+    }
+
+    /// The player, for changing it: restarts the UI timer so the change
+    /// shows up.
+    fn control(&self) -> RefMut<'_, Player> {
+        self.idle_ticks.set(0);
+        if !self.timer.running() {
+            self.timer.restart();
+        }
+        self.player.borrow_mut()
     }
 
     fn duration(&self) -> Micros {
@@ -320,7 +334,7 @@ impl EditorWindow {
 
     fn set_edit(&self, edit: EditList) {
         self.project.borrow_mut().edit = edit.clone();
-        self.player.borrow_mut().set_edit(edit);
+        self.control().set_edit(edit);
         self.save();
         self.refresh_edit_ui();
     }
@@ -422,6 +436,13 @@ impl EditorWindow {
             .into(),
         );
         self.poll_export();
+
+        let idle = self.player.borrow().is_idle() && self.export.borrow().is_none();
+        self.idle_ticks
+            .set(if idle { self.idle_ticks.get() + 1 } else { 0 });
+        if self.idle_ticks.get() >= IDLE_TICKS {
+            self.timer.stop();
+        }
     }
 
     fn load_previews(&self) {
@@ -437,9 +458,12 @@ impl EditorWindow {
             .flatten()
             .map(|t| self.dir.join(&t.file))
             .collect();
+        // Separate threads: thumbnails come from the screen track alone and
+        // shouldn't wait for every audio track to be decoded.
         let weak = self.ui.as_weak();
-        std::thread::spawn(move || {
-            if !audio.is_empty() {
+        if !audio.is_empty() {
+            let weak = weak.clone();
+            std::thread::spawn(move || {
                 let paths: Vec<&Path> = audio.iter().map(PathBuf::as_path).collect();
                 match visor_media::preview::waveform(&paths, duration, WAVE_BUCKETS) {
                     Ok(peaks) => {
@@ -448,8 +472,10 @@ impl EditorWindow {
                     }
                     Err(e) => tracing::warn!("waveform failed: {e:#}"),
                 }
-            }
-            if let Some(screen) = screen {
+            });
+        }
+        if let Some(screen) = screen {
+            std::thread::spawn(move || {
                 match visor_media::preview::thumbnails(&screen, duration, THUMBNAILS, 64) {
                     Ok(thumbs) => {
                         let thumbs: Vec<_> = thumbs
@@ -476,15 +502,15 @@ impl EditorWindow {
                     }
                     Err(e) => tracing::warn!("thumbnails failed: {e:#}"),
                 }
-            }
-        });
+            });
+        }
     }
 
     fn start_export(&self) {
         if self.export.borrow().is_some() {
             return;
         }
-        self.player.borrow_mut().pause();
+        self.control().pause();
         let (format, kind) = match self.ui.get_export_format() {
             1 => (ExportFormat::WebM { av1: false }, "WebM"),
             2 => (ExportFormat::WebM { av1: true }, "WebM (AV1)"),

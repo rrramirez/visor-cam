@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use ffmpeg_next::{format, frame};
+use ffmpeg_next::{format, frame, software::scaling};
 use visor_core::{EditList, Micros, Project};
 
 use crate::Resampler;
@@ -26,6 +26,10 @@ use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::decode::{AudioReader, VideoReader};
 use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
+
+/// Scaling for preview frames, on one thread: playback runs for minutes,
+/// so CPU matters more than latency (seeks are dominated by decoding).
+const PREVIEW_SCALING: scaling::Flags = scaling::Flags::FAST_BILINEAR;
 
 /// An RGBA image ready for the UI.
 #[derive(Clone)]
@@ -56,7 +60,8 @@ impl PreviewFrame {
 enum Cmd {
     Play,
     Pause,
-    Seek(Micros),
+    /// Source time and a sequence number reported back once rendered.
+    Seek(Micros, u64),
     SetEdit(EditList),
     /// The clock already runs at the new speed; restart audio stretching.
     SetSpeed(f64),
@@ -69,8 +74,11 @@ struct Shared {
     playing: AtomicBool,
     /// Bumped whenever a new frame is published.
     generation: AtomicU64,
-    screen: Mutex<Option<PreviewFrame>>,
-    camera: Mutex<Option<PreviewFrame>>,
+    /// Sequence number of the last seek the video thread has rendered.
+    rendered_seek: AtomicU64,
+    /// Frames published since the UI last took them.
+    screen: Mutex<Option<Arc<PreviewFrame>>>,
+    camera: Mutex<Option<Arc<PreviewFrame>>>,
 }
 
 pub struct Player {
@@ -79,6 +87,7 @@ pub struct Player {
     shared: Arc<Shared>,
     clock: Arc<Mutex<Clock>>,
     seen_generation: u64,
+    seeks_sent: u64,
     edit: EditList,
     duration: Micros,
 }
@@ -100,20 +109,19 @@ impl Player {
         let screen_path = dir.join(&screen_track.file);
         let (sw, sh) = VideoReader::open(&screen_path, None)?.size();
         let (pw, ph) = fit(sw, sh, max_size);
-        let screen = FrameCursor::new(VideoReader::open(
-            &screen_path,
-            Some((format::Pixel::RGBA, pw, ph)),
-        )?);
+        let mut screen_reader =
+            VideoReader::open(&screen_path, Some((format::Pixel::RGBA, pw, ph)))?;
+        screen_reader.set_scaling(PREVIEW_SCALING, 1);
+        let screen = FrameCursor::new(screen_reader);
         let camera = match &project.tracks.camera {
             Some(t) => {
                 let path = dir.join(&t.file);
                 let (cw, ch) = VideoReader::open(&path, None)?.size();
                 let h = camera_height.min(ch).max(2) & !1;
                 let w = ((u64::from(cw) * u64::from(h) / u64::from(ch.max(1))) as u32 + 1) & !1;
-                Some(FrameCursor::new(VideoReader::open(
-                    &path,
-                    Some((format::Pixel::RGBA, w, h)),
-                )?))
+                let mut reader = VideoReader::open(&path, Some((format::Pixel::RGBA, w, h)))?;
+                reader.set_scaling(PREVIEW_SCALING, 1);
+                Some(FrameCursor::new(reader))
             }
             None => None,
         };
@@ -161,6 +169,7 @@ impl Player {
             shared,
             clock,
             seen_generation: 0,
+            seeks_sent: 0,
             duration: project.duration_us,
             edit,
         };
@@ -203,7 +212,8 @@ impl Player {
     pub fn seek(&mut self, t: Micros) {
         let t = snap_to_kept(&self.edit, t.min(self.duration));
         self.shared.position.store(t, Ordering::Relaxed);
-        self.send(Cmd::Seek(t));
+        self.seeks_sent += 1;
+        self.send(Cmd::Seek(t, self.seeks_sent));
     }
 
     pub fn set_edit(&mut self, edit: EditList) {
@@ -235,15 +245,27 @@ impl Player {
         self.duration
     }
 
-    /// New screen and camera frames since the last call, if any.
-    pub fn take_frames(&mut self) -> Option<(Option<PreviewFrame>, Option<PreviewFrame>)> {
+    /// Whether nothing is in flight: paused, with every seek rendered. The
+    /// UI can stop polling until it next changes something.
+    pub fn is_idle(&self) -> bool {
+        !self.is_playing()
+            && self.shared.rendered_seek.load(Ordering::Acquire) == self.seeks_sent
+            && self.shared.generation.load(Ordering::Acquire) == self.seen_generation
+    }
+
+    /// Screen and camera frames that changed since the last call (`None`
+    /// for one that didn't), or `None` if neither did.
+    #[allow(clippy::type_complexity)]
+    pub fn take_frames(
+        &mut self,
+    ) -> Option<(Option<Arc<PreviewFrame>>, Option<Arc<PreviewFrame>>)> {
         let generation = self.shared.generation.load(Ordering::Acquire);
         if generation == self.seen_generation {
             return None;
         }
         self.seen_generation = generation;
-        let screen = self.shared.screen.lock().unwrap().clone();
-        let camera = self.shared.camera.lock().unwrap().clone();
+        let screen = self.shared.screen.lock().unwrap().take();
+        let camera = self.shared.camera.lock().unwrap().take();
         Some((screen, camera))
     }
 
@@ -252,7 +274,7 @@ impl Player {
             let _ = tx.send(match &cmd {
                 Cmd::Play => Cmd::Play,
                 Cmd::Pause => Cmd::Pause,
-                Cmd::Seek(t) => Cmd::Seek(*t),
+                Cmd::Seek(t, seq) => Cmd::Seek(*t, *seq),
                 Cmd::SetEdit(e) => Cmd::SetEdit(e.clone()),
                 Cmd::SetSpeed(s) => Cmd::SetSpeed(*s),
             });
@@ -335,6 +357,10 @@ fn video_loop(
 ) {
     let mut playing = false;
     let mut pending_render: Option<Micros> = None;
+    let mut pending_seq = 0;
+    // Source times of the frames last published, to publish only changes.
+    let mut shown_screen = None;
+    let mut shown_camera = None;
     loop {
         // Block while idle; poll while playing.
         let cmd = if playing || pending_render.is_some() {
@@ -363,11 +389,12 @@ fn video_loop(
                     let mut c = clock.lock().unwrap();
                     *c = Clock::paused(c.now(), c.speed);
                 }
-                Cmd::Seek(t) => {
+                Cmd::Seek(t, seq) => {
                     let out = edit.to_output(t).unwrap_or(0);
                     let mut c = clock.lock().unwrap();
                     *c = c.rebased(out, c.speed);
                     pending_render = Some(t);
+                    pending_seq = seq;
                 }
                 Cmd::SetEdit(e) => edit = e,
                 // The Player rebased the shared clock already.
@@ -399,22 +426,28 @@ fn video_loop(
 
         let mut changed = false;
         match screen.at(target) {
-            Ok(Some(f)) => {
-                *shared.screen.lock().unwrap() = Some(PreviewFrame::from_frame(f));
+            Ok(Some((pts, f))) if shown_screen != Some(pts) => {
+                let frame = Arc::new(PreviewFrame::from_frame(f));
+                *shared.screen.lock().unwrap() = Some(frame);
+                shown_screen = Some(pts);
                 changed = true;
             }
-            Ok(None) => {}
+            Ok(_) => {}
             Err(e) => tracing::warn!("preview decode failed: {e:#}"),
         }
         if let Some(cam) = &mut camera
-            && let Ok(Some(f)) = cam.at(target)
+            && let Ok(Some((pts, f))) = cam.at(target)
+            && shown_camera != Some(pts)
         {
-            *shared.camera.lock().unwrap() = Some(PreviewFrame::from_frame(f));
+            let frame = Arc::new(PreviewFrame::from_frame(f));
+            *shared.camera.lock().unwrap() = Some(frame);
+            shown_camera = Some(pts);
             changed = true;
         }
         if changed {
             shared.generation.fetch_add(1, Ordering::Release);
         }
+        shared.rendered_seek.store(pending_seq, Ordering::Release);
         if playing {
             thread::sleep(Duration::from_millis(8));
         }
@@ -492,7 +525,7 @@ fn audio_loop(
                 playing = false;
                 ring.lock().unwrap().clear();
             }
-            Some(Cmd::Seek(t)) => {
+            Some(Cmd::Seek(t, _)) => {
                 ring.lock().unwrap().clear();
                 cursor = micros_to_samples(edit.to_output(t).unwrap_or(0));
                 tempo = Tempo::new(clock.lock().unwrap().speed)?;

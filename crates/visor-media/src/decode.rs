@@ -11,6 +11,7 @@ use visor_core::Micros;
 
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
+use crate::scale::Scaler;
 
 /// Opens a track for reading. Track files come from project folders that may
 /// not have been made here, so FFmpeg may only read them as local MP4 or
@@ -21,6 +22,29 @@ pub(crate) fn open_input(path: &Path) -> anyhow::Result<format::context::Input> 
     options.set("protocol_whitelist", "file");
     format::input_with_dictionary(path, options)
         .with_context(|| format!("opening {}", path.display()))
+}
+
+/// Prepares `f` to be completely overwritten with a `fmt` `w` x `h` image:
+/// keeps its buffer if it fits and nothing else (an encoder, a filter, a
+/// frame in flight) still holds it, else gives it a new one.
+pub(crate) fn reuse_or_alloc(f: &mut frame::Video, fmt: format::Pixel, w: u32, h: u32) {
+    // An empty frame has no format and zero size.
+    let fits = f.format() == fmt && f.width() == w && f.height() == h;
+    // SAFETY: `f` is a valid frame (allocated, since it fits).
+    if !fits || unsafe { ffmpeg::ffi::av_frame_is_writable(f.as_mut_ptr()) } == 0 {
+        *f = frame::Video::new(fmt, w, h);
+    }
+}
+
+/// A new reference to `f`'s buffers, for APIs that take ownership of the
+/// frame they are given (like a filter graph's buffer source).
+pub(crate) fn new_ref(f: &frame::Video) -> anyhow::Result<frame::Video> {
+    let mut r = frame::Video::empty();
+    // SAFETY: both frames are valid; `r` is empty.
+    match unsafe { ffmpeg::ffi::av_frame_ref(r.as_mut_ptr(), f.as_ptr()) } {
+        0 => Ok(r),
+        e => Err(ffmpeg::Error::from(e).into()),
+    }
 }
 
 fn to_micros(ts: i64, tb: Rational) -> Micros {
@@ -39,7 +63,9 @@ pub struct VideoReader {
     index: usize,
     time_base: Rational,
     target: Option<(format::Pixel, u32, u32)>,
-    scaler: Option<scaling::Context>,
+    scaler: Option<Scaler>,
+    scale_flags: scaling::Flags,
+    scale_threads: usize,
     decoded: frame::Video,
     eof: bool,
 }
@@ -71,9 +97,19 @@ impl VideoReader {
             time_base,
             target,
             scaler: None,
+            scale_flags: scaling::Flags::BILINEAR,
+            scale_threads: 0,
             decoded: frame::Video::empty(),
             eof: false,
         })
+    }
+
+    /// How frames are converted to the target: the filter, and threads
+    /// (0 = one per core). Defaults to bilinear on every core, for export;
+    /// live preview trades a little of both for less CPU.
+    pub(crate) fn set_scaling(&mut self, flags: scaling::Flags, threads: usize) {
+        (self.scale_flags, self.scale_threads) = (flags, threads);
+        self.scaler = None;
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -101,11 +137,21 @@ impl VideoReader {
 
     /// The next decoded frame and its source time, or `None` at the end.
     pub fn next_frame(&mut self) -> anyhow::Result<Option<(Micros, frame::Video)>> {
+        match self.next_decoded()? {
+            Some((at, raw)) => Ok(Some((at, self.convert(raw)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// The next frame as the decoder produced it (not converted to the
+    /// target), so callers can skip frames without paying for scaling.
+    pub(crate) fn next_decoded(&mut self) -> anyhow::Result<Option<(Micros, frame::Video)>> {
         loop {
             if self.decoder.receive_frame(&mut self.decoded).is_ok() {
                 let pts = self.decoded.timestamp().or(self.decoded.pts()).unwrap_or(0);
                 let at = to_micros(pts, self.time_base);
-                return Ok(Some((at, self.convert()?)));
+                let raw = std::mem::replace(&mut self.decoded, frame::Video::empty());
+                return Ok(Some((at, raw)));
             }
             if self.eof {
                 return Ok(None);
@@ -124,7 +170,7 @@ impl VideoReader {
     /// frame after it if none). Call after [`seek`](Self::seek).
     pub fn frame_at(&mut self, at: Micros) -> anyhow::Result<Option<(Micros, frame::Video)>> {
         let mut best = None;
-        while let Some((pts, f)) = self.next_frame()? {
+        while let Some((pts, f)) = self.next_decoded()? {
             if pts > at && best.is_some() {
                 break;
             }
@@ -134,34 +180,46 @@ impl VideoReader {
                 break;
             }
         }
-        Ok(best)
+        match best {
+            Some((pts, raw)) => Ok(Some((pts, self.convert(raw)?))),
+            None => Ok(None),
+        }
     }
 
-    fn convert(&mut self) -> anyhow::Result<frame::Video> {
+    fn convert(&mut self, raw: frame::Video) -> anyhow::Result<frame::Video> {
+        if self.target.is_none() {
+            return Ok(raw);
+        }
+        let mut out = frame::Video::empty();
+        self.convert_into(&raw, &mut out)?;
+        Ok(out)
+    }
+
+    /// Converts a frame from [`next_decoded`](Self::next_decoded) to the
+    /// target into `out`, reusing its buffer when nothing else holds it.
+    pub(crate) fn convert_into(
+        &mut self,
+        raw: &frame::Video,
+        out: &mut frame::Video,
+    ) -> anyhow::Result<()> {
         let Some((fmt, w, h)) = self.target else {
-            return Ok(self.decoded.clone());
+            *out = raw.clone();
+            return Ok(());
         };
-        let d = &self.decoded;
-        let stale = self.scaler.as_ref().is_none_or(|s| {
-            s.input().format != d.format()
-                || s.input().width != d.width()
-                || s.input().height != d.height()
-        });
-        if stale {
-            self.scaler = Some(scaling::Context::get(
-                d.format(),
-                d.width(),
-                d.height(),
-                fmt,
-                w,
-                h,
-                scaling::Flags::BILINEAR,
+        let d = raw;
+        let input = (d.format(), d.width(), d.height());
+        if self.scaler.as_ref().is_none_or(|s| s.input() != input) {
+            self.scaler = Some(Scaler::new(
+                input,
+                (fmt, w, h),
+                self.scale_flags,
+                self.scale_threads,
             )?);
         }
-        let mut out = frame::Video::new(fmt, w, h);
-        self.scaler.as_mut().unwrap().run(d, &mut out)?;
+        reuse_or_alloc(out, fmt, w, h);
+        self.scaler.as_mut().unwrap().run(d, out)?;
         out.set_pts(d.pts());
-        Ok(out)
+        Ok(())
     }
 }
 

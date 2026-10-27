@@ -9,6 +9,7 @@ pub mod player;
 pub mod preview;
 pub mod recover;
 mod resample;
+mod scale;
 pub mod tempo;
 mod timeline;
 mod writer;

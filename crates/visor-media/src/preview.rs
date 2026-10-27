@@ -7,10 +7,11 @@ use visor_core::Micros;
 
 use crate::decode::{AudioReader, VideoReader};
 use crate::player::PreviewFrame;
+use crate::timeline::FrameCursor;
 
 /// `count` evenly spaced thumbnails `height` pixels tall, with their source
-/// times. Slow-ish (decodes from the previous keyframe), so run it off the UI
-/// thread.
+/// times. Slow-ish (decodes from the previous keyframe, or straight through
+/// when thumbnails are close together), so run it off the UI thread.
 pub fn thumbnails(
     path: &Path,
     duration: Micros,
@@ -20,13 +21,15 @@ pub fn thumbnails(
     let (w, h) = VideoReader::open(path, None)?.size();
     let th = height.max(2) & !1;
     let tw = ((u64::from(w) * u64::from(th) / u64::from(h.max(1))) as u32 + 1) & !1;
-    let mut reader = VideoReader::open(path, Some((format::Pixel::RGBA, tw, th)))?;
+    let mut cursor = FrameCursor::new(VideoReader::open(
+        path,
+        Some((format::Pixel::RGBA, tw, th)),
+    )?);
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let t = duration * (2 * i as u64 + 1) / (2 * count.max(1) as u64);
-        reader.seek(t)?;
-        if let Some((pts, f)) = reader.frame_at(t)? {
-            out.push((pts, PreviewFrame::from_frame(&f)));
+        if let Some((pts, f)) = cursor.at(t)? {
+            out.push((pts, PreviewFrame::from_frame(f)));
         }
     }
     Ok(out)
