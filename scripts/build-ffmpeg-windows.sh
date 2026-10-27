@@ -40,10 +40,12 @@ pc() { # name version libs cflags
     printf 'Name: %s\nDescription: %s\nVersion: %s\nLibs: -L%s/lib %s\nCflags: %s\n' \
         "$1" "$1" "$2" "$static" "$3" "$4" > "$static/lib/pkgconfig/$1.pc"
 }
-pc x264 "$(pkg-config --modversion x264)" "-lx264 -lwinpthread" "-I/mingw64/include"
-pc vpx "$(pkg-config --modversion vpx)" "-lvpx -lwinpthread" "-I/mingw64/include"
-pc opus "$(pkg-config --modversion opus)" "-lopus" "-I/mingw64/include/opus"
-pc aom "$(pkg-config --modversion aom)" "-laom -lwinpthread" "-I/mingw64/include"
+# -l:<file> names the archive itself: plain -lvpx lets the linker choose the
+# DLL import library where both exist.
+pc x264 "$(pkg-config --modversion x264)" "-l:libx264.a -l:libwinpthread.a" "-I/mingw64/include"
+pc vpx "$(pkg-config --modversion vpx)" "-l:libvpx.a -l:libwinpthread.a" "-I/mingw64/include"
+pc opus "$(pkg-config --modversion opus)" "-l:libopus.a" "-I/mingw64/include/opus"
+pc aom "$(pkg-config --modversion aom)" "-l:libaom.a -l:libwinpthread.a" "-I/mingw64/include"
 # NVENC needs only headers; its .pc has no libraries.
 cp /mingw64/lib/pkgconfig/ffnvcodec.pc "$static/lib/pkgconfig/"
 
