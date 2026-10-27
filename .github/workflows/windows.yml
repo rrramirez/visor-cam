@@ -18,7 +18,6 @@ jobs:
       CARGO_TERM_COLOR: always
       # Link the C runtime into visor.exe so it doesn't need the VC++ redistributable.
       RUSTFLAGS: -C target-feature=+crt-static
-      FFMPEG_ASSET: ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -29,23 +28,37 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: FFmpeg (BtbN build, checksum-verified)
+      # A minimal FFmpeg (only what Visor uses), built once per recipe change.
+      - name: FFmpeg cache
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\ffmpeg-min
+          key: ffmpeg-min-windows-${{ hashFiles('scripts/build-ffmpeg-windows.sh') }}
+
+      - name: MSYS2 (to build FFmpeg)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make diffutils
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-x264 mingw-w64-x86_64-libvpx mingw-w64-x86_64-opus
+            mingw-w64-x86_64-svt-av1 mingw-w64-x86_64-ffnvcodec-headers
+            mingw-w64-x86_64-amf-headers mingw-w64-x86_64-libvpl
+
+      - name: Build minimal FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: scripts/build-ffmpeg-windows.sh /c/ffmpeg-min
+
+      - name: Use FFmpeg
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $release = Invoke-RestMethod https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest `
-            -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
-          $asset = $release.assets | Where-Object name -eq $env:FFMPEG_ASSET
-          if (-not $asset) { throw "$env:FFMPEG_ASSET not in BtbN's latest release" }
-          $expected = $asset.digest -replace '^sha256:', ''
-          Invoke-WebRequest $asset.browser_download_url -OutFile ffmpeg.zip
-          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected) { throw "FFmpeg checksum mismatch: $actual" }
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-x
-          Move-Item (Get-ChildItem ffmpeg-x -Directory | Select-Object -First 1).FullName C:\ffmpeg
-          "FFMPEG_DIR=C:\ffmpeg" >> $env:GITHUB_ENV
-          "C:\ffmpeg\bin" >> $env:GITHUB_PATH
+          "FFMPEG_DIR=C:\ffmpeg-min" >> $env:GITHUB_ENV
+          "C:\ffmpeg-min\bin" >> $env:GITHUB_PATH
           # bindgen (ffmpeg-sys) needs libclang; the runner image ships LLVM.
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
@@ -62,7 +75,7 @@ jobs:
           $stage = "dist\windows\Visor"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item target\release\visor.exe $stage
-          Copy-Item C:\ffmpeg\bin\*.dll $stage
+          Copy-Item C:\ffmpeg-min\bin\*.dll $stage
           Copy-Item LICENSE "$stage\LICENSE.txt"
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
