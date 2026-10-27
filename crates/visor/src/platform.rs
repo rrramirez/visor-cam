@@ -139,6 +139,20 @@ pub fn open_file(path: &Path) {
     }
 }
 
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(program).arg(url).spawn() {
+        tracing::warn!("could not open {url}: {e}");
+    }
+}
+
 /// What the file manager is called, for "Show in …" buttons.
 pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
     "Finder"

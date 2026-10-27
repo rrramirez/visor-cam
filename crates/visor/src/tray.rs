@@ -14,6 +14,7 @@ pub enum Action {
     OpenRecent(PathBuf),
     OpenFolder,
     Preferences,
+    Support,
     CheckForUpdates,
     Quit,
 }
@@ -35,6 +36,7 @@ const ID_STOP: &str = "stop";
 const ID_FOLDER: &str = "folder";
 const ID_PREFS: &str = "prefs";
 const ID_UPDATES: &str = "updates";
+const ID_SUPPORT: &str = "support";
 const ID_QUIT: &str = "quit";
 
 impl Tray {
@@ -54,6 +56,7 @@ impl Tray {
             &MenuItem::with_id(ID_FOLDER, "Open Recordings Folder", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(ID_PREFS, "Preferences…", true, None),
+            &MenuItem::with_id(ID_SUPPORT, "Support Visor…", true, None),
         ])?;
         if updates {
             menu.append(&MenuItem::with_id(
@@ -99,6 +102,7 @@ impl Tray {
             ID_FOLDER => Action::OpenFolder,
             ID_PREFS => Action::Preferences,
             ID_UPDATES => Action::CheckForUpdates,
+            ID_SUPPORT => Action::Support,
             ID_QUIT => Action::Quit,
             id => {
                 let (_, path) = self

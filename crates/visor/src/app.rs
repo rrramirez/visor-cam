@@ -47,6 +47,9 @@ pub fn post(f: impl FnOnce(&App) + Send + 'static) {
 
 const BUBBLE_SIZES: [f32; 3] = [160.0, 220.0, 300.0];
 
+/// Where "Support Visor…" goes: donations that fund maintenance.
+const SUPPORT_URL: &str = "https://ko-fi.com/visorcam";
+
 pub struct App {
     backend: Arc<dyn Backend>,
     pub settings: RefCell<Settings>,
@@ -187,6 +190,7 @@ impl App {
             Action::OpenRecent(dir) => self.open_editor(dir),
             Action::OpenFolder => platform::open_folder(&self.settings.borrow().save_dir),
             Action::Preferences => self.open_preferences(),
+            Action::Support => platform::open_url(SUPPORT_URL),
             Action::CheckForUpdates => {
                 if let Some(updater) = &self.updater {
                     platform::activate();
