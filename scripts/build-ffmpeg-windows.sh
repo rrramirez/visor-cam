@@ -35,30 +35,34 @@ cd "$work/ffmpeg-$version"
 # would make the linker take MSYS2's own FFmpeg libraries instead.)
 static="$work/static"
 mkdir -p "$static/lib/pkgconfig"
+# pkg-config is a native Windows program here: it needs Windows-style paths
+# (MSYS2 doesn't translate them in PKG_CONFIG_LIBDIR or inside .pc files).
+static_win="$(cygpath -m "$static")"
 for lib in x264 vpx opus aom winpthread; do
     cp "/mingw64/lib/lib$lib.a" "$static/lib/"
 done
 pc() { # name version libs cflags
     printf 'Name: %s\nDescription: %s\nVersion: %s\nLibs: -L%s/lib %s\nCflags: %s\n' \
-        "$1" "$1" "$2" "$static" "$3" "$4" > "$static/lib/pkgconfig/$1.pc"
+        "$1" "$1" "$2" "$static_win" "$3" "$4" > "$static/lib/pkgconfig/$1.pc"
 }
 # -l:<file> names the archive itself: plain -lvpx lets the linker choose the
 # DLL import library where both exist.
-pc x264 "$(pkg-config --modversion x264)" "-l:libx264.a -l:libwinpthread.a" "-I/mingw64/include"
-pc vpx "$(pkg-config --modversion vpx)" "-l:libvpx.a -l:libwinpthread.a" "-I/mingw64/include"
-pc opus "$(pkg-config --modversion opus)" "-l:libopus.a" "-I/mingw64/include/opus"
-pc aom "$(pkg-config --modversion aom)" "-l:libaom.a -l:libwinpthread.a" "-I/mingw64/include"
+inc="$(cygpath -m /mingw64/include)"
+pc x264 "$(pkg-config --modversion x264)" "-l:libx264.a -l:libwinpthread.a" "-I$inc"
+pc vpx "$(pkg-config --modversion vpx)" "-l:libvpx.a -l:libwinpthread.a" "-I$inc"
+pc opus "$(pkg-config --modversion opus)" "-l:libopus.a" "-I$inc/opus"
+pc aom "$(pkg-config --modversion aom)" "-l:libaom.a -l:libwinpthread.a" "-I$inc"
 # NVENC needs only headers; its .pc has no libraries.
 cp /mingw64/lib/pkgconfig/ffnvcodec.pc "$static/lib/pkgconfig/"
 
 echo "==> Configuring"
-PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
+PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" ./configure \
     --prefix="$prefix" \
     --enable-shared --disable-static \
     --enable-gpl --enable-version3 \
     --disable-programs --disable-doc --disable-debug --disable-postproc \
     --disable-network --disable-autodetect --disable-everything \
-    --extra-ldflags="-L$static/lib -static-libgcc" \
+    --extra-ldflags="-L$static_win/lib -static-libgcc" \
     --extra-libs="-l:libwinpthread.a" \
     --enable-w32threads \
     --enable-libx264 --enable-libvpx --enable-libopus --enable-libaom \
@@ -77,6 +81,7 @@ PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
 
 # Which libraries configure chose, for the log.
 grep -E "^EXTRALIBS" ffbuild/config.mak || true
+PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" pkg-config --libs x264 vpx opus aom || true
 
 echo "==> Building"
 make -j"$(nproc)"
