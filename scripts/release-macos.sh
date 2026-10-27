@@ -41,6 +41,14 @@ if ! $adhoc; then
     }
 fi
 
+if $publish; then
+    # GitHub tags the release at what is on GitHub, so that must be this.
+    [ -z "$(git status --porcelain)" ] || { echo "error: commit your changes first" >&2; exit 1; }
+    git fetch -q origin main
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
+        { echo "error: push main first (git push)" >&2; exit 1; }
+fi
+
 echo "==> Signing the update and writing site/appcast.xml"
 archives="$root/target/releases"
 mkdir -p "$archives"
@@ -51,12 +59,30 @@ target/sparkle/bin/generate_appcast \
     --download-url-prefix "https://github.com/$repo/releases/download/$tag/" \
     --link "https://visor-cam.pages.dev/" \
     -o site/appcast.xml "$archives"
+# Sparkle's update window shows the GitHub release notes.
+notes="https://github.com/$repo/releases/tag/$tag"
+grep -q "<sparkle:releaseNotesLink>$notes<" site/appcast.xml ||
+    perl -0pi -e "s|(<sparkle:version>\Q$version\E</sparkle:version>)|\$1\n            <sparkle:releaseNotesLink>$notes</sparkle:releaseNotesLink>|" site/appcast.xml
+
+# A copy with a fixed name, so the site's button can always link to
+# releases/latest/download/Visor.dmg.
+stable="$root/target/release-assets/Visor.dmg"
+mkdir -p "$(dirname "$stable")"
+cp "$dmg" "$stable"
 
 if $publish; then
     echo "==> Publishing $tag"
-    gh release create "$tag" "$dmg" --repo "$repo" --title "Visor $version" --generate-notes
+    # The release (and its files) first, then the feed that points at them.
+    gh release create "$tag" "$dmg" "$stable" --repo "$repo" --title "Visor $version" --generate-notes
     scripts/deploy-site.sh
+    git add site/appcast.xml
+    git commit -q -m "Release $version: update feed" \
+        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013s7xb2wD6CNckNdeb1rn2s"
+    git push -q origin main
+    echo "Released $tag"
 else
-    echo "Next: gh release create $tag $dmg --repo $repo --title \"Visor $version\" --generate-notes"
+    echo "Next: scripts/release-macos.sh --publish   (or by hand:)"
+    echo "      gh release create $tag $dmg $stable --repo $repo --title \"Visor $version\" --generate-notes"
     echo "      scripts/deploy-site.sh   (after committing site/appcast.xml)"
 fi
