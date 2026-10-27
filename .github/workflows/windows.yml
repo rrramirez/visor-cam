@@ -46,7 +46,7 @@ jobs:
             make diffutils
             mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-x264 mingw-w64-x86_64-libvpx mingw-w64-x86_64-opus
-            mingw-w64-x86_64-svt-av1 mingw-w64-x86_64-ffnvcodec-headers
+            mingw-w64-x86_64-aom mingw-w64-x86_64-ffnvcodec-headers
             mingw-w64-x86_64-amf-headers
 
       - name: Build minimal FFmpeg

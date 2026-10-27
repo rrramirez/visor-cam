@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds a minimal FFmpeg for Visor on Windows: shared DLLs with only the
-# codecs, formats and filters Visor uses, with x264, libvpx and Opus linked in
-# statically. Mirrors scripts/build-ffmpeg-macos.sh. Run in an MSYS2 MINGW64
-# shell (the Windows workflow does), with these packages installed:
-#   mingw-w64-x86_64-{gcc,nasm,pkgconf,x264,libvpx,opus,svt-av1,ffnvcodec-headers,amf-headers}
+# codecs, formats and filters Visor uses, with x264, libvpx, Opus and libaom
+# linked in statically. (AV1 uses libaom here: MSYS2's SVT-AV1 is newer than
+# FFmpeg 7.1 supports.) Mirrors scripts/build-ffmpeg-macos.sh. Run in an
+# MSYS2 MINGW64 shell (the Windows workflow does), with these packages:
+#   mingw-w64-x86_64-{gcc,nasm,pkgconf,x264,libvpx,opus,aom,ffnvcodec-headers,amf-headers}
 #   make diffutils
 #
 #   scripts/build-ffmpeg-windows.sh <prefix>
@@ -38,14 +39,14 @@ echo "==> Configuring"
     --pkg-config-flags=--static \
     --extra-ldflags="-static" \
     --enable-w32threads \
-    --enable-libx264 --enable-libvpx --enable-libopus --enable-libsvtav1 \
+    --enable-libx264 --enable-libvpx --enable-libopus --enable-libaom \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-mediafoundation \
     --enable-protocol=file \
     --enable-indev=dshow \
     --enable-demuxer=mov,matroska,gif,aac \
     --enable-muxer=mp4,ipod,mov,webm,matroska,gif \
     --enable-decoder=h264,aac,rawvideo,vp9,opus,gif,mjpeg \
-    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_mf,aac,libvpx_vp9,libsvtav1,libopus,gif \
+    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_mf,aac,libvpx_vp9,libaom_av1,libopus,gif \
     --enable-parser=h264,aac,vp9,opus,av1,mjpeg \
     --enable-bsfs \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
@@ -58,10 +59,6 @@ make install
 # The MSVC import libraries are installed next to the DLLs; FFMPEG_DIR users
 # (ffmpeg-sys) look in lib/.
 mv "$prefix"/bin/*.lib "$prefix"/lib/
-# MSYS2 may only ship SVT-AV1 as a DLL (Homebrew does too); ship it alongside.
-if objdump -p "$prefix"/bin/avcodec-*.dll | grep -qi "DLL Name: libSvtAv1Enc"; then
-    cp "$(dirname "$(command -v gcc)")"/libSvtAv1Enc*.dll "$prefix"/bin/
-fi
 
 echo "==> Checking DLL dependencies"
 # Anything beyond Windows system DLLs and FFmpeg's own would have to ship
@@ -70,7 +67,7 @@ bad=0
 for dll in "$prefix"/bin/*.dll; do
     while read -r dep; do
         case "${dep,,}" in
-            av*.dll | sw*.dll | libsvtav1enc*.dll) ;;
+            av*.dll | sw*.dll) ;;
             kernel32.dll | user32.dll | ole32.dll | oleaut32.dll | advapi32.dll | bcrypt.dll | \
                 shell32.dll | shlwapi.dll | gdi32.dll | strmiids.dll | uuid.dll | psapi.dll | \
                 msvcrt.dll | ucrtbase.dll | api-ms-win-*.dll | ws2_32.dll | secur32.dll | \
