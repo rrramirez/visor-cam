@@ -72,7 +72,8 @@ PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
     --enable-parser=h264,aac,vp9,opus,av1,mjpeg \
     --enable-bsfs \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
-    --enable-swscale --enable-swresample
+    --enable-swscale --enable-swresample ||
+    { tail -40 ffbuild/config.log >&2; exit 1; }
 
 # Which libraries configure chose, for the log.
 grep -E "^EXTRALIBS" ffbuild/config.mak || true
