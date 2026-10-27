@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The hardened runtime blocks camera and microphone access unless the
+	     app declares it. Screen recording needs no entitlement. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Ad-hoc signed libraries have no Team ID, so library validation would
+	     refuse the bundled FFmpeg dylibs. The hardened runtime still ignores
+	     DYLD_* environment variables, which is what blocks injection. Drop
+	     this once the app is signed with a Developer ID. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

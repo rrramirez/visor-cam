@@ -12,6 +12,17 @@ use visor_core::Micros;
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 
+/// Opens a track for reading. Track files come from project folders that may
+/// not have been made here, so FFmpeg may only read them as local MP4 or
+/// Matroska: no playlists or other demuxers that pull in further files.
+pub(crate) fn open_input(path: &Path) -> anyhow::Result<format::context::Input> {
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("format_whitelist", "mov,matroska");
+    options.set("protocol_whitelist", "file");
+    format::input_with_dictionary(path, options)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
 fn to_micros(ts: i64, tb: Rational) -> Micros {
     (i128::from(ts.max(0)) * i128::from(tb.0) * 1_000_000 / i128::from(tb.1.max(1))) as Micros
 }
@@ -41,7 +52,7 @@ impl VideoReader {
     /// `target`: convert to this format and size (`None` = decoder output).
     pub fn open(path: &Path, target: Option<(format::Pixel, u32, u32)>) -> anyhow::Result<Self> {
         ffmpeg::init()?;
-        let input = format::input(path).with_context(|| format!("opening {}", path.display()))?;
+        let input = open_input(path)?;
         let stream = input
             .streams()
             .best(media::Type::Video)
@@ -171,7 +182,7 @@ unsafe impl Send for AudioReader {}
 impl AudioReader {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         ffmpeg::init()?;
-        let input = format::input(path).with_context(|| format!("opening {}", path.display()))?;
+        let input = open_input(path)?;
         let stream = input
             .streams()
             .best(media::Type::Audio)

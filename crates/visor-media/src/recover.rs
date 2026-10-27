@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use ffmpeg_next::{self as ffmpeg, Packet, Rational, format, media};
+use ffmpeg_next::{self as ffmpeg, Packet, Rational, media};
 use visor_core::project::{CAMERA_FILE, MIC_FILE, PROJECT_FILE, SCREEN_FILE, SYSTEM_FILE, Track};
 use visor_core::{EditList, Micros, Project};
 
@@ -130,7 +130,7 @@ struct TrackInfo {
 /// Reads packets rather than trusting the container, which a crash leaves
 /// without a duration; a truncated last fragment just ends the scan.
 fn probe(path: &Path) -> anyhow::Result<TrackInfo> {
-    let mut input = format::input(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut input = crate::decode::open_input(path)?;
     let stream = input
         .streams()
         .best(media::Type::Video)
@@ -161,7 +161,7 @@ fn probe(path: &Path) -> anyhow::Result<TrackInfo> {
             continue;
         }
         if let Some(pts) = packet.pts().or(packet.dts()) {
-            end = end.max(pts + packet.duration().max(0));
+            end = end.max(pts.saturating_add(packet.duration().max(0)));
         }
     }
     Ok(TrackInfo {

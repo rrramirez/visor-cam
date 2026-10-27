@@ -1,8 +1,8 @@
 //! A recording on disk: a folder holding raw tracks and `project.json`.
 
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +102,8 @@ pub enum ProjectError {
     Json(#[from] serde_json::Error),
     #[error("unsupported project version {0}")]
     Version(u32),
+    #[error("invalid project.json: {0}")]
+    Invalid(&'static str),
 }
 
 impl Project {
@@ -132,17 +134,57 @@ impl Project {
         if project.version > CURRENT_VERSION {
             return Err(ProjectError::Version(project.version));
         }
+        project.validate()?;
         Ok(project)
     }
 
+    /// Project folders can come from elsewhere (shared, unzipped), so
+    /// `project.json` is untrusted: track files must stay inside the folder
+    /// and the edit list must be well formed.
+    fn validate(&self) -> Result<(), ProjectError> {
+        let t = &self.tracks;
+        for track in [&t.screen, &t.camera, &t.mic, &t.system]
+            .into_iter()
+            .flatten()
+        {
+            if !is_plain_file_name(&track.file) {
+                return Err(ProjectError::Invalid(
+                    "track file outside the project folder",
+                ));
+            }
+        }
+        if !self.edit.is_valid(self.duration_us) {
+            return Err(ProjectError::Invalid(
+                "edit ranges out of order or out of bounds",
+            ));
+        }
+        Ok(())
+    }
+
     /// Writes atomically (temp file + rename) so a crash never leaves a
-    /// truncated `project.json`.
+    /// truncated `project.json`. The temp file is created fresh, never
+    /// opened through an existing symlink.
     pub fn save(&self, dir: &Path) -> Result<(), ProjectError> {
         let tmp = dir.join(format!("{PROJECT_FILE}.tmp"));
-        fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        match fs::remove_file(&tmp) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&serde_json::to_vec_pretty(self)?)?;
+        drop(file);
         fs::rename(tmp, dir.join(PROJECT_FILE))?;
         Ok(())
     }
+}
+
+/// A bare file name: no directories, no `..`, not absolute.
+fn is_plain_file_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
 /// Lists project folders under `root`, newest first by folder name. This is a
@@ -184,6 +226,48 @@ mod tests {
                 .filter(|d| **d == dir)
                 .count(),
             1
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_untrusted_paths_and_ranges() {
+        assert!(is_plain_file_name("screen.mp4"));
+        for bad in ["", "..", "../x.mp4", "/etc/passwd", "a/b.mp4", "."] {
+            assert!(!is_plain_file_name(bad), "{bad:?}");
+        }
+
+        let mut p = Project::new("Demo", "2026-10-19T18:42:00Z", 100);
+        p.tracks.screen = Some(Track {
+            file: "../other/screen.mp4".into(),
+            width: None,
+            height: None,
+            fps: None,
+        });
+        assert!(p.validate().is_err());
+        p.tracks.screen = None;
+        assert!(p.validate().is_ok());
+        p.duration_us = 50;
+        assert!(p.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_follow_a_symlinked_temp_file() {
+        let dir = std::env::temp_dir().join(format!("visor-link-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("project.json.tmp")).unwrap();
+
+        Project::new("Demo", "2026-10-19T18:42:00Z", 10)
+            .save(&dir)
+            .unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert!(
+            !fs::symlink_metadata(dir.join(PROJECT_FILE))
+                .unwrap()
+                .is_symlink()
         );
         fs::remove_dir_all(&dir).unwrap();
     }

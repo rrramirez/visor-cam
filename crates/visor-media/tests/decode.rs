@@ -54,3 +54,16 @@ fn reads_audio_as_48k_stereo() {
     assert!(at <= 1_000_000 && at > 900_000, "seek landed at {at}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn refuses_file_lists_posing_as_tracks() {
+    let dir = temp_dir("playlist");
+    let real = dir.join("real.mp4");
+    write_video(&real, 64, 64, FPS, 128);
+    let fake = dir.join("screen.mp4");
+    // The concat demuxer reads other files named in it.
+    std::fs::write(&fake, "ffconcat version 1.0\nfile real.mp4\n").unwrap();
+    assert!(VideoReader::open(&real, None).is_ok());
+    assert!(VideoReader::open(&fake, None).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

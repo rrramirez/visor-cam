@@ -506,18 +506,20 @@ impl EditorWindow {
             _ => None,
         };
         let project = self.project.borrow().clone();
-        let out = unique_path(
-            &self.dir.join("exports"),
-            &sanitize(&project.title),
-            format.extension(),
-        );
-        if let Some(parent) = out.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
+        let exports = self.dir.join("exports");
+        // A symlinked exports folder would let a shared project make the
+        // export write outside it.
+        if exports.is_symlink() {
+            self.ui
+                .set_export_status("Export failed: the exports folder is a link".into());
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(&exports) {
             self.ui
                 .set_export_status(format!("Export failed: {e}").into());
             return;
         }
+        let out = unique_path(&exports, &sanitize(&project.title), format.extension());
         let job = ExportJob {
             out: out.clone(),
             kind,
@@ -616,11 +618,12 @@ fn sanitize(title: &str) -> String {
     }
 }
 
-/// `dir/name.ext`, or `dir/name 2.ext`, … if taken.
+/// `dir/name.ext`, or `dir/name 2.ext`, … if taken. Any entry counts as
+/// taken, including a dangling symlink, which FFmpeg would write through.
 fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
     let mut path = dir.join(format!("{name}.{ext}"));
     let mut n = 2;
-    while path.exists() {
+    while path.symlink_metadata().is_ok() {
         path = dir.join(format!("{name} {n}.{ext}"));
         n += 1;
     }
@@ -639,6 +642,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.mp4"), b"").unwrap();
         assert_eq!(unique_path(&dir, "x", "mp4"), dir.join("x 2.mp4"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("missing"), dir.join("y.mp4")).unwrap();
+            assert_eq!(unique_path(&dir, "y", "mp4"), dir.join("y 2.mp4"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

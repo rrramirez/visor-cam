@@ -43,9 +43,13 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/Visor.icns"
 echo "==> Bundling libraries"
 python3 packaging/macos/bundle_dylibs.py "$app/Contents/MacOS/visor" "$app/Contents/Frameworks" "$ffmpeg_prefix/lib"
 
-echo "==> Signing (ad-hoc)"
+echo "==> Signing (ad-hoc, hardened runtime)"
+# The hardened runtime stops other code from being injected into Visor (for
+# example with DYLD_INSERT_LIBRARIES) and riding its screen, camera and
+# microphone permissions.
 find "$app/Contents/Frameworks" -name '*.dylib' -exec codesign --force --sign - --timestamp=none {} \;
-codesign --force --sign - --timestamp=none --identifier dev.visor.Visor "$app"
+codesign --force --sign - --timestamp=none --options runtime \
+    --entitlements packaging/macos/Visor.entitlements --identifier dev.visor.Visor "$app"
 codesign --verify --strict "$app"
 
 echo "==> Checking for unbundled libraries"

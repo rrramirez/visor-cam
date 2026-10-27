@@ -13,7 +13,7 @@ pub struct Range(pub Micros, pub Micros);
 
 impl Range {
     pub fn len(&self) -> Micros {
-        self.1 - self.0
+        self.1.saturating_sub(self.0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -39,6 +39,18 @@ impl EditList {
 
     pub fn ranges(&self) -> &[Range] {
         &self.keep
+    }
+
+    /// Whether the ranges are sorted, non-overlapping, non-empty and end by
+    /// `duration`, as the edit operations keep them. Lists loaded from disk
+    /// are checked with this.
+    pub fn is_valid(&self, duration: Micros) -> bool {
+        let mut prev_end = 0;
+        self.keep.iter().all(|r| {
+            let ok = !r.is_empty() && r.0 >= prev_end && r.1 <= duration;
+            prev_end = r.1;
+            ok
+        })
     }
 
     /// Length of the edited output.
@@ -128,6 +140,18 @@ mod tests {
         e.cut(50, 60);
         e.cut(25, 55);
         assert_eq!(e.ranges(), &[Range(0, 20), Range(60, 100)]);
+    }
+
+    #[test]
+    fn validity() {
+        let mut e = EditList::full(100);
+        e.cut(40, 60);
+        assert!(e.is_valid(100));
+        assert!(!e.is_valid(90));
+        let reversed: EditList = serde_json::from_str(r#"{"keep":[[10,5]]}"#).unwrap();
+        assert!(!reversed.is_valid(100));
+        let overlapping: EditList = serde_json::from_str(r#"{"keep":[[0,50],[40,60]]}"#).unwrap();
+        assert!(!overlapping.is_valid(100));
     }
 
     #[test]
