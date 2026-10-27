@@ -27,17 +27,34 @@ echo "$sha256  $work/ffmpeg.tar.xz" | sha256sum -c - >/dev/null || {
 tar -xf "$work/ffmpeg.tar.xz" -C "$work"
 cd "$work/ffmpeg-$version"
 
+# Expose only the codec libraries' static archives (and winpthreads, which
+# x264 needs), so they link into FFmpeg's DLLs while FFmpeg's own libraries
+# still link to each other as DLLs. (A global -static would also make the
+# linker pick up MSYS2's own FFmpeg libraries instead of the ones built here.)
+static="$work/static"
+mkdir -p "$static/lib/pkgconfig"
+for lib in x264 vpx opus aom winpthread; do
+    cp "/mingw64/lib/lib$lib.a" "$static/lib/"
+done
+pc() { # name version libs cflags
+    printf 'Name: %s\nDescription: %s\nVersion: %s\nLibs: -L%s/lib %s\nCflags: %s\n' \
+        "$1" "$1" "$2" "$static" "$3" "$4" > "$static/lib/pkgconfig/$1.pc"
+}
+pc x264 "$(pkg-config --modversion x264)" "-lx264 -lwinpthread" "-I/mingw64/include"
+pc vpx "$(pkg-config --modversion vpx)" "-lvpx -lwinpthread" "-I/mingw64/include"
+pc opus "$(pkg-config --modversion opus)" "-lopus" "-I/mingw64/include/opus"
+pc aom "$(pkg-config --modversion aom)" "-laom -lwinpthread" "-I/mingw64/include"
+# NVENC needs only headers; its .pc has no libraries.
+cp /mingw64/lib/pkgconfig/ffnvcodec.pc "$static/lib/pkgconfig/"
+
 echo "==> Configuring"
-# --pkg-config-flags=--static and -static link the codec libraries and the
-# MinGW runtime into the DLLs, so they only depend on Windows itself.
-./configure \
+PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
     --prefix="$prefix" \
     --enable-shared --disable-static \
     --enable-gpl --enable-version3 \
     --disable-programs --disable-doc --disable-debug --disable-postproc \
     --disable-network --disable-autodetect --disable-everything \
-    --pkg-config-flags=--static \
-    --extra-ldflags="-static" \
+    --extra-ldflags="-static-libgcc" \
     --enable-w32threads \
     --enable-libx264 --enable-libvpx --enable-libopus --enable-libaom \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-mediafoundation \
