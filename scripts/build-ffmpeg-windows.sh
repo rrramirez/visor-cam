@@ -28,9 +28,11 @@ tar -xf "$work/ffmpeg.tar.xz" -C "$work"
 cd "$work/ffmpeg-$version"
 
 # Expose only the codec libraries' static archives (and winpthreads, which
-# x264 needs), so they link into FFmpeg's DLLs while FFmpeg's own libraries
-# still link to each other as DLLs. (A global -static would also make the
-# linker pick up MSYS2's own FFmpeg libraries instead of the ones built here.)
+# x264 and GCC's runtime need), so they link into FFmpeg's DLLs while FFmpeg's
+# own libraries still link to each other as DLLs. The folder holds no DLL
+# import libraries, so -lvpx there finds the archive; it is also on the linker
+# path because configure falls back to plain -l checks. (A global -static
+# would make the linker take MSYS2's own FFmpeg libraries instead.)
 static="$work/static"
 mkdir -p "$static/lib/pkgconfig"
 for lib in x264 vpx opus aom winpthread; do
@@ -56,7 +58,8 @@ PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
     --enable-gpl --enable-version3 \
     --disable-programs --disable-doc --disable-debug --disable-postproc \
     --disable-network --disable-autodetect --disable-everything \
-    --extra-ldflags="-static-libgcc" \
+    --extra-ldflags="-L$static/lib -static-libgcc" \
+    --extra-libs="-l:libwinpthread.a" \
     --enable-w32threads \
     --enable-libx264 --enable-libvpx --enable-libopus --enable-libaom \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-mediafoundation \
@@ -70,6 +73,9 @@ PKG_CONFIG_LIBDIR="$static/lib/pkgconfig" ./configure \
     --enable-bsfs \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
     --enable-swscale --enable-swresample
+
+# Which libraries configure chose, for the log.
+grep -E "^EXTRALIBS" ffbuild/config.mak || true
 
 echo "==> Building"
 make -j"$(nproc)"
