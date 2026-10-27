@@ -78,8 +78,9 @@ those libraries, which keeps the app small.
 Signing: with a *Developer ID Application* certificate in the keychain, the
 app is signed with it (hardened runtime), and with a notarytool keychain
 profile named `visor-notary` the app and DMG are also notarized and stapled.
-Without a certificate the `.app` is ad-hoc signed: on another Mac, right-click
-it and choose *Open* the first time, and macOS asks for Screen Recording
+Without a certificate the `.app` is ad-hoc signed: on another Mac, open it
+once, then click *Open Anyway* in System Settings › Privacy & Security
+(right-click › *Open* on macOS 14). macOS asks for Screen Recording
 permission again after every rebuild.
 
 Updates use [Sparkle](https://sparkle-project.org) (fetched by
