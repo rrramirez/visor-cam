@@ -21,6 +21,9 @@ const H264_ENCODERS: &[&str] = &[
     "h264_nvenc",
     "h264_qsv",
     "h264_amf",
+    // Windows Media Foundation: the GPU's encoder whatever the vendor
+    // (covers Intel graphics; hardware only, see below).
+    "h264_mf",
     "h264_vaapi",
     "libx264",
 ];
@@ -239,6 +242,12 @@ fn open_h264(
         "libx264" => {
             opts.set("preset", "veryfast");
             opts.set("tune", "zerolatency");
+        }
+        "h264_mf" => {
+            // Windows' software encoder is slower than x264; fall through to
+            // it when there's no hardware encoder.
+            opts.set("hw_encoding", "1");
+            opts.set("scenario", "display_remoting");
         }
         _ => {}
     }

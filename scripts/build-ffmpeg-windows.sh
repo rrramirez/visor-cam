@@ -3,7 +3,7 @@
 # codecs, formats and filters Visor uses, with x264, libvpx and Opus linked in
 # statically. Mirrors scripts/build-ffmpeg-macos.sh. Run in an MSYS2 MINGW64
 # shell (the Windows workflow does), with these packages installed:
-#   mingw-w64-x86_64-{gcc,nasm,pkgconf,x264,libvpx,opus,svt-av1,ffnvcodec-headers,amf-headers,libvpl}
+#   mingw-w64-x86_64-{gcc,nasm,pkgconf,x264,libvpx,opus,svt-av1,ffnvcodec-headers,amf-headers}
 #   make diffutils
 #
 #   scripts/build-ffmpeg-windows.sh <prefix>
@@ -39,13 +39,13 @@ echo "==> Configuring"
     --extra-ldflags="-static" \
     --enable-w32threads \
     --enable-libx264 --enable-libvpx --enable-libopus --enable-libsvtav1 \
-    --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl \
+    --enable-ffnvcodec --enable-nvenc --enable-amf --enable-mediafoundation \
     --enable-protocol=file \
     --enable-indev=dshow \
     --enable-demuxer=mov,matroska,gif,aac \
     --enable-muxer=mp4,ipod,mov,webm,matroska,gif \
     --enable-decoder=h264,aac,rawvideo,vp9,opus,gif,mjpeg \
-    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_qsv,aac,libvpx_vp9,libsvtav1,libopus,gif \
+    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_mf,aac,libvpx_vp9,libsvtav1,libopus,gif \
     --enable-parser=h264,aac,vp9,opus,av1,mjpeg \
     --enable-bsfs \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
