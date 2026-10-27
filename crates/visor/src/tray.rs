@@ -14,6 +14,7 @@ pub enum Action {
     OpenRecent(PathBuf),
     OpenFolder,
     Preferences,
+    CheckForUpdates,
     Quit,
 }
 
@@ -33,10 +34,12 @@ const ID_PAUSE: &str = "pause";
 const ID_STOP: &str = "stop";
 const ID_FOLDER: &str = "folder";
 const ID_PREFS: &str = "prefs";
+const ID_UPDATES: &str = "updates";
 const ID_QUIT: &str = "quit";
 
 impl Tray {
-    pub fn new(recent: &[(String, PathBuf)]) -> anyhow::Result<Self> {
+    /// `updates`: offer "Check for Updates…" (only when an updater runs).
+    pub fn new(recent: &[(String, PathBuf)], updates: bool) -> anyhow::Result<Self> {
         let new = MenuItem::with_id(ID_NEW, "New Recording…", true, None);
         let pause = MenuItem::with_id(ID_PAUSE, "Pause Recording", false, None);
         let stop = MenuItem::with_id(ID_STOP, "Stop Recording", false, None);
@@ -51,8 +54,16 @@ impl Tray {
             &MenuItem::with_id(ID_FOLDER, "Open Recordings Folder", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(ID_PREFS, "Preferences…", true, None),
-            &MenuItem::with_id(ID_QUIT, "Quit Visor", true, None),
         ])?;
+        if updates {
+            menu.append(&MenuItem::with_id(
+                ID_UPDATES,
+                "Check for Updates…",
+                true,
+                None,
+            ))?;
+        }
+        menu.append(&MenuItem::with_id(ID_QUIT, "Quit Visor", true, None))?;
 
         let idle_icon = icon(false)?;
         let recording_icon = icon(true)?;
@@ -87,6 +98,7 @@ impl Tray {
             ID_STOP => Action::StopRecording,
             ID_FOLDER => Action::OpenFolder,
             ID_PREFS => Action::Preferences,
+            ID_UPDATES => Action::CheckForUpdates,
             ID_QUIT => Action::Quit,
             id => {
                 let (_, path) = self

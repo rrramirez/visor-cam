@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Visor's Sparkle update feed. Written by scripts/release-macos.sh. -->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Visor</title>
+        <link>https://visor-cam.pages.dev/appcast.xml</link>
+        <description>Visor updates</description>
+        <language>en</language>
+    </channel>
+</rss>

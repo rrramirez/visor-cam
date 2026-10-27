@@ -75,9 +75,18 @@ minimal FFmpeg 7.1 (`scripts/build-ffmpeg-macos.sh`: only the codecs, formats
 and filters Visor uses, with x264/libvpx/opus linked in) and bundles just
 those libraries, which keeps the app small.
 
-The `.app` is ad-hoc signed (not notarized): on another Mac, right-click it and
-choose *Open* the first time. macOS ties permissions to the signature, so after
-rebuilding you may be asked for Screen Recording permission again.
+Signing: with a *Developer ID Application* certificate in the keychain, the
+app is signed with it (hardened runtime), and with a notarytool keychain
+profile named `visor-notary` the app and DMG are also notarized and stapled.
+Without a certificate the `.app` is ad-hoc signed: on another Mac, right-click
+it and choose *Open* the first time, and macOS asks for Screen Recording
+permission again after every rebuild.
+
+Updates use [Sparkle](https://sparkle-project.org) (fetched by
+`scripts/fetch-sparkle.sh`). The feed is `site/appcast.xml` on the product
+site; updates are signed with an EdDSA key kept in the keychain
+(`target/sparkle/bin/generate_keys --account com.rrramirez.visor`). To release:
+bump the version in `Cargo.toml`, then `scripts/release-macos.sh --publish`.
 
 ### Linux
 

@@ -51,6 +51,8 @@ pub struct App {
     backend: Arc<dyn Backend>,
     pub settings: RefCell<Settings>,
     tray: RefCell<Option<Tray>>,
+    /// Sparkle, in the packaged macOS app.
+    updater: Option<crate::updates::Updater>,
     panel: RefCell<Option<Panel>>,
     devices: RefCell<Devices>,
     session: RefCell<Session>,
@@ -126,6 +128,7 @@ impl App {
             backend,
             settings: RefCell::new(Settings::load()),
             tray: RefCell::default(),
+            updater: crate::updates::Updater::start(),
             panel: RefCell::default(),
             devices: RefCell::default(),
             session: RefCell::default(),
@@ -162,7 +165,7 @@ impl App {
     }
 
     pub fn create_tray(&self) {
-        match Tray::new(&self.recent()) {
+        match Tray::new(&self.recent(), self.updater.is_some()) {
             Ok(tray) => *self.tray.borrow_mut() = Some(tray),
             Err(e) => tracing::error!("could not create the menu bar icon: {e:#}"),
         }
@@ -184,6 +187,12 @@ impl App {
             Action::OpenRecent(dir) => self.open_editor(dir),
             Action::OpenFolder => platform::open_folder(&self.settings.borrow().save_dir),
             Action::Preferences => self.open_preferences(),
+            Action::CheckForUpdates => {
+                if let Some(updater) = &self.updater {
+                    platform::activate();
+                    updater.check_now();
+                }
+            }
             Action::Quit => self.quit(),
         }
     }

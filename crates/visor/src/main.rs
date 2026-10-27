@@ -12,6 +12,7 @@ mod editor;
 mod platform;
 mod settings;
 mod tray;
+mod updates;
 mod util;
 
 use std::path::PathBuf;

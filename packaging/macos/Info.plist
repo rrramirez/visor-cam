@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Visor</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.visor.Visor</string>
+    <string>com.rrramirez.visor</string>
     <key>CFBundleExecutable</key>
     <string>visor</string>
     <key>CFBundleIconFile</key>
@@ -30,6 +30,13 @@
     <string>Visor records your camera alongside the screen when you choose a camera.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Visor records your microphone alongside the screen when you choose a microphone.</string>
+    <!-- Sparkle updates: the feed lives on the product site; updates must be
+         signed with the matching private key (kept in the keychain). Sparkle
+         asks the user before checking automatically. -->
+    <key>SUFeedURL</key>
+    <string>https://visor-cam.pages.dev/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>9pQ9FlFk2j7coK+USNjTfX2KRHA1CCXOPHWf+K/g46g=</string>
     <key>NSHumanReadableCopyright</key>
     <string>Visor is free software, licensed under the GNU GPL v3 or later.</string>
 </dict>
