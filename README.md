@@ -100,7 +100,8 @@ Updates use [Sparkle](https://sparkle-project.org) (fetched by
 `scripts/fetch-sparkle.sh`). The feed is `site/appcast.xml` on the product
 site; updates are signed with an EdDSA key kept in the keychain
 (`target/sparkle/bin/generate_keys --account com.rrramirez.visor`). To release:
-bump the version in `Cargo.toml`, then `scripts/release-macos.sh --publish`.
+bump the version in `Cargo.toml`, add the release notes to
+`CHANGELOG.md`, then `scripts/release-macos.sh --publish`.
 
 ### Linux
 
