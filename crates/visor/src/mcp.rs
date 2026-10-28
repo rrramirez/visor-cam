@@ -168,7 +168,7 @@ fn tool_list() -> Value {
 fn folder_schema() -> Value {
     json!({
         "type": "string",
-        "description": "The recording's folder, as stop_recording returned it. Left out: the recording last stopped.",
+        "description": "The recording's folder, as stop_recording returned it: an absolute path (or starting with ~/). Left out: the recording last stopped.",
     })
 }
 

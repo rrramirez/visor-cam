@@ -239,7 +239,8 @@ pub fn call(command: &Value) -> Value {
 }
 
 /// `command` with its folder resolved here, since Visor runs in its own
-/// directory, and a null folder left out, as Visor reads it.
+/// directory, a leading `~` expanded, as an agent may write one with no
+/// shell to expand it, and a null folder left out, as Visor reads it.
 fn with_absolute_folder(command: &Value) -> Value {
     let mut command = command.clone();
     if let Some(args) = command.as_object_mut() {
@@ -248,6 +249,13 @@ fn with_absolute_folder(command: &Value) -> Value {
                 args.remove("folder");
             }
             Some(Value::String(folder)) => {
+                let home = |rest: &str| dirs::home_dir().map(|h| h.join(rest));
+                let folder = match folder.strip_prefix("~/") {
+                    Some(rest) => home(rest),
+                    None if folder == "~" => home(""),
+                    None => None,
+                }
+                .unwrap_or_else(|| folder.into());
                 if let Ok(folder) = std::path::absolute(folder) {
                     args.insert("folder".into(), folder.display().to_string().into());
                 }
@@ -388,6 +396,15 @@ mod tests {
         assert!(std::path::Path::new(relative["folder"].as_str().unwrap()).is_absolute());
         let null = with_absolute_folder(&json!({"command": "open_recording", "folder": null}));
         assert_eq!(null, json!({"command": "open_recording"}));
+        let home = with_absolute_folder(&json!({"folder": "~/Movies/Visor/Demo"}));
+        assert_eq!(
+            home["folder"].as_str().unwrap(),
+            dirs::home_dir()
+                .unwrap()
+                .join("Movies/Visor/Demo")
+                .display()
+                .to_string()
+        );
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }
