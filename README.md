@@ -65,8 +65,8 @@ that many seconds of recorded time.
 ## Letting AI agents record
 
 Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
-you: start recording, pause while they set something up, mark each step and
-stop. Turn on **Let AI agents control recording** in Preferences (it's off
+you: name the recording, start it, mark each step, pause while they set
+something up or retry a step, and stop. Turn on **Let AI agents control recording** in Preferences (it's off
 until you do). Recordings an agent starts say *Agent* on the control bar,
 and your own controls and shortcuts keep working.
 
@@ -82,7 +82,7 @@ settings. Agents that run shell commands can use the command line instead:
 
 ```sh
 visor sources                                # what can be recorded
-visor start --window "Safari" --camera none  # returns once it's recording
+visor start --window "Safari" --name "Safari tour"  # returns once recording
 visor mark "Step 2: open settings"           # shown on the editor's timeline
 visor pause; visor resume
 visor stop                                   # prints the folder and markers

@@ -20,7 +20,7 @@ use visor_capture::mic::{self, MicDevice, MicStream};
 use visor_capture::{Backend, DisplayInfo, Shareable};
 use visor_core::project::BubbleShape;
 use visor_core::{AudioConfig, CameraOverlay, CaptureTarget, RecordingConfig, Rect};
-use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
+use visor_recorder::{Recorder, RecorderOptions, named_project_dir, new_project_dir};
 
 use crate::editor::{EditorWindow, Jobs};
 use crate::platform::{self, Overlay};
@@ -1160,12 +1160,19 @@ impl App {
             CaptureTarget::Window { .. } | CaptureTarget::App { .. } => None,
         };
         let save_dir = self.settings.borrow().save_dir.clone();
-        let dir = new_project_dir(&save_dir, "Recording");
-        let title = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        // An agent may have named it (see `agent`).
+        let (dir, title) = match self.agent.borrow_mut().name.take() {
+            Some(name) => (named_project_dir(&save_dir, &name), name),
+            None => {
+                let dir = new_project_dir(&save_dir, "Recording");
+                let title = dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                (dir, title)
+            }
+        };
         let (mic, camera) = {
             let d = self.devices.borrow();
             (
@@ -1377,7 +1384,11 @@ impl App {
     /// Back to Idle with the panel showing, e.g. after a cancelled start.
     fn return_to_panel(&self, error: Option<&str>) {
         *self.session.borrow_mut() = Session::Idle;
-        self.agent.borrow_mut().recording = false;
+        {
+            let mut agent = self.agent.borrow_mut();
+            agent.recording = false;
+            agent.named = false;
+        }
         self.refresh_tray();
         self.open_panel();
         if let Some(e) = error {
@@ -1526,7 +1537,8 @@ impl App {
 
     fn on_stopped(&self, result: anyhow::Result<PathBuf>) {
         *self.session.borrow_mut() = Session::Idle;
-        let open_editor = self.agent_stopped(&result);
+        let after = self.agent_stopped(&result);
+        let open_editor = after != agent::AfterStop::Nothing;
         if self.quit_pending.get() {
             if let Err(e) = &result {
                 tracing::error!("finishing the recording failed: {e:#}");
@@ -1535,8 +1547,11 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) if open_editor => self.open_new_recording(dir),
-            Ok(_) => {}
+            Ok(dir) => match after {
+                agent::AfterStop::Name => self.open_new_recording(dir),
+                agent::AfterStop::Edit => self.open_editor(dir),
+                agent::AfterStop::Nothing => {}
+            },
             Err(e) => {
                 tracing::error!("finishing the recording failed: {e:#}");
                 // An agent that stopped it was told.

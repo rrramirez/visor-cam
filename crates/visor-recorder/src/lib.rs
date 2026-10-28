@@ -268,6 +268,22 @@ impl Drop for Recorder {
     }
 }
 
+/// A new folder under `root` named after a recording's name, as the editor
+/// names folders (`Demo`, then `Demo 2`…), or after the time if the name
+/// makes no folder name.
+pub fn named_project_dir(root: &Path, title: &str) -> PathBuf {
+    let Some(name) = visor_core::project::folder_name(title) else {
+        return new_project_dir(root, "Recording");
+    };
+    let mut dir = root.join(&name);
+    let mut n = 2;
+    while dir.symlink_metadata().is_ok() {
+        dir = root.join(format!("{name} {n}"));
+        n += 1;
+    }
+    dir
+}
+
 /// A new folder under `root` named after the local time and title, e.g.
 /// `2026-10-20 14.03.27 Recording`.
 pub fn new_project_dir(root: &Path, title: &str) -> PathBuf {
@@ -404,6 +420,18 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         let b = new_project_dir(&root, "Demo: a/b");
         assert_ne!(a, b);
+        let named = named_project_dir(&root, "Safari demo: v2");
+        assert_eq!(named, root.join("Safari demo- v2"));
+        std::fs::create_dir_all(&named).unwrap();
+        assert_eq!(
+            named_project_dir(&root, "Safari demo: v2"),
+            root.join("Safari demo- v2 2")
+        );
+        assert!(
+            named_project_dir(&root, " .. ")
+                .to_string_lossy()
+                .ends_with(" Recording")
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

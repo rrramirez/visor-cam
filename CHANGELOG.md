@@ -7,7 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
-- **Let AI agents record for you:** agents like Claude Code, Claude Desktop and Cursor can start, pause, mark and stop recordings through Visor's MCP server or the `visor` command. It's off until you turn it on in Preferences, and recordings an agent starts say *Agent* on the control bar.
+- **Let AI agents record for you:** agents like Claude Code, Claude Desktop and Cursor can start, pause, mark and stop recordings through Visor's MCP server or the `visor` command. It's off until you turn it on in Preferences, and recordings an agent starts say *Agent* on the control bar. Agents can name the recording when they start it, and pause whenever nothing worth watching is happening.
 - **Markers:** notes an agent adds while recording ("Step 2: open settings") show on the editor's timeline; click one to jump there.
 
 ## 0.2.0

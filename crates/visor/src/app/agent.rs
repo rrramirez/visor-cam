@@ -23,6 +23,20 @@ pub(super) struct AgentState {
     /// Whether to open the editor once it's saved.
     stop: Option<(Reply, bool)>,
     discard: Option<Reply>,
+    /// Name for the recording being started; taken by `start_recording`.
+    pub name: Option<String>,
+    /// The current recording was named by the agent.
+    pub named: bool,
+}
+
+/// What follows a recording being saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterStop {
+    /// The editor, ready for the user to name the recording.
+    Name,
+    /// The editor, the recording already named.
+    Edit,
+    Nothing,
 }
 
 const OFF: &str = "Agent control is off. The user can turn it on in Visor's Preferences \
@@ -199,7 +213,16 @@ impl App {
         if let Err(e) = self.apply_agent_choices(args) {
             return send(reply, Err(e));
         }
-        self.agent.borrow_mut().recording = true;
+        let name: Option<String> = arg(args, "name")
+            .and_then(Value::as_str)
+            .map(|n| n.trim().chars().take(200).collect())
+            .filter(|n: &String| !n.is_empty());
+        {
+            let mut agent = self.agent.borrow_mut();
+            agent.recording = true;
+            agent.named = name.is_some();
+            agent.name = name;
+        }
         self.record_when_ready(None);
         let started = Instant::now();
         let timer = Timer::default();
@@ -236,7 +259,10 @@ impl App {
         match outcome {
             Ok(()) => send(reply, Ok(self.agent_status())),
             Err(e) => {
-                self.agent.borrow_mut().recording = false;
+                let mut agent = self.agent.borrow_mut();
+                agent.recording = false;
+                agent.name = None;
+                drop(agent);
                 send(reply, Err(e));
             }
         }
@@ -449,12 +475,19 @@ impl App {
     }
 
     /// A recording finished saving (or failed to). Answers an agent that
-    /// stopped it; returns whether to open the editor as usual.
-    pub(super) fn agent_stopped(&self, result: &anyhow::Result<PathBuf>) -> bool {
+    /// stopped it; returns what to open.
+    pub(super) fn agent_stopped(&self, result: &anyhow::Result<PathBuf>) -> AfterStop {
         let mut agent = self.agent.borrow_mut();
         agent.recording = false;
+        let named = std::mem::take(&mut agent.named);
+        let editor = if named {
+            AfterStop::Edit
+        } else {
+            AfterStop::Name
+        };
         let Some((reply, open_editor)) = agent.stop.take() else {
-            return true;
+            // Stopped by the user.
+            return editor;
         };
         drop(agent);
         send(
@@ -463,6 +496,7 @@ impl App {
                 Ok(dir) => {
                     let project = visor_core::Project::load(dir).ok();
                     Ok(json!({
+                        "name": project.as_ref().map(|p| p.title.clone()),
                         "folder": dir.display().to_string(),
                         "duration_seconds": project.as_ref().map(|p| seconds(p.duration_us)),
                         "markers": project.map(|p| p.markers.iter().map(|m| json!({
@@ -475,7 +509,11 @@ impl App {
                 Err(e) => Err(format!("Saving the recording failed: {e:#}")),
             },
         );
-        open_editor
+        if open_editor {
+            editor
+        } else {
+            AfterStop::Nothing
+        }
     }
 
     /// A recording was discarded. Answers an agent that discarded it;
@@ -483,6 +521,7 @@ impl App {
     pub(super) fn agent_discarded(&self, result: &anyhow::Result<()>) -> bool {
         let mut agent = self.agent.borrow_mut();
         agent.recording = false;
+        agent.named = false;
         let Some(reply) = agent.discard.take() else {
             return true;
         };

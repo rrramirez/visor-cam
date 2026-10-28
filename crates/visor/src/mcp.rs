@@ -12,9 +12,11 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 const INSTRUCTIONS: &str = "\
 Visor records the user's screen, camera and microphone, offline, on their computer. \
-A typical demo: list_sources to see what can be recorded, start_recording, then do \
-the demo, calling add_marker at each step and pause_recording while setting up \
-something that shouldn't be in the video, and finally stop_recording. \
+A typical demo: list_sources to see what can be recorded, start_recording with a \
+name for the video, then do the demo, calling add_marker at each step, and finally \
+stop_recording. Keep the video free of dead time: call pause_recording before \
+setting up something that shouldn't be seen, and as soon as a step fails or you \
+need to retry or think, then resume_recording once the next step is ready to show. \
 Visor's own windows are never recorded, but your terminal or chat window is if it's \
 on the recorded screen: record a single window or app to keep it out. \
 The user must turn on agent control in Visor's Preferences first; if a tool says it \
@@ -48,6 +50,10 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The recording's name, e.g. \"Creating a GitHub repository\". Its folder and exports are named after it. Left out: the date and time, and the user is asked for a name when it opens in the editor.",
+                    },
                     "target": {
                         "type": "string",
                         "enum": ["screen", "window", "app", "area"],
@@ -91,7 +97,7 @@ fn tools() -> Value {
         },
         {
             "name": "pause_recording",
-            "description": "Pauses the recording; nothing is recorded until resume_recording.",
+            "description": "Pauses the recording; nothing is recorded until resume_recording. Pause whenever nothing worth watching is happening: while setting up, retrying a failed step, or waiting.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
@@ -109,7 +115,7 @@ fn tools() -> Value {
         },
         {
             "name": "stop_recording",
-            "description": "Stops and saves the recording. Returns its folder, duration and markers.",
+            "description": "Stops and saves the recording. Returns its name, folder, duration and markers.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

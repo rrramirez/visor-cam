@@ -19,6 +19,7 @@ Control the running Visor (turn on agent control in Preferences first):
   status                      what Visor is doing
   sources                     displays, windows, apps, cameras and microphones
   start [options]             start recording; returns once it's recording
+      --name NAME             name the recording (and its folder)
       --screen [DISPLAY]      the whole screen (the main one by default)
       --window WINDOW         one window: its id, or part of \"App — Title\"
       --app APP               one app's windows: its pid or name
@@ -123,6 +124,7 @@ fn start_args(args: &[String]) -> Result<Value, String> {
                 command["target"] = "area".into();
                 command["area"] = json!({"x": x, "y": y, "width": width, "height": height});
             }
+            "--name" => command["name"] = value!()?.into(),
             "--display" => command["display"] = value!()?.into(),
             "--camera" => command["camera"] = value!()?.into(),
             "--mic" => command["mic"] = value!()?.into(),
@@ -261,7 +263,8 @@ mod tests {
                 "system_audio": true,
             })
         );
-        let c = start_args(&args("--screen --mic MacBook")).unwrap();
+        let c = start_args(&args("--screen --mic MacBook --name Demo")).unwrap();
+        assert_eq!(c["name"], "Demo");
         assert_eq!(c["target"], "screen");
         assert!(c.get("display").is_none());
         assert_eq!(c["mic"], "MacBook");
