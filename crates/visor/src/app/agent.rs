@@ -562,6 +562,11 @@ impl App {
     /// the one the agent last stopped. Only recordings directly in the
     /// recordings folder, and not one being recorded.
     fn agent_recording(&self, args: &Value) -> Result<PathBuf, String> {
+        // Its final save could overwrite the edit, and it isn't the last
+        // recording yet.
+        if matches!(*self.session.borrow(), Session::Stopping) {
+            return Err("A recording is still being saved; try again in a moment.".into());
+        }
         let dir =
             match arg(args, "folder") {
                 Some(folder) => PathBuf::from(folder.as_str().ok_or("folder is a path.")?),
@@ -583,12 +588,27 @@ impl App {
         if dir.parent() != root.as_deref() {
             return Err("Only recordings in Visor's recordings folder can be edited.".into());
         }
-        if let Session::Recording { recorder, .. } = &*self.session.borrow()
-            && recorder.dir().canonicalize().ok().as_ref() == Some(&dir)
-        {
-            return Err("That recording is still going; stop it first.".into());
+        match &*self.session.borrow() {
+            Session::Recording { recorder, .. }
+                if recorder.dir().canonicalize().ok().as_ref() == Some(&dir) =>
+            {
+                return Err("That recording is still going; stop it first.".into());
+            }
+            _ => {}
         }
         Ok(dir)
+    }
+
+    /// Keeps the agent's last recording when its folder is renamed.
+    pub(super) fn agent_folder_renamed(&self, from: &Path, to: &Path) {
+        let mut agent = self.agent.borrow_mut();
+        let same = agent
+            .last_folder
+            .as_ref()
+            .is_some_and(|f| f == from || f.canonicalize().ok().as_deref() == Some(from));
+        if same {
+            agent.last_folder = Some(to.to_path_buf());
+        }
     }
 
     /// The editor showing the recording in `dir`, if one is open.
@@ -596,7 +616,7 @@ impl App {
         self.editors
             .borrow()
             .iter()
-            .find(|e| e.dir().canonicalize().ok().as_deref() == Some(dir))
+            .find(|e| e.dir() == dir)
             .cloned()
     }
 
@@ -621,17 +641,16 @@ impl App {
                 Some(((start * 1e6) as Micros, (end * 1e6) as Micros))
             }
         };
-        // The open editor's project, else the one on disk.
+        // Built once from what the open editor has, else what's on disk.
         let editor = self.editor_for(&dir);
-        let saved = match &editor {
-            Some(_) => None,
-            None => Some(visor_core::Project::load(&dir).map_err(|e| e.to_string())?),
+        let current = match &editor {
+            Some(editor) => editor.project(),
+            None => visor_core::Project::load(&dir).map_err(|e| e.to_string())?,
         };
-        let duration = match (&editor, &saved) {
-            (Some(editor), _) => editor.duration(),
-            (_, Some(project)) => project.duration_us,
-            _ => return Err("The recording couldn't be read.".into()),
-        };
+        let duration = current.duration_us;
+        if duration == 0 {
+            return Err("That recording wasn't saved properly, so it can't be edited.".into());
+        }
         if let Some((start, _)) = range
             && start >= duration
         {
@@ -640,24 +659,23 @@ impl App {
                 seconds(duration)
             ));
         }
-        let change = |edit: &mut EditList| match (kind, range) {
+        let mut edit = current.edit.clone();
+        match (kind, range) {
             (EditKind::Cut, Some((a, b))) => edit.cut(a, b),
             (EditKind::Trim, Some((a, b))) => edit.trim(a, b),
-            _ => *edit = EditList::full(duration),
-        };
-        let project = match (&editor, saved) {
-            (Some(editor), _) => editor.apply_agent_edit(change)?,
-            (_, Some(mut project)) => {
-                let mut edit = project.edit.clone();
-                change(&mut edit);
-                if edit.duration() == 0 {
-                    return Err("That would remove the whole recording.".into());
-                }
+            _ => edit = EditList::full(duration),
+        }
+        if edit.duration() == 0 {
+            return Err("That would remove the whole recording.".into());
+        }
+        let project = match &editor {
+            Some(editor) => editor.apply_agent_edit(edit)?,
+            None => {
+                let mut project = current;
                 project.edit = edit;
                 project.save(&dir).map_err(|e| e.to_string())?;
                 project
             }
-            _ => return Err("The recording couldn't be read.".into()),
         };
         Ok(json!({
             "folder": dir.display().to_string(),
@@ -733,15 +751,20 @@ impl App {
         result: &anyhow::Result<(PathBuf, visor_core::Project)>,
         run: Option<AgentRun>,
     ) -> AfterStop {
-        let editor = if run.is_some_and(|r| r.name.is_some()) {
+        let editor = if run.as_ref().is_some_and(|r| r.name.is_some()) {
             AfterStop::Edit
         } else {
             AfterStop::Name
         };
-        if let Ok((dir, _)) = result {
+        let stop = self.agent.borrow_mut().stop.take();
+        // Edits default to a recording the agent started or stopped, never
+        // one the user made by hand.
+        if let Ok((dir, _)) = result
+            && (run.is_some() || stop.is_some())
+        {
             self.agent.borrow_mut().last_folder = Some(dir.clone());
         }
-        let Some((reply, open_editor)) = self.agent.borrow_mut().stop.take() else {
+        let Some((reply, open_editor)) = stop else {
             // Stopped by the user.
             return editor;
         };

@@ -33,6 +33,7 @@ Control the running Visor (turn on agent control in Preferences first):
   mark [TEXT]                 note this moment, shown on the editor's timeline
   stop [--open-editor]        stop and save; prints the recording's folder
   discard                     stop and delete the recording
+  mcp                         serve these commands to agents over MCP (stdio)
 
 Edit the recording last stopped, or the one given with --folder FOLDER.
 Times are recorded seconds (or M:SS), as marks and status show them:
@@ -40,7 +41,6 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   trim START END              keep only START to END
   restore                     undo all cuts
   open                        open it in the editor
-  mcp                         serve these commands to agents over MCP (stdio)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
 
@@ -176,7 +176,10 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--folder" {
-            command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+            let folder = args.next().ok_or("--folder needs a value")?;
+            // Visor runs in its own directory: resolve it here.
+            let folder = std::path::absolute(folder).map_err(|e| e.to_string())?;
+            command["folder"] = folder.display().to_string().into();
         } else {
             times.push(seconds_arg(arg)?);
         }
@@ -193,15 +196,20 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
-/// Seconds, or minutes and seconds as M:SS.
+/// Seconds, or minutes and seconds as M:SS (seconds below 60).
 fn seconds_arg(s: &str) -> Result<f64, String> {
+    let number = |n: &str| {
+        n.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n >= 0.0 && !n.is_sign_negative())
+    };
     let parsed = match s.split_once(':') {
         Some((m, sec)) => m
-            .parse::<f64>()
+            .parse::<u32>()
             .ok()
-            .zip(sec.parse::<f64>().ok())
-            .map(|(m, sec)| m * 60.0 + sec),
-        None => s.parse::<f64>().ok(),
+            .zip(number(sec).filter(|sec| *sec < 60.0))
+            .map(|(m, sec)| f64::from(m) * 60.0 + sec),
+        None => number(s),
     };
     parsed.ok_or_else(|| format!("\"{s}\" isn't a time (seconds, or M:SS)"))
 }
@@ -212,10 +220,19 @@ pub fn call(command: &Value) -> Value {
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
-            Some(
-                "start_recording" | "list_sources" | "cut_recording" | "trim_recording"
-                | "restore_recording" | "open_recording",
-            ) => launch_and_call(command),
+            Some("start_recording" | "list_sources") => launch_and_call(command),
+            // A fresh Visor knows no last recording: only a named one helps.
+            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording")
+                if command.get("folder").is_some() =>
+            {
+                launch_and_call(command)
+            }
+            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording") => {
+                json!({
+                    "ok": false,
+                    "error": "Visor isn't running, so it has no last recording; say which with a folder.",
+                })
+            }
             Some("status") => json!({"ok": true, "state": "not_running"}),
             _ => json!({"ok": false, "error": "Visor isn't running, so it isn't recording."}),
         },
@@ -345,6 +362,12 @@ mod tests {
             json!({"command": "open_recording"})
         );
         assert!(edit_args("trim", &args("5")).is_err());
+        for bad in ["-0:30", "1:-5", "1:75", "-3", "1:2:3", "x:10"] {
+            assert!(seconds_arg(bad).is_err(), "{bad}");
+        }
+        assert_eq!(seconds_arg("0:59.5"), Ok(59.5));
+        let relative = edit_args("open", &args("--folder Demo")).unwrap();
+        assert!(std::path::Path::new(relative["folder"].as_str().unwrap()).is_absolute());
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }

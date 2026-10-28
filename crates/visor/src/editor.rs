@@ -37,6 +37,8 @@ pub struct EditorWindow {
     /// when idle so an open editor doesn't keep waking the CPU.
     timer: Timer,
     idle_ticks: Cell<u32>,
+    /// Why the last save failed, for an agent's edit to report.
+    save_error: RefCell<Option<String>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -150,6 +152,7 @@ impl EditorWindow {
                 last_export: RefCell::default(),
                 timer,
                 idle_ticks: Cell::new(0),
+                save_error: RefCell::default(),
                 jobs: Jobs::default(),
             }
         });
@@ -374,16 +377,22 @@ impl EditorWindow {
         })
     }
 
-    /// Applies an agent's edit as if it were made here, so it shows at once
-    /// and the user can undo it. Refuses one that would remove everything.
-    pub fn apply_agent_edit(&self, change: impl FnOnce(&mut EditList)) -> Result<Project, String> {
-        let mut after = self.project.borrow().edit.clone();
-        change(&mut after);
-        if after.duration() == 0 {
-            return Err("That would remove the whole recording.".into());
+    /// The project as edited here.
+    pub fn project(&self) -> Project {
+        self.project.borrow().clone()
+    }
+
+    /// Sets an agent's edit as if it were made here, so it shows at once
+    /// and the user can undo it. Fails if it couldn't be saved.
+    pub fn apply_agent_edit(&self, edit: EditList) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.apply(|e| *e = edit);
+        match self.save_error.borrow_mut().take() {
+            Some(e) => Err(format!(
+                "The change shows in the editor but couldn't be saved: {e}"
+            )),
+            None => Ok(self.project()),
         }
-        self.apply(|edit| *edit = after);
-        Ok(self.project.borrow().clone())
     }
 
     fn apply(&self, change: impl FnOnce(&mut EditList)) {
@@ -428,6 +437,7 @@ impl EditorWindow {
     fn save(&self) {
         if let Err(e) = self.project.borrow().save(&self.dir) {
             tracing::error!("saving project.json failed: {e}");
+            *self.save_error.borrow_mut() = Some(e.to_string());
         }
     }
 
