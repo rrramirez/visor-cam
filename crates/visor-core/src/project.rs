@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -192,19 +193,17 @@ fn is_plain_file_name(name: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
-/// Lists project folders under `root`, newest first by folder name. This is a
-/// plain directory scan; there is no library database.
+/// Lists project folders under `root`, newest first by when they were
+/// recorded. This is a plain directory scan; there is no library database.
 pub fn list_projects(root: &Path) -> io::Result<Vec<PathBuf>> {
-    // Newest first, by when they were recorded: folders are renamed after
-    // their titles, so their names don't sort by date.
-    let mut dirs: Vec<(String, PathBuf)> = fs::read_dir(root)?
+    // Folders are renamed after their recordings, so names don't sort by
+    // date; the folder's creation time does, survives renames, and costs a
+    // stat rather than reading every project.json.
+    let mut dirs: Vec<(Option<SystemTime>, PathBuf)> = fs::read_dir(root)?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.join(PROJECT_FILE).is_file())
-        .map(|p| {
-            let created = Project::load(&p).map(|p| p.created_at).unwrap_or_default();
-            (created, p)
-        })
+        .map(|p| (recorded_at(&p), p))
         .collect();
     dirs.sort_by(|a, b| {
         b.0.cmp(&a.0)
@@ -213,37 +212,52 @@ pub fn list_projects(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(dirs.into_iter().map(|(_, p)| p).collect())
 }
 
-/// A folder name for a recording titled `title`: characters that aren't
-/// allowed in file names (on any platform) become "-", and leading or
-/// trailing dots and spaces go. `None` if nothing usable is left.
+/// When the recording in `dir` was made: its folder's creation time, where
+/// the file system keeps one.
+pub fn recorded_at(dir: &Path) -> Option<SystemTime> {
+    fs::metadata(dir).and_then(|m| m.created()).ok()
+}
+
+/// Longest folder or file name stem, in bytes: file systems allow 255
+/// bytes, leaving room for " 2" and extensions like " thumbnail.jpg".
+const MAX_NAME_BYTES: usize = 200;
+
+/// A folder (or file) name for a recording titled `title`: characters that
+/// aren't allowed in file names (on any platform) become "-", leading or
+/// trailing dots and spaces go, and long titles are cut short. `None` if
+/// nothing usable is left.
 pub fn folder_name(title: &str) -> Option<String> {
-    let cleaned: String = title
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .take(120)
-        .collect();
-    let name = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    // Names Windows reserves for devices.
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    match name {
-        "" => None,
-        _ if reserved => Some(format!("{name} recording")),
-        _ => Some(name.to_string()),
+    let mut cleaned = String::new();
+    for c in title.chars() {
+        let c = if c.is_control()
+            || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        {
+            '-'
+        } else {
+            c
+        };
+        if cleaned.len() + c.len_utf8() > MAX_NAME_BYTES {
+            break;
+        }
+        cleaned.push(c);
     }
+    let name = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if name.is_empty() {
+        return None;
+    }
+    // Windows reserves device names, with any extension ("COM1.mp4" too):
+    // set the stem apart.
+    let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
+    let device = stem.trim_end().to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (device.len() == 4
+            && (device.starts_with("COM") || device.starts_with("LPT"))
+            && device.as_bytes()[3].is_ascii_digit());
+    Some(if reserved {
+        format!("{} recording{rest}", stem.trim_end())
+    } else {
+        name.to_string()
+    })
 }
 
 /// Renames the recording folder `dir` after its project's title, if it is
@@ -296,12 +310,20 @@ mod tests {
         assert_eq!(folder_name("..hidden.").as_deref(), Some("hidden"));
         assert_eq!(folder_name(" . "), None);
         assert_eq!(folder_name("con").as_deref(), Some("con recording"));
+        // Reserved with any extension: the suffix goes on the stem.
         assert_eq!(
             folder_name("Com1.mp4").as_deref(),
-            Some("Com1.mp4 recording")
+            Some("Com1 recording.mp4")
+        );
+        assert_eq!(
+            folder_name("nul .txt").as_deref(),
+            Some("nul recording.txt")
         );
         assert_eq!(folder_name("Console").as_deref(), Some("Console"));
-        assert_eq!(folder_name(&"x".repeat(300)).unwrap().len(), 120);
+        assert_eq!(folder_name(&"x".repeat(300)).unwrap().len(), 200);
+        // Bytes, not characters: 3-byte characters stop at 66 of them.
+        let cjk = folder_name(&"録".repeat(100)).unwrap();
+        assert_eq!(cjk.chars().count(), 66);
     }
 
     #[test]

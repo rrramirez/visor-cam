@@ -242,12 +242,20 @@ fn mp4_cover_is_the_chosen_thumbnail() {
     .unwrap();
     let jpeg = cover(&out).expect("no cover art");
     assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
-    // Most of the frame is screen (the bubble covers the bottom left).
-    let f = decode_jpeg(&jpeg);
-    assert_jpeg_full_range(&f);
-    let l = mean_luma(&f);
-    let expected = full_range(luma(75));
-    assert!((l - expected).abs() < 25.0, "cover luma {l} vs {expected}");
+    // Checking what the images show needs a JPEG decoder, which the app
+    // itself doesn't: FFmpeg builds made for packaging leave it out.
+    let can_decode = ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).is_some();
+    if !can_decode {
+        eprintln!("this FFmpeg can't decode JPEG: only checking that images are written");
+    }
+    if can_decode {
+        // Most of the frame is screen (the bubble covers the bottom left).
+        let f = decode_jpeg(&jpeg);
+        assert_jpeg_full_range(&f);
+        let l = mean_luma(&f);
+        let expected = full_range(luma(75));
+        assert!((l - expected).abs() < 25.0, "cover luma {l} vs {expected}");
+    }
 
     // Cut away, the thumbnail falls back to the first kept frame.
     project.edit.cut(2_000_000, 3_000_000);
@@ -257,22 +265,25 @@ fn mp4_cover_is_the_chosen_thumbnail() {
     let image = dir.join("thumb.jpg");
     save_thumbnail(&dir, &project, &image).unwrap();
     let saved = std::fs::read(&image).unwrap();
-    let f = decode_jpeg(&saved);
-    assert_jpeg_full_range(&f);
-    let expected = full_range(luma(15));
-    assert!(
-        (mean_luma(&f) - expected).abs() < 25.0,
-        "saved luma vs {expected}"
-    );
-    // Full size.
-    assert_eq!((f.width(), f.height()), (640, 360));
+    assert_eq!(&saved[..2], [0xFF, 0xD8]);
+    if can_decode {
+        let f = decode_jpeg(&saved);
+        assert_jpeg_full_range(&f);
+        let expected = full_range(luma(15));
+        assert!(
+            (mean_luma(&f) - expected).abs() < 25.0,
+            "saved luma vs {expected}"
+        );
+        // Full size.
+        assert_eq!((f.width(), f.height()), (640, 360));
 
-    // Video black (16) must come out as JPEG black (0), not grey.
-    project.edit = visor_core::EditList::full(project.duration_us);
-    project.thumbnail_us = Some(0);
-    save_thumbnail(&dir, &project, &image).unwrap();
-    let black = top_luma(&decode_jpeg(&std::fs::read(&image).unwrap()));
-    assert!(black < 4.0, "black came out as {black}");
+        // Video black (16) must come out as JPEG black (0), not grey.
+        project.edit = visor_core::EditList::full(project.duration_us);
+        project.thumbnail_us = Some(0);
+        save_thumbnail(&dir, &project, &image).unwrap();
+        let black = top_luma(&decode_jpeg(&std::fs::read(&image).unwrap()));
+        assert!(black < 4.0, "black came out as {black}");
+    }
     common::cleanup(&dir);
 }
 

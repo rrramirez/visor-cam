@@ -22,7 +22,7 @@ use visor_core::project::BubbleShape;
 use visor_core::{AudioConfig, CameraOverlay, CaptureTarget, RecordingConfig, Rect};
 use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
 
-use crate::editor::EditorWindow;
+use crate::editor::{EditorWindow, Jobs};
 use crate::platform::{self, Overlay};
 use crate::settings::Settings;
 use crate::shortcuts::{self, Shortcut, Shortcuts};
@@ -360,8 +360,23 @@ impl App {
             tray.set_recording(recording, paused);
         }
         let live = matches!(*self.session.borrow(), Session::Recording { .. });
-        if let Some(s) = &mut *self.shortcuts.borrow_mut() {
-            s.set_recording(live);
+        let taken = match &mut *self.shortcuts.borrow_mut() {
+            Some(s) => s.set_recording(live),
+            None => return,
+        };
+        // Pause and discard are only tried while recording: remember what
+        // was taken then, so Preferences can say so afterwards too.
+        if live {
+            let changed = {
+                let mut known = self.taken_shortcuts.borrow_mut();
+                let before = known.clone();
+                known.retain(|s| *s == Shortcut::StartStop);
+                known.extend(taken);
+                *known != before
+            };
+            if changed {
+                self.sync_preferences();
+            }
         }
     }
 
@@ -371,16 +386,17 @@ impl App {
             self.quit_pending.set(true);
             return;
         }
-        // Name the folders of recordings still open.
-        let open: Vec<PathBuf> = self
-            .editors
-            .borrow_mut()
-            .drain(..)
-            .map(|e| e.dir().to_path_buf())
-            .collect();
+        // Name the folders of recordings still open: once, without
+        // waiting, and only where no export or image save was running.
+        let open: Vec<_> = self.editors.borrow_mut().drain(..).collect();
         let root = self.settings.borrow().save_dir.clone();
-        for dir in open {
-            rename_folder(&dir, &root);
+        for editor in open {
+            let busy = editor.stop_work().running();
+            let dir = editor.dir().to_path_buf();
+            drop(editor);
+            if !busy && let Err(e) = visor_core::project::rename_to_title(&dir, &root) {
+                tracing::info!("not renaming {} at quit: {e}", dir.display());
+            }
         }
         let session = std::mem::take(&mut *self.session.borrow_mut());
         match session {
@@ -1570,17 +1586,59 @@ impl App {
         }
     }
 
-    pub fn editor_closed(&self, dir: &std::path::Path) {
+    pub fn editor_closed(&self, dir: &std::path::Path, jobs: Jobs) {
         self.editors.borrow_mut().retain(|e| e.dir() != dir);
         self.update_dock();
         self.refresh_tray();
-        // The folder takes the recording's name once nothing has it open.
+        // The folder takes the recording's name once nothing has it open:
+        // a cancelled export or a thumbnail being saved may still write to
+        // the old path, and on Windows the player's files stay open for a
+        // moment.
         let (dir, root) = (dir.to_path_buf(), self.settings.borrow().save_dir.clone());
         std::thread::spawn(move || {
-            if rename_folder(&dir, &root) {
-                post(|app| app.refresh_tray());
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while jobs.running() {
+                if std::time::Instant::now() > deadline {
+                    return tracing::warn!("not renaming {}: still busy", dir.display());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            for attempt in 1..=10 {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let (d, r) = (dir.clone(), root.clone());
+                // On the UI thread, so it can't race the recording being
+                // opened again.
+                post(move |app| {
+                    let _ = tx.send(app.rename_closed(&d, &r, attempt == 10));
+                });
+                match rx.recv() {
+                    Ok(true) => std::thread::sleep(Duration::from_millis(200)),
+                    _ => break,
+                }
             }
         });
+    }
+
+    /// Renames a closed recording's folder after its name, unless it was
+    /// opened again (it's renamed when that editor closes). Returns whether
+    /// to try again shortly.
+    fn rename_closed(&self, dir: &std::path::Path, root: &std::path::Path, last: bool) -> bool {
+        if self.editors.borrow().iter().any(|e| e.dir() == dir) {
+            return false;
+        }
+        match visor_core::project::rename_to_title(dir, root) {
+            Ok(Some(to)) => {
+                tracing::info!("renamed {} to {}", dir.display(), to.display());
+                self.refresh_tray();
+                false
+            }
+            Ok(None) => false,
+            Err(e) if is_transient(&e) && !last => true,
+            Err(e) => {
+                tracing::warn!("could not rename {}: {e}", dir.display());
+                false
+            }
+        }
     }
 
     fn update_dock(&self) {
@@ -1687,25 +1745,15 @@ enum Permission {
     Microphone,
 }
 
-/// Renames a recording's folder after its title (see
-/// `visor_core::project::rename_to_title`). Retries for a moment: on
-/// Windows the folder can't be renamed while the closing editor's player
-/// threads still have its files open. Returns whether it moved.
-fn rename_folder(dir: &std::path::Path, root: &std::path::Path) -> bool {
-    for attempt in 0..10 {
-        match visor_core::project::rename_to_title(dir, root) {
-            Ok(Some(to)) => {
-                tracing::info!("renamed {} to {}", dir.display(), to.display());
-                return true;
-            }
-            Ok(None) => return false,
-            Err(e) if attempt == 9 => {
-                tracing::warn!("could not rename {}: {e}", dir.display());
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
-        }
-    }
-    false
+/// Whether a failed rename may work if tried again shortly: the folder is
+/// in use (Windows keeps files locked while open) rather than gone, or
+/// misnamed.
+fn is_transient(e: &std::io::Error) -> bool {
+    // ERROR_SHARING_VIOLATION
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ResourceBusy
+    ) || (cfg!(windows) && e.raw_os_error() == Some(32))
 }
 
 /// Discards a recorder without blocking the UI thread on its writer threads.

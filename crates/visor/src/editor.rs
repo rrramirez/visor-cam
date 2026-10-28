@@ -37,6 +37,32 @@ pub struct EditorWindow {
     /// when idle so an open editor doesn't keep waking the CPU.
     timer: Timer,
     idle_ticks: Cell<u32>,
+    /// Background work writing into the recording's folder (exports,
+    /// thumbnail images); the folder isn't renamed while any runs.
+    jobs: Jobs,
+}
+
+/// Counts running background jobs; each holds a [`JobGuard`].
+#[derive(Clone, Default)]
+pub struct Jobs(Arc<AtomicU32>);
+
+pub struct JobGuard(Arc<AtomicU32>);
+
+impl Jobs {
+    fn start(&self) -> JobGuard {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        JobGuard(self.0.clone())
+    }
+
+    pub fn running(&self) -> bool {
+        self.0.load(Ordering::SeqCst) > 0
+    }
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct ExportJob {
@@ -110,6 +136,7 @@ impl EditorWindow {
                 last_export: RefCell::default(),
                 timer,
                 idle_ticks: Cell::new(0),
+                jobs: Jobs::default(),
             }
         });
         this.wire(Rc::downgrade(&this));
@@ -290,13 +317,20 @@ impl EditorWindow {
 
     /// Stops work for a window that is being hidden, then lets the app drop it.
     fn closing(&self) {
+        self.stop_work();
+        let (dir, jobs) = (self.dir.clone(), self.jobs.clone());
+        // Drop the window (and its player threads) after this callback.
+        slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
+    }
+
+    /// Cancels an export and stops playback. Returns the background jobs,
+    /// which may take a moment to wind down.
+    pub fn stop_work(&self) -> Jobs {
         if let Some(job) = &*self.export.borrow() {
             job.cancel.store(true, Ordering::Relaxed);
         }
         self.control().pause();
-        let dir = self.dir.clone();
-        // Drop the window (and its player threads) after this callback.
-        slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir));
+        self.jobs.clone()
     }
 
     /// The player, for changing it: restarts the UI timer so the change
@@ -602,7 +636,9 @@ impl EditorWindow {
         let (cancel, progress, result) =
             (job.cancel.clone(), job.progress.clone(), job.result.clone());
         let dir = self.dir.clone();
+        let guard = self.jobs.start();
         std::thread::spawn(move || {
+            let _guard = guard;
             let r = visor_media::export(
                 &dir,
                 &project,
@@ -656,8 +692,10 @@ impl EditorWindow {
         self.ui.set_saving_thumbnail(true);
         let dir = self.dir.clone();
         let weak = self.ui.as_weak();
+        let guard = self.jobs.start();
         std::thread::spawn(move || {
             let result = visor_media::export::save_thumbnail(&dir, &project, &out);
+            drop(guard);
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_saving_thumbnail(false);
                 match result {
@@ -737,23 +775,10 @@ fn kept_frame(edit: &EditList, t: Micros) -> Micros {
         .unwrap_or(0)
 }
 
+/// A file name stem for exports of a recording titled `title`, made safe
+/// the same way as its folder name.
 fn sanitize(title: &str) -> String {
-    let cleaned: String = title
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        "Recording".into()
-    } else {
-        trimmed.into()
-    }
+    visor_core::project::folder_name(title).unwrap_or_else(|| "Recording".into())
 }
 
 /// `dir/name.ext`, or `dir/name 2.ext`, … if taken. Any entry counts as
