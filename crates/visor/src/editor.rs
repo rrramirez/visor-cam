@@ -357,7 +357,7 @@ impl EditorWindow {
         self.player.borrow_mut()
     }
 
-    fn duration(&self) -> Micros {
+    pub fn duration(&self) -> Micros {
         self.project.borrow().duration_us.max(1)
     }
 
@@ -372,6 +372,18 @@ impl EditorWindow {
             let d = self.duration() as f64;
             ((f64::from(a) * d) as Micros, (f64::from(b) * d) as Micros)
         })
+    }
+
+    /// Applies an agent's edit as if it were made here, so it shows at once
+    /// and the user can undo it. Refuses one that would remove everything.
+    pub fn apply_agent_edit(&self, change: impl FnOnce(&mut EditList)) -> Result<Project, String> {
+        let mut after = self.project.borrow().edit.clone();
+        change(&mut after);
+        if after.duration() == 0 {
+            return Err("That would remove the whole recording.".into());
+        }
+        self.apply(|edit| *edit = after);
+        Ok(self.project.borrow().clone())
     }
 
     fn apply(&self, change: impl FnOnce(&mut EditList)) {

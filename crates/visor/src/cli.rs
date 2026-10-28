@@ -33,6 +33,13 @@ Control the running Visor (turn on agent control in Preferences first):
   mark [TEXT]                 note this moment, shown on the editor's timeline
   stop [--open-editor]        stop and save; prints the recording's folder
   discard                     stop and delete the recording
+
+Edit the recording last stopped, or the one given with --folder FOLDER.
+Times are recorded seconds (or M:SS), as marks and status show them:
+  cut START END               remove START to END
+  trim START END              keep only START to END
+  restore                     undo all cuts
+  open                        open it in the editor
   mcp                         serve these commands to agents over MCP (stdio)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
@@ -65,6 +72,14 @@ pub fn run(args: &[String]) -> Option<i32> {
             "open_editor": rest.iter().any(|a| a == "--open-editor"),
         }),
         "discard" => json!({"command": "discard_recording"}),
+        "cut" | "trim" | "restore" | "open" => match edit_args(first, rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor {first}: {e}\n\n{USAGE}");
+                return Some(2);
+            }
+        },
         _ => return None,
     };
     attach_console();
@@ -149,13 +164,58 @@ fn start_args(args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
+fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
+    let command_name = match name {
+        "cut" => "cut_recording",
+        "trim" => "trim_recording",
+        "restore" => "restore_recording",
+        _ => "open_recording",
+    };
+    let mut command = json!({"command": command_name});
+    let mut times = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--folder" {
+            command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+        } else {
+            times.push(seconds_arg(arg)?);
+        }
+    }
+    match (name, times.as_slice()) {
+        ("cut" | "trim", [start, end]) => {
+            command["start_seconds"] = (*start).into();
+            command["end_seconds"] = (*end).into();
+        }
+        ("cut" | "trim", _) => return Err("give a START and an END time".into()),
+        (_, []) => {}
+        _ => return Err("takes no times".into()),
+    }
+    Ok(command)
+}
+
+/// Seconds, or minutes and seconds as M:SS.
+fn seconds_arg(s: &str) -> Result<f64, String> {
+    let parsed = match s.split_once(':') {
+        Some((m, sec)) => m
+            .parse::<f64>()
+            .ok()
+            .zip(sec.parse::<f64>().ok())
+            .map(|(m, sec)| m * 60.0 + sec),
+        None => s.parse::<f64>().ok(),
+    };
+    parsed.ok_or_else(|| format!("\"{s}\" isn't a time (seconds, or M:SS)"))
+}
+
 /// Sends a command to the running Visor, starting Visor first for the
 /// commands that need it. Always returns a reply object with `ok`.
 pub fn call(command: &Value) -> Value {
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
-            Some("start_recording" | "list_sources") => launch_and_call(command),
+            Some(
+                "start_recording" | "list_sources" | "cut_recording" | "trim_recording"
+                | "restore_recording" | "open_recording",
+            ) => launch_and_call(command),
             Some("status") => json!({"ok": true, "state": "not_running"}),
             _ => json!({"ok": false, "error": "Visor isn't running, so it isn't recording."}),
         },
@@ -267,6 +327,26 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn edit_commands_take_times_and_a_folder() {
+        assert_eq!(
+            edit_args("cut", &args("3 1:10.5 --folder /tmp/Demo")).unwrap(),
+            json!({
+                "command": "cut_recording",
+                "start_seconds": 3.0,
+                "end_seconds": 70.5,
+                "folder": "/tmp/Demo",
+            })
+        );
+        assert_eq!(
+            edit_args("open", &[]).unwrap(),
+            json!({"command": "open_recording"})
+        );
+        assert!(edit_args("trim", &args("5")).is_err());
+        assert!(edit_args("cut", &args("a b")).is_err());
+        assert!(edit_args("restore", &args("5")).is_err());
     }
 
     #[test]
