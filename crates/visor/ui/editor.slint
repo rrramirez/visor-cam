@@ -1,4 +1,4 @@
-import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView, LineEdit } from "std-widgets.slint";
 import { Theme, Glyph, Icons } from "theme.slint";
 import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection } from "widgets.slint";
 
@@ -135,6 +135,12 @@ export component Editor inherits Window {
     callback speed-changed();
     callback sections-changed();
     callback title-edited(string);
+    // Puts the cursor in the name field with the name selected, so typing
+    // replaces it (a fresh recording's editor starts there).
+    public function focus-name() {
+        name-edit.focus();
+        name-edit.select-all();
+    }
     callback set-thumbnail();
     callback reset-thumbnail();
     callback save-thumbnail();
@@ -188,15 +194,13 @@ export component Editor inherits Window {
                     width: 22px;
                     Rectangle { width: 12px; height: 12px; border-radius: 6px; background: Theme.record; }
                 }
-                title-input := TextInput {
+                Text {
                     text: root.project-title;
                     color: Theme.text;
                     font-size: Theme.font-large;
                     font-weight: 600;
                     vertical-alignment: center;
-                    single-line: true;
-                    edited => { root.title-edited(self.text); }
-                    accepted => { keys.focus(); }
+                    overflow: elide;
                 }
                 IconButton {
                     icon: Icons.folder;
@@ -285,6 +289,28 @@ export component Editor inherits Window {
                             height: self.preferred-height;
                             padding: 14px;
                             spacing: 14px;
+
+                            VerticalLayout {
+                                spacing: 8px;
+                                SectionLabel { text: "NAME"; }
+                                name-edit := LineEdit {
+                                    text: root.project-title;
+                                    placeholder-text: "Name this recording";
+                                    edited(text) => { root.title-edited(text); }
+                                    // Enter hands the keyboard back to the editor.
+                                    accepted => { keys.focus(); }
+                                    // Leaving it blank keeps the last name.
+                                    changed has-focus => {
+                                        if (!self.has-focus) { self.text = root.project-title; }
+                                    }
+                                }
+                                Text {
+                                    text: "Exports are named after it.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
 
                             CollapsibleSection {
                                 title: "EDIT";

@@ -31,7 +31,10 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    From any app, **⌥⇧R** starts a recording with your last choices (or stops
    one), **⌥⇧P** pauses or resumes and **⌥⇧⌫** discards (Alt+Shift+R, P and
    Backspace on Windows and Linux/X11; they can be turned off in Preferences).
-5. Stopping opens the editor:
+5. Stopping opens the editor, ready for you to name the recording: type a
+   name and press Enter to get back to editing. Exports are named after it,
+   and you can rename it any time in the sidebar's **Name** field.
+   In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,

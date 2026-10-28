@@ -1467,7 +1467,7 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) => self.open_editor(dir),
+            Ok(dir) => self.open_new_recording(dir),
             Err(e) => {
                 tracing::error!("finishing the recording failed: {e:#}");
                 self.open_panel();
@@ -1490,12 +1490,21 @@ impl App {
     // ---- editor & preferences ---------------------------------------------
 
     pub fn open_editor(&self, dir: PathBuf) {
+        self.show_editor(dir, false);
+    }
+
+    /// Opens a recording that was just made, ready to be named.
+    fn open_new_recording(&self, dir: PathBuf) {
+        self.show_editor(dir, true);
+    }
+
+    fn show_editor(&self, dir: PathBuf, name_first: bool) {
         if let Some(existing) = self.editors.borrow().iter().find(|e| e.dir() == dir) {
             existing.show();
             platform::activate();
             return;
         }
-        match EditorWindow::open(dir.clone()) {
+        match EditorWindow::open(dir.clone(), name_first) {
             Ok(editor) => {
                 self.editors.borrow_mut().push(editor);
                 self.update_dock();

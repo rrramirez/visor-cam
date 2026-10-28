@@ -49,7 +49,9 @@ struct ExportJob {
 }
 
 impl EditorWindow {
-    pub fn open(dir: PathBuf) -> anyhow::Result<Rc<Self>> {
+    /// `name_first`: start with the keyboard in the name field (for a
+    /// recording that was just made).
+    pub fn open(dir: PathBuf, name_first: bool) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
@@ -114,6 +116,15 @@ impl EditorWindow {
         this.refresh_edit_ui();
         this.load_previews();
         ui.show()?;
+        if name_first {
+            // Once the window is up and has keyboard focus.
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(50), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_focus_name();
+                }
+            });
+        }
         Ok(this)
     }
 
@@ -225,6 +236,7 @@ impl EditorWindow {
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
             if !title.is_empty() {
+                e.ui.set_project_title(title.clone().into());
                 e.project.borrow_mut().title = title;
                 e.save();
             }
