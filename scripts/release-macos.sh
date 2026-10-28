@@ -4,7 +4,8 @@
 #   scripts/release-macos.sh            # package, sign the update, write site/appcast.xml
 #   scripts/release-macos.sh --publish  # ...and create the GitHub release, deploy the site
 #
-# The version comes from Cargo.toml; bump it first. Refuses to release a build
+# The version comes from Cargo.toml; bump it first, and add its section to
+# CHANGELOG.md (the release notes). Refuses to release a build
 # that isn't signed with a Developer ID and notarized unless --adhoc is given
 # (for testing only: macOS asks ad-hoc builds for permissions again after
 # every update). The update itself is signed with the Sparkle key in the
@@ -26,6 +27,19 @@ cd "$root"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 repo="rrramirez/visor-cam"
 tag="v$version"
+
+# The release notes are this version's section of CHANGELOG.md.
+notes_file="$root/target/release-notes.md"
+mkdir -p "$root/target"
+awk -v heading="## $version" '
+    $0 == heading { found = 1; next }
+    found && /^## / { exit }
+    found { print }
+' CHANGELOG.md | sed -e '/./,$!d' >"$notes_file"
+[ -s "$notes_file" ] || {
+    echo "error: CHANGELOG.md has no \"## $version\" section" >&2
+    exit 1
+}
 
 scripts/package-macos.sh
 dmg="dist/Visor-$version.dmg"
@@ -74,7 +88,7 @@ cp "$dmg" "$stable"
 if $publish; then
     echo "==> Publishing $tag"
     # The release (and its files) first, then the feed that points at them.
-    gh release create "$tag" "$dmg" "$stable" --repo "$repo" --title "Visor $version" --generate-notes
+    gh release create "$tag" "$dmg" "$stable" --repo "$repo" --title "Visor $version" --notes-file "$notes_file"
     scripts/deploy-site.sh
     git add site/appcast.xml
     git commit -q -m "Release $version: update feed" \
@@ -84,6 +98,6 @@ Claude-Session: https://claude.ai/code/session_013s7xb2wD6CNckNdeb1rn2s"
     echo "Released $tag"
 else
     echo "Next: scripts/release-macos.sh --publish   (or by hand:)"
-    echo "      gh release create $tag $dmg $stable --repo $repo --title \"Visor $version\" --generate-notes"
+    echo "      gh release create $tag $dmg $stable --repo $repo --title \"Visor $version\" --notes-file $notes_file"
     echo "      scripts/deploy-site.sh   (after committing site/appcast.xml)"
 fi
