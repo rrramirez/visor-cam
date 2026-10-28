@@ -176,10 +176,7 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--folder" {
-            let folder = args.next().ok_or("--folder needs a value")?;
-            // Visor runs in its own directory: resolve it here.
-            let folder = std::path::absolute(folder).map_err(|e| e.to_string())?;
-            command["folder"] = folder.display().to_string().into();
+            command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
         } else {
             times.push(seconds_arg(arg)?);
         }
@@ -217,6 +214,7 @@ fn seconds_arg(s: &str) -> Result<f64, String> {
 /// Sends a command to the running Visor, starting Visor first for the
 /// commands that need it. Always returns a reply object with `ok`.
 pub fn call(command: &Value) -> Value {
+    let command = &with_absolute_folder(command);
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
@@ -238,6 +236,26 @@ pub fn call(command: &Value) -> Value {
         },
         Err(e) => json!({"ok": false, "error": e.to_string()}),
     }
+}
+
+/// `command` with its folder resolved here, since Visor runs in its own
+/// directory, and a null folder left out, as Visor reads it.
+fn with_absolute_folder(command: &Value) -> Value {
+    let mut command = command.clone();
+    if let Some(args) = command.as_object_mut() {
+        match args.get("folder") {
+            Some(Value::Null) => {
+                args.remove("folder");
+            }
+            Some(Value::String(folder)) => {
+                if let Ok(folder) = std::path::absolute(folder) {
+                    args.insert("folder".into(), folder.display().to_string().into());
+                }
+            }
+            _ => {}
+        }
+    }
+    command
 }
 
 fn launch_and_call(command: &Value) -> Value {
@@ -366,8 +384,10 @@ mod tests {
             assert!(seconds_arg(bad).is_err(), "{bad}");
         }
         assert_eq!(seconds_arg("0:59.5"), Ok(59.5));
-        let relative = edit_args("open", &args("--folder Demo")).unwrap();
+        let relative = with_absolute_folder(&edit_args("open", &args("--folder Demo")).unwrap());
         assert!(std::path::Path::new(relative["folder"].as_str().unwrap()).is_absolute());
+        let null = with_absolute_folder(&json!({"command": "open_recording", "folder": null}));
+        assert_eq!(null, json!({"command": "open_recording"}));
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }

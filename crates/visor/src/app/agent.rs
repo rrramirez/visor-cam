@@ -602,11 +602,8 @@ impl App {
     /// Keeps the agent's last recording when its folder is renamed.
     pub(super) fn agent_folder_renamed(&self, from: &Path, to: &Path) {
         let mut agent = self.agent.borrow_mut();
-        let same = agent
-            .last_folder
-            .as_ref()
-            .is_some_and(|f| f == from || f.canonicalize().ok().as_deref() == Some(from));
-        if same {
+        // Editors' folders are canonical, and so is last_folder.
+        if agent.last_folder.as_deref() == Some(from) {
             agent.last_folder = Some(to.to_path_buf());
         }
     }
@@ -762,7 +759,9 @@ impl App {
         if let Ok((dir, _)) = result
             && (run.is_some() || stop.is_some())
         {
-            self.agent.borrow_mut().last_folder = Some(dir.clone());
+            // Canonical, like the editors' folders that renames report.
+            self.agent.borrow_mut().last_folder =
+                Some(dir.canonicalize().unwrap_or_else(|_| dir.clone()));
         }
         let Some((reply, open_editor)) = stop else {
             // Stopped by the user.
