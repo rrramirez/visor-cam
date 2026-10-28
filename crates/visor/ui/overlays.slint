@@ -160,7 +160,10 @@ export component ControlBar inherits Window {
     always-on-top: true;
     background: transparent;
     title: "Visor recording";
-    width: 236px;
+    // An AI agent started this recording (see app::agent).
+    in property <bool> agent;
+    out property <length> bar-width: root.agent ? 300px : 236px;
+    width: root.bar-width;
     height: 52px;
     in property <string> elapsed: "0:00";
     in property <bool> paused;
@@ -207,6 +210,22 @@ export component ControlBar inherits Window {
                 font-weight: 600;
                 vertical-alignment: center;
                 min-width: 74px;
+            }
+            if root.agent: Rectangle {
+                width: 56px;
+                Rectangle {
+                    height: 22px;
+                    border-radius: 11px;
+                    background: Theme.accent.transparentize(75%);
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    Text {
+                        text: "Agent";
+                        color: Theme.text;
+                        font-size: Theme.font-small;
+                        font-weight: 600;
+                    }
+                }
             }
             IconButton {
                 size: 36px;

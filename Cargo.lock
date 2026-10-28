@@ -5932,6 +5932,7 @@ dependencies = [
  "visor-core",
  "visor-media",
  "visor-recorder",
+ "windows",
  "winresource",
 ]
 

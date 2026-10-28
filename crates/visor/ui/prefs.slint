@@ -1,4 +1,4 @@
-import { ComboBox, Switch } from "std-widgets.slint";
+import { ComboBox, LineEdit, Switch } from "std-widgets.slint";
 import { Theme, Icons } from "theme.slint";
 import { PillButton, SectionLabel } from "widgets.slint";
 
@@ -17,7 +17,7 @@ component Field inherits HorizontalLayout {
 export component Preferences inherits Window {
     title: "Visor Preferences";
     width: 520px;
-    height: 470px;
+    height: 600px;
     background: Theme.bg;
     default-font-size: Theme.font;
 
@@ -30,6 +30,9 @@ export component Preferences inherits Window {
     in property <bool> shortcuts-available: true;
     in property <string> shortcut-list;
     in property <string> shortcuts-note;
+    in-out property <bool> agent-control;
+    // How to start Visor's MCP server, for agents' settings.
+    in property <string> mcp-command;
     in property <string> version;
     callback choose-folder();
     callback changed();
@@ -96,6 +99,33 @@ export component Preferences inherits Window {
                     font-size: Theme.font-small;
                     wrap: word-wrap;
                 }
+            }
+        }
+
+        SectionLabel { text: "AGENTS"; }
+        Field {
+            label: "Agent control";
+            VerticalLayout {
+                spacing: 4px;
+                Switch {
+                    text: "Let AI agents control recording";
+                    checked <=> root.agent-control;
+                    toggled => { root.changed(); }
+                }
+                Text {
+                    text: "Agents on this computer can start, pause, mark and stop recordings. Recordings they start say Agent on the control bar.";
+                    color: Theme.faint;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        if root.agent-control: Field {
+            label: "MCP server";
+            LineEdit {
+                text: root.mcp-command;
+                read-only: true;
+                font-size: Theme.font-small;
             }
         }
 

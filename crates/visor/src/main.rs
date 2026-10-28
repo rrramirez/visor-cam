@@ -6,13 +6,18 @@
 //!   visor --record [--stop-after S]
 //!                                 start recording right away with the saved
 //!                                 preferences (optionally stopping after S s)
+//!   visor <command>               control the running Visor, e.g. for an
+//!                                 agent (see `cli`); `visor mcp` serves
+//!                                 the same over MCP
 
 // A windowed app on Windows (no console window); logs go to visor.log.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod editor;
 mod instance;
+mod mcp;
 mod platform;
 mod settings;
 mod shortcuts;
@@ -28,6 +33,10 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 slint::include_modules!();
 
 fn main() -> anyhow::Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run(&argv) {
+        std::process::exit(code);
+    }
     init_logging();
     log_panics();
     let args = parse_args();
@@ -64,6 +73,7 @@ fn main() -> anyhow::Result<()> {
             app::post(move |app| match request {
                 instance::Request::ShowPanel => app.open_panel(),
                 instance::Request::Edit(dir) => app.open_editor(dir),
+                instance::Request::Control(command, reply) => app.agent_command(command, reply),
             })
         });
     }
@@ -77,6 +87,7 @@ fn main() -> anyhow::Result<()> {
             Args::Edit(dir) => app.open_editor(dir),
             Args::Record { stop_after } => app.record_when_ready(stop_after),
             Args::Panel => app.open_panel(),
+            Args::Background => {}
         }
     });
     slint::run_event_loop_until_quit()?;
@@ -85,8 +96,12 @@ fn main() -> anyhow::Result<()> {
 
 enum Args {
     Panel,
+    /// Started for an agent: just the menu bar icon.
+    Background,
     Edit(PathBuf),
-    Record { stop_after: Option<u64> },
+    Record {
+        stop_after: Option<u64>,
+    },
 }
 
 fn parse_args() -> Args {
@@ -108,14 +123,13 @@ fn parse_args() -> Args {
                 let secs = args.next().and_then(|s| s.parse().ok());
                 parsed = Args::Record { stop_after: secs };
             }
+            "--background" => parsed = Args::Background,
             "--version" => {
                 println!("visor {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                println!(
-                    "usage: visor [--edit <recording folder> | --record [--stop-after SECONDS]]"
-                );
+                cli::run(&["help".into()]);
                 std::process::exit(0);
             }
             _ => {}

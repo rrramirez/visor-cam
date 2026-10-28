@@ -93,6 +93,17 @@ pub struct Project {
     /// the first frame kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_us: Option<Micros>,
+    /// Points of interest noted while recording, in source time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+/// A note at a moment of the recording, e.g. "Step 2: open settings".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub at_us: Micros,
+    #[serde(default)]
+    pub text: String,
 }
 
 fn speed_default() -> f64 {
@@ -127,6 +138,7 @@ impl Project {
             camera_overlay: CameraOverlay::default(),
             speed: 1.0,
             thumbnail_us: None,
+            markers: Vec::new(),
         }
     }
 
@@ -380,6 +392,10 @@ mod tests {
             fps: Some(60),
         });
         p.edit.cut(2_000_000, 3_000_000);
+        p.markers.push(Marker {
+            at_us: 4_000_000,
+            text: "Step 2: open settings".into(),
+        });
         p.save(&dir).unwrap();
 
         assert_eq!(Project::load(&dir).unwrap(), p);

@@ -191,6 +191,17 @@ impl Recorder {
         self.clock.lock().unwrap().elapsed(host_now())
     }
 
+    /// Notes this moment of the recording; saved with the project on stop.
+    /// Returns the recorded time it marks.
+    pub fn mark(&mut self, text: impl Into<String>) -> Micros {
+        let at_us = self.elapsed();
+        self.project.markers.push(visor_core::Marker {
+            at_us,
+            text: text.into(),
+        });
+        at_us
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }

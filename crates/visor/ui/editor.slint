@@ -8,6 +8,12 @@ export struct Region {
     end: float,
 }
 
+// A note made while recording (see app::agent), at a timeline position.
+export struct MarkerMark {
+    pos: float,
+    label: string,
+}
+
 export struct Thumb {
     image: image,
     start: float,
@@ -96,6 +102,7 @@ export component Editor inherits Window {
     in property <float> position;
     in property <string> time-label;
     in property <[Region]> cuts;
+    in property <[MarkerMark]> markers;
     in-out property <float> sel-start: -1;
     in-out property <float> sel-end: -1;
     property <bool> has-selection: sel-start >= 0 && sel-end > sel-start;
@@ -704,6 +711,39 @@ export component Editor inherits Window {
                         }
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
+                        }
+                    }
+                }
+
+                // Markers: a line with a flag; hover shows the note, click seeks.
+                for m in root.markers: Rectangle {
+                    x: m.pos * track.width - 1px;
+                    width: 2px;
+                    height: track.height;
+                    background: Theme.accent.transparentize(40%);
+                }
+                for m in root.markers: Rectangle {
+                    x: m.pos * track.width;
+                    y: 0;
+                    width: 12px;
+                    height: 12px;
+                    background: Theme.accent;
+                    flag := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.seek(m.pos); keys.focus(); }
+                    }
+                    if flag.has-hover: Rectangle {
+                        property <length> w: note.preferred-width + 12px;
+                        x: min(0px, track.width - m.pos * track.width - self.w);
+                        y: parent.height + 2px;
+                        width: self.w;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: #141518f2;
+                        note := Text {
+                            text: m.label;
+                            color: Theme.text;
+                            font-size: Theme.font-small;
                         }
                     }
                 }

@@ -32,6 +32,8 @@ use crate::{
     AreaSelector, CameraBubble, ControlBar, Countdown, Preferences, RecorderPanel, ScreenHighlight,
 };
 
+mod agent;
+
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
 }
@@ -78,6 +80,7 @@ pub struct App {
     polling: std::cell::Cell<bool>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
+    agent: RefCell<agent::AgentState>,
 }
 
 struct Highlight {
@@ -159,6 +162,7 @@ impl App {
             next_start_id: std::cell::Cell::new(1),
             polling: std::cell::Cell::new(false),
             quit_pending: std::cell::Cell::new(false),
+            agent: RefCell::default(),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
         app
@@ -1102,13 +1106,7 @@ impl App {
                 let _ = area.hide();
                 if let Some(p) = &mut *app.panel.borrow_mut() {
                     p.area = Some((id, rect));
-                    p.ui.set_area_label(
-                        format!(
-                            "{}×{} at {}, {}",
-                            rect.width as u32, rect.height as u32, rect.x as i32, rect.y as i32
-                        )
-                        .into(),
-                    );
+                    p.ui.set_area_label(area_label(rect).into());
                     let _ = p.ui.show();
                 }
             }
@@ -1379,6 +1377,7 @@ impl App {
     /// Back to Idle with the panel showing, e.g. after a cancelled start.
     fn return_to_panel(&self, error: Option<&str>) {
         *self.session.borrow_mut() = Session::Idle;
+        self.agent.borrow_mut().recording = false;
         self.refresh_tray();
         self.open_panel();
         if let Some(e) = error {
@@ -1401,8 +1400,10 @@ impl App {
         recorder.resume();
 
         let Ok(bar) = ControlBar::new() else { return };
+        bar.set_agent(self.agent.borrow().recording);
+        let width = f64::from(bar.get_bar_width());
         bar.window().set_position(LogicalPosition::new(
-            (display.frame.x + (display.frame.width - 236.0) / 2.0) as f32,
+            (display.frame.x + (display.frame.width - width) / 2.0) as f32,
             (display.frame.y + display.frame.height - 110.0) as f32,
         ));
         bar.on_toggle_pause(|| app().toggle_pause());
@@ -1525,6 +1526,7 @@ impl App {
 
     fn on_stopped(&self, result: anyhow::Result<PathBuf>) {
         *self.session.borrow_mut() = Session::Idle;
+        let open_editor = self.agent_stopped(&result);
         if self.quit_pending.get() {
             if let Err(e) = &result {
                 tracing::error!("finishing the recording failed: {e:#}");
@@ -1533,16 +1535,21 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) => self.open_new_recording(dir),
+            Ok(dir) if open_editor => self.open_new_recording(dir),
+            Ok(_) => {}
             Err(e) => {
                 tracing::error!("finishing the recording failed: {e:#}");
-                self.open_panel();
-                self.set_panel_error(&format!("Saving the recording failed: {e:#}"));
+                // An agent that stopped it was told.
+                if open_editor {
+                    self.open_panel();
+                    self.set_panel_error(&format!("Saving the recording failed: {e:#}"));
+                }
             }
         }
     }
 
     fn on_discarded(&self, result: anyhow::Result<()>) {
+        let show_panel = self.agent_discarded(&result);
         if let Err(e) = result {
             tracing::warn!("discarding the recording failed: {e:#}");
         }
@@ -1550,7 +1557,12 @@ impl App {
             *self.session.borrow_mut() = Session::Idle;
             return self.quit();
         }
-        self.return_to_panel(None);
+        if show_panel {
+            self.return_to_panel(None);
+        } else {
+            *self.session.borrow_mut() = Session::Idle;
+            self.refresh_tray();
+        }
     }
 
     // ---- editor & preferences ---------------------------------------------
@@ -1693,6 +1705,8 @@ impl App {
             ui.set_show_cursor(s.show_cursor);
             ui.set_export_format(s.export_format);
             ui.set_shortcuts(s.shortcuts);
+            ui.set_agent_control(s.agent_control);
+            ui.set_mcp_command(crate::cli::mcp_command().into());
             ui.set_shortcuts_available(self.shortcuts.borrow().is_some());
             ui.set_shortcut_list(
                 [
@@ -1727,6 +1741,10 @@ impl App {
             s.countdown_secs = [0, 3, 5][ui.get_countdown_index().clamp(0, 2) as usize];
             s.show_cursor = ui.get_show_cursor();
             s.export_format = ui.get_export_format();
+            if s.agent_control != ui.get_agent_control() {
+                s.agent_control = ui.get_agent_control();
+                tracing::info!(on = s.agent_control, "agent control");
+            }
             s.save();
         }
         let shortcuts = ui.get_shortcuts();
@@ -1763,6 +1781,14 @@ fn discard_in_background(recorder: Recorder) {
             tracing::warn!("discarding an abandoned recording failed: {e:#}");
         }
     });
+}
+
+/// How the panel describes a chosen area.
+fn area_label(rect: Rect) -> String {
+    format!(
+        "{}×{} at {}, {}",
+        rect.width as u32, rect.height as u32, rect.x as i32, rect.y as i32
+    )
 }
 
 fn strings(items: impl Iterator<Item = String>) -> ModelRc<SharedString> {

@@ -13,6 +13,9 @@ pub struct Settings {
     pub show_cursor: bool,
     /// Global shortcuts for recording (see `shortcuts`).
     pub shortcuts: bool,
+    /// Lets AI agents control recording (see `app::agent`). Off until the
+    /// user turns it on: any program they run could then record the screen.
+    pub agent_control: bool,
     /// Index into the editor's export format list (0 MP4, 1 VP9, 2 AV1, 3 GIF).
     /// The editor starts with the last one exported.
     pub export_format: i32,
@@ -42,6 +45,7 @@ impl Default for Settings {
             countdown_secs: 3,
             show_cursor: true,
             shortcuts: true,
+            agent_control: false,
             export_format: 0,
             export_resolution: 1,
             export_denoise: false,
@@ -96,6 +100,7 @@ mod tests {
         assert_eq!(s.fps, 60);
         assert_eq!(s.countdown_secs, 3);
         assert!(s.shortcuts);
+        assert!(!s.agent_control);
         assert!(!s.export_denoise);
         assert!(s.save_dir.ends_with("Visor"));
     }
