@@ -227,8 +227,28 @@ impl EditorWindow {
         on!(on_redo, |e| e.undo_redo(false));
         on!(on_step, |e, frames| {
             let pos = e.player.borrow().position() as i64;
-            let to = (pos + i64::from(frames) * 33_333).max(0) as Micros;
+            let to = (pos + i64::from(frames) * e.frame_us() as i64).max(0) as Micros;
             e.control().seek(to);
+        });
+        on!(on_preview, |e, f| {
+            let d = e.duration();
+            e.control().preview((f64::from(f) * d as f64) as Micros);
+        });
+        on!(on_cut_edge_moved, |e, index, end, f| {
+            let t = (f64::from(f) * e.duration() as f64) as Micros;
+            e.move_cut_edge(index as usize, end, t);
+        });
+        on!(on_nudge_edge, |e, frames| {
+            let Ok(edge) = usize::try_from(e.ui.get_active_edge()) else {
+                return;
+            };
+            let (index, end) = (edge / 2, edge % 2 == 1);
+            let Some(&cut) = e.cuts().get(index) else {
+                return;
+            };
+            let at = if end { cut.1 } else { cut.0 } as i64;
+            let to = (at + i64::from(frames) * e.frame_us() as i64).max(0) as Micros;
+            e.move_cut_edge(index, end, to);
         });
         on!(on_bubble_changed, |e| {
             {
@@ -374,6 +394,50 @@ impl EditorWindow {
         })
     }
 
+    /// One frame of the screen recording.
+    fn frame_us(&self) -> Micros {
+        let fps = self
+            .project
+            .borrow()
+            .tracks
+            .screen
+            .as_ref()
+            .and_then(|t| t.fps)
+            .unwrap_or(30)
+            .max(1);
+        1_000_000 / Micros::from(fps)
+    }
+
+    /// The cut stretches, as the timeline shows them.
+    fn cuts(&self) -> Vec<visor_core::Range> {
+        let project = self.project.borrow();
+        project.edit.cuts(project.duration_us)
+    }
+
+    /// Moves one edge of a cut to `t`, on a frame (see
+    /// `EditList::with_cut_edge_moved`), then shows the frame at the edge:
+    /// the first kept after the cut, or the last kept before it.
+    fn move_cut_edge(&self, index: usize, end: bool, t: Micros) {
+        let d = self.duration();
+        let frame = self.frame_us();
+        // On a frame, except the very end of the recording.
+        let t = ((t + frame / 2) / frame * frame).min(d);
+        let before = self.cuts().len();
+        let moved = self
+            .project
+            .borrow()
+            .edit
+            .with_cut_edge_moved(d, index, end, t);
+        let Some(edit) = moved else { return };
+        self.apply(|e| *e = edit);
+        // The cuts were renumbered: nothing is picked any more.
+        if self.cuts().len() != before {
+            self.ui.set_active_edge(-1);
+        }
+        let shown = if end { t } else { t.saturating_sub(frame) };
+        self.control().seek(shown);
+    }
+
     fn apply(&self, change: impl FnOnce(&mut EditList)) {
         let before = self.project.borrow().edit.clone();
         let mut after = before.clone();
@@ -422,23 +486,15 @@ impl EditorWindow {
     fn refresh_edit_ui(&self) {
         let project = self.project.borrow();
         let d = project.duration_us.max(1) as f64;
-        let mut cuts = Vec::new();
-        let mut last = 0;
-        for r in project.edit.ranges() {
-            if r.0 > last {
-                cuts.push(Region {
-                    start: (last as f64 / d) as f32,
-                    end: (r.0 as f64 / d) as f32,
-                });
-            }
-            last = r.1;
-        }
-        if last < project.duration_us {
-            cuts.push(Region {
-                start: (last as f64 / d) as f32,
-                end: 1.0,
-            });
-        }
+        let cuts: Vec<Region> = project
+            .edit
+            .cuts(project.duration_us)
+            .iter()
+            .map(|c| Region {
+                start: (c.0 as f64 / d) as f32,
+                end: (c.1 as f64 / d) as f32,
+            })
+            .collect();
         self.ui.set_cuts(ModelRc::new(VecModel::from(cuts)));
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());

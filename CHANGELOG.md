@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Adjust cuts:** drag either edge of a cut on the timeline to make it longer or shorter, watching the frame under it, or click an edge and move it a frame at a time with the arrow keys. Works for your cuts and an agent's alike.
+
 ## 0.3.0
 
 ### New

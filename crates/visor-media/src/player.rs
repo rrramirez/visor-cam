@@ -216,6 +216,16 @@ impl Player {
         self.send(Cmd::Seek(t, self.seeks_sent));
     }
 
+    /// Shows the frame at source time `t` even if it was cut, e.g. while a
+    /// cut's edge is dragged. Playing from there starts at the next kept
+    /// time.
+    pub fn preview(&mut self, t: Micros) {
+        let t = t.min(self.duration.saturating_sub(1));
+        self.shared.position.store(t, Ordering::Relaxed);
+        self.seeks_sent += 1;
+        self.send(Cmd::Seek(t, self.seeks_sent));
+    }
+
     pub fn set_edit(&mut self, edit: EditList) {
         self.edit = edit.clone();
         if let Some(tx) = &self.audio_tx {
@@ -378,7 +388,8 @@ fn video_loop(
         if let Some(cmd) = cmd {
             match cmd {
                 Cmd::Play => {
-                    let src = shared.position.load(Ordering::Relaxed);
+                    // A preview may have left the position inside a cut.
+                    let src = snap_to_kept(&edit, shared.position.load(Ordering::Relaxed));
                     let out = edit.to_output(src).unwrap_or(0);
                     let mut c = clock.lock().unwrap();
                     *c = Clock::running(out, c.speed);
