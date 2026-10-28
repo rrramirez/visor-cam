@@ -317,11 +317,10 @@ fn send(dir: &Path, message: &str, timeout: Duration) -> Result<String, SendErro
         }
         Err(e) => return Err(SendError::NotListening(e)),
     }
-    // From here Visor has the request: never send it again.
-    reader
-        .get_ref()
-        .set_read_timeout(Some(timeout))
-        .map_err(SendError::Failed)?;
+    // From here Visor has the request: never send it again. A quick reply
+    // may have closed the connection already, which macOS refuses the
+    // timeout for (EINVAL); the reply is then waiting, so read it anyway.
+    let _ = reader.get_ref().set_read_timeout(Some(timeout));
     let mut reply = String::new();
     reader.read_line(&mut reply).map_err(SendError::Failed)?;
     Ok(reply)
