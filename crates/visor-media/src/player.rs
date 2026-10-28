@@ -396,7 +396,7 @@ fn video_loop(
             match cmd {
                 Cmd::Play => {
                     let src = shared.position.load(Ordering::Relaxed);
-                    let out = edit.to_output(src).unwrap_or(0);
+                    let out = edit.kept_before(src);
                     let mut c = clock.lock().unwrap();
                     *c = Clock::running(out, c.speed);
                     playing = true;
@@ -407,7 +407,7 @@ fn video_loop(
                     *c = Clock::paused(c.now(), c.speed);
                 }
                 Cmd::Seek(t, seq) => {
-                    let out = edit.to_output(t).unwrap_or(0);
+                    let out = edit.kept_before(t);
                     let mut c = clock.lock().unwrap();
                     *c = c.rebased(out, c.speed);
                     pending_render = Some(t);
@@ -544,7 +544,7 @@ fn audio_loop(
             }
             Some(Cmd::Seek(t, _)) => {
                 ring.lock().unwrap().clear();
-                cursor = micros_to_samples(edit.to_output(t).unwrap_or(0));
+                cursor = micros_to_samples(edit.kept_before(t));
                 tempo = Tempo::new(clock.lock().unwrap().speed)?;
             }
             Some(Cmd::SetSpeed(speed)) => {

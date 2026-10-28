@@ -141,6 +141,12 @@ impl EditList {
         None
     }
 
+    /// How much is kept before source time `source`: its output time, and
+    /// inside a cut, that of the kept time after it.
+    pub fn kept_before(&self, source: Micros) -> Micros {
+        self.keep.iter().map(|r| source.clamp(r.0, r.1) - r.0).sum()
+    }
+
     /// Map a source time to output time, or `None` if it was cut.
     pub fn to_output(&self, source: Micros) -> Option<Micros> {
         let mut acc = 0;
@@ -191,6 +197,17 @@ mod tests {
             [Range(20, 30), Range(50, 60), Range(95, 100)]
         );
         assert!(e.with_cut_edge_moved(100, 3, false, 10).is_none());
+    }
+
+    #[test]
+    fn kept_before_counts_kept_time_even_in_cuts() {
+        let mut e = EditList::full(100);
+        e.cut(20, 30);
+        assert_eq!(e.kept_before(10), 10);
+        assert_eq!(e.kept_before(25), 20);
+        assert_eq!(e.kept_before(40), 30);
+        assert_eq!(e.kept_before(100), 90);
+        assert_eq!(e.to_output(40), Some(e.kept_before(40)));
     }
 
     #[test]
