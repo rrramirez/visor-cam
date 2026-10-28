@@ -25,6 +25,7 @@ use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
 use crate::editor::EditorWindow;
 use crate::platform::{self, Overlay};
 use crate::settings::Settings;
+use crate::shortcuts::{self, Shortcut, Shortcuts};
 use crate::tray::{Action, Tray};
 use crate::util;
 use crate::{
@@ -54,6 +55,12 @@ pub struct App {
     backend: Arc<dyn Backend>,
     pub settings: RefCell<Settings>,
     tray: RefCell<Option<Tray>>,
+    shortcuts: RefCell<Option<Shortcuts>>,
+    /// Shortcuts another app already uses.
+    taken_shortcuts: RefCell<Vec<Shortcut>>,
+    /// A recording starts as soon as the devices are ready (see
+    /// `record_when_ready`).
+    record_pending: std::cell::Cell<bool>,
     /// Sparkle, in the packaged macOS app.
     updater: Option<crate::updates::Updater>,
     panel: RefCell<Option<Panel>>,
@@ -135,6 +142,9 @@ impl App {
             backend,
             settings: RefCell::new(Settings::load()),
             tray: RefCell::default(),
+            shortcuts: RefCell::default(),
+            taken_shortcuts: RefCell::default(),
+            record_pending: std::cell::Cell::new(false),
             updater: crate::updates::Updater::start(),
             panel: RefCell::default(),
             devices: RefCell::default(),
@@ -185,6 +195,85 @@ impl App {
                 }
             });
         }));
+    }
+
+    /// Sets up the global shortcuts. Needs the event loop running.
+    pub fn create_shortcuts(&self) {
+        match Shortcuts::new(|shortcut| post(move |app| app.on_shortcut(shortcut))) {
+            Ok(s) => *self.shortcuts.borrow_mut() = Some(s),
+            Err(e) => tracing::warn!("global shortcuts are unavailable: {e}"),
+        }
+        self.apply_shortcuts();
+    }
+
+    /// Turns the shortcuts on or off to match the preferences.
+    fn apply_shortcuts(&self) {
+        let enabled = self.settings.borrow().shortcuts;
+        let taken = match &mut *self.shortcuts.borrow_mut() {
+            Some(s) => s.set_enabled(enabled),
+            None => Vec::new(),
+        };
+        *self.taken_shortcuts.borrow_mut() = taken;
+        self.update_hint();
+        self.sync_preferences();
+    }
+
+    fn on_shortcut(&self, shortcut: Shortcut) {
+        let (idle, recording, starting) = match &*self.session.borrow() {
+            Session::Idle => (true, false, false),
+            Session::Recording { .. } => (false, true, false),
+            Session::Starting { .. } => (false, false, true),
+            Session::Stopping => (false, false, false),
+        };
+        match shortcut {
+            Shortcut::StartStop if idle => self.record_when_ready(None),
+            // Stopping during the countdown cancels, as the bar does.
+            Shortcut::StartStop if recording || starting => self.stop_recording(false),
+            Shortcut::TogglePause if recording => self.toggle_pause(),
+            Shortcut::Discard if recording => self.stop_recording(true),
+            _ => {}
+        }
+    }
+
+    /// Starts recording with the panel's choices (the saved ones if the
+    /// panel isn't open) once the chosen camera is open. With `stop_after`,
+    /// stops after that many seconds of recorded time.
+    pub fn record_when_ready(&self, stop_after: Option<u64>) {
+        if self.record_pending.get() || !matches!(*self.session.borrow(), Session::Idle) {
+            return;
+        }
+        let panel_shown = self
+            .panel
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.ui.window().is_visible());
+        if !panel_shown {
+            self.open_panel();
+        }
+        self.record_pending.set(true);
+        let timer = Rc::new(Timer::default());
+        let this = timer.clone();
+        let started = std::cell::Cell::new(false);
+        timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let app = app();
+            if !started.get() {
+                if app.devices_ready() {
+                    app.record_pending.set(false);
+                    app.start_recording();
+                    started.set(true);
+                }
+            } else if let Some(secs) = stop_after {
+                if app
+                    .recorded()
+                    .is_some_and(|t| t.as_secs_f64() >= secs as f64)
+                {
+                    app.stop_recording(false);
+                    this.stop();
+                }
+            } else {
+                this.stop();
+            }
+        });
     }
 
     fn on_tray(&self, action: Action) {
@@ -622,13 +711,21 @@ impl App {
 
     fn update_hint(&self) {
         let secs = self.settings.borrow().countdown_secs;
+        let shortcut = self.settings.borrow().shortcuts
+            && self.shortcuts.borrow().is_some()
+            && !self.taken_shortcuts.borrow().contains(&Shortcut::StartStop);
         if let Some(p) = &*self.panel.borrow() {
-            let hint = if secs > 0 {
-                format!("Recording starts after a {secs}-second countdown")
-            } else {
-                String::new()
-            };
-            p.ui.set_hint(hint.into());
+            let mut hint = Vec::new();
+            if secs > 0 {
+                hint.push(format!("Recording starts after a {secs}-second countdown"));
+            }
+            if shortcut {
+                hint.push(format!(
+                    "{} starts and stops from any app",
+                    shortcuts::label(Shortcut::StartStop)
+                ));
+            }
+            p.ui.set_hint(hint.join(" · ").into());
         }
     }
 
@@ -1471,6 +1568,28 @@ impl App {
             });
             ui.set_show_cursor(s.show_cursor);
             ui.set_export_format(s.export_format);
+            ui.set_shortcuts(s.shortcuts);
+            ui.set_shortcuts_available(self.shortcuts.borrow().is_some());
+            ui.set_shortcut_list(
+                [
+                    (Shortcut::StartStop, "start or stop"),
+                    (Shortcut::TogglePause, "pause"),
+                    (Shortcut::Discard, "discard"),
+                ]
+                .map(|(s, what)| format!("{} {what}", shortcuts::label(s)))
+                .join("  ·  ")
+                .into(),
+            );
+            let taken = self.taken_shortcuts.borrow();
+            ui.set_shortcuts_note(
+                if taken.is_empty() {
+                    String::new()
+                } else {
+                    let keys: Vec<String> = taken.iter().map(|&s| shortcuts::label(s)).collect();
+                    format!("{} already used by another app", keys.join(", "))
+                }
+                .into(),
+            );
         }
     }
 
@@ -1485,6 +1604,12 @@ impl App {
             s.show_cursor = ui.get_show_cursor();
             s.export_format = ui.get_export_format();
             s.save();
+        }
+        let shortcuts = ui.get_shortcuts();
+        if shortcuts != self.settings.borrow().shortcuts {
+            self.settings.borrow_mut().shortcuts = shortcuts;
+            self.settings.borrow().save();
+            self.apply_shortcuts();
         }
         self.update_hint();
     }

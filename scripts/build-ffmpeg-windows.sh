@@ -74,10 +74,10 @@ PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$static_win/lib/pkgconfig" ./configure \
     --enable-demuxer=mov,matroska,gif,aac \
     --enable-muxer=mp4,ipod,mov,webm,matroska,gif \
     --enable-decoder=h264,aac,rawvideo,vp9,opus,gif,mjpeg \
-    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_mf,aac,libvpx_vp9,libaom_av1,libopus,gif \
+    --enable-encoder=libx264,h264_nvenc,h264_amf,h264_mf,aac,libvpx_vp9,libaom_av1,libopus,gif,mjpeg \
     --enable-parser=h264,aac,vp9,opus,av1,mjpeg \
     --enable-bsfs \
-    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
+    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,highpass,afftdn,loudnorm,null,anull,palettegen,paletteuse,split \
     --enable-swscale --enable-swresample ||
     { tail -40 ffbuild/config.log >&2; exit 1; }
 

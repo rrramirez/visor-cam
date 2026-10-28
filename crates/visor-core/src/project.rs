@@ -88,6 +88,10 @@ pub struct Project {
     /// Playback speed of the whole video (0.5–2.0), applied after the edit.
     #[serde(default = "speed_default")]
     pub speed: f64,
+    /// Source time of the frame used as the video's thumbnail; `None` uses
+    /// the first frame kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_us: Option<Micros>,
 }
 
 fn speed_default() -> f64 {
@@ -121,6 +125,7 @@ impl Project {
             edit: EditList::full(duration_us),
             camera_overlay: CameraOverlay::default(),
             speed: 1.0,
+            thumbnail_us: None,
         }
     }
 

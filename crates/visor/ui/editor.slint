@@ -84,6 +84,10 @@ export component Editor inherits Window {
     in-out property <bool> edit-open: true;
     in-out property <bool> camera-open: true;
     in-out property <bool> speed-open: true;
+    in-out property <bool> thumbnail-open: true;
+    // Thumbnail position on the timeline, or -1 for the first frame kept.
+    in property <float> thumbnail-pos: -1;
+    in property <string> thumbnail-label;
 
     in property <bool> playing;
     in property <float> position;
@@ -101,6 +105,9 @@ export component Editor inherits Window {
 
     in-out property <int> export-format;
     in-out property <int> export-resolution;
+    in property <bool> has-audio;
+    in-out property <bool> export-denoise;
+    in-out property <bool> export-normalize;
     in property <bool> exporting;
     in property <float> export-progress;
     in property <string> export-status;
@@ -128,6 +135,9 @@ export component Editor inherits Window {
     callback speed-changed();
     callback sections-changed();
     callback title-edited(string);
+    callback set-thumbnail();
+    callback reset-thumbnail();
+    callback save-thumbnail();
     callback export();
     callback cancel-export();
     callback reveal-export();
@@ -403,6 +413,45 @@ export component Editor inherits Window {
                                     }
                                 }
                             }
+
+                            CollapsibleSection {
+                                title: "THUMBNAIL";
+                                open <=> root.thumbnail-open;
+                                toggled => { root.sections-changed(); }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.thumbnail-label;
+                                        color: Theme.muted;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.thumbnail-pos >= 0: PillButton {
+                                        horizontal-stretch: 0;
+                                        text: "Reset";
+                                        font-size: Theme.font-small;
+                                        clicked => { root.reset-thumbnail(); keys.focus(); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    PillButton {
+                                        text: "Use this frame";
+                                        icon: Icons.image;
+                                        clicked => { root.set-thumbnail(); keys.focus(); }
+                                    }
+                                    PillButton {
+                                        text: "Save image";
+                                        icon: Icons.export;
+                                        clicked => { root.save-thumbnail(); keys.focus(); }
+                                    }
+                                }
+                                Text {
+                                    text: "MP4 exports carry it as their cover, shown by " + root.file-manager + " and players. Save image writes it as a JPEG.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
                         }
                     }
 
@@ -420,6 +469,16 @@ export component Editor inherits Window {
                             model: ["Original size", "1080p", "720p"];
                             current-index <=> root.export-resolution;
                             enabled: !root.exporting && root.export-format != 3;
+                        }
+                        if root.has-audio && root.export-format != 3: Switch {
+                            text: "Reduce background noise";
+                            checked <=> root.export-denoise;
+                            enabled: !root.exporting;
+                        }
+                        if root.has-audio && root.export-format != 3: Switch {
+                            text: "Even out volume";
+                            checked <=> root.export-normalize;
+                            enabled: !root.exporting;
                         }
                         if root.exporting: VerticalLayout {
                             spacing: 6px;
@@ -611,6 +670,17 @@ export component Editor inherits Window {
                             if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
                         }
                     }
+                }
+
+                // Thumbnail frame
+                if root.thumbnail-pos >= 0: Rectangle {
+                    x: root.thumbnail-pos * track.width - 5px;
+                    y: 2px;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    background: Theme.warning;
+                    transform-rotation: 45deg;
                 }
 
                 // Playhead

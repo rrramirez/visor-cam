@@ -75,13 +75,17 @@ impl EditorWindow {
             ui.set_edit_open(open("edit"));
             ui.set_camera_open(open("camera"));
             ui.set_speed_open(open("speed"));
+            ui.set_thumbnail_open(open("thumbnail"));
         }
         {
             let app = app();
             let settings = app.settings.borrow();
             ui.set_export_format(settings.export_format.clamp(0, 3));
             ui.set_export_resolution(settings.export_resolution.clamp(0, 2));
+            ui.set_export_denoise(settings.export_denoise);
+            ui.set_export_normalize(settings.export_normalize);
         }
+        ui.set_has_audio(project.tracks.mic.is_some() || project.tracks.system.is_some());
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -200,6 +204,7 @@ impl EditorWindow {
                 ("edit", e.ui.get_edit_open()),
                 ("camera", e.ui.get_camera_open()),
                 ("speed", e.ui.get_speed_open()),
+                ("thumbnail", e.ui.get_thumbnail_open()),
             ]
             .into_iter()
             .filter(|(_, open)| !open)
@@ -224,6 +229,18 @@ impl EditorWindow {
                 e.save();
             }
         });
+        on!(on_set_thumbnail, |e| {
+            let position = e.player.borrow().position();
+            e.project.borrow_mut().thumbnail_us = Some(position);
+            e.save();
+            e.refresh_edit_ui();
+        });
+        on!(on_reset_thumbnail, |e| {
+            e.project.borrow_mut().thumbnail_us = None;
+            e.save();
+            e.refresh_edit_ui();
+        });
+        on!(on_save_thumbnail, |e| e.save_thumbnail());
         on!(on_export, |e| e.start_export());
         on!(on_cancel_export, |e| {
             if let Some(job) = &*e.export.borrow() {
@@ -381,6 +398,25 @@ impl EditorWindow {
             )
         };
         self.ui.set_speed_label(speed_label.into());
+        let thumbnail = visor_media::export::thumbnail_time(&project);
+        let chosen = project.thumbnail_us == Some(thumbnail);
+        self.ui.set_thumbnail_pos(if chosen {
+            (thumbnail as f64 / d) as f32
+        } else {
+            -1.0
+        });
+        let at = project.edit.to_output(thumbnail).unwrap_or(0);
+        self.ui.set_thumbnail_label(
+            if chosen {
+                format!(
+                    "Frame at {}",
+                    util::clock_tenths((at as f64 / project.speed) as Micros)
+                )
+            } else {
+                "First frame".to_string()
+            }
+            .into(),
+        );
         drop(project);
         self.ui.set_kept_label(self.kept_label().into());
     }
@@ -524,27 +560,28 @@ impl EditorWindow {
             let mut settings = app.settings.borrow_mut();
             settings.export_format = self.ui.get_export_format();
             settings.export_resolution = self.ui.get_export_resolution();
+            settings.export_denoise = self.ui.get_export_denoise();
+            settings.export_normalize = self.ui.get_export_normalize();
             settings.save();
         }
+        options.audio = visor_media::export::AudioCleanup {
+            denoise: self.ui.get_export_denoise(),
+            normalize: self.ui.get_export_normalize(),
+        };
         options.max_height = match self.ui.get_export_resolution() {
             1 => Some(1080),
             2 => Some(720),
             _ => None,
         };
         let project = self.project.borrow().clone();
-        let exports = self.dir.join("exports");
-        // A symlinked exports folder would let a shared project make the
-        // export write outside it.
-        if exports.is_symlink() {
-            self.ui
-                .set_export_status("Export failed: the exports folder is a link".into());
-            return;
-        }
-        if let Err(e) = std::fs::create_dir_all(&exports) {
-            self.ui
-                .set_export_status(format!("Export failed: {e}").into());
-            return;
-        }
+        let exports = match self.exports_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.ui
+                    .set_export_status(format!("Export failed: {e}").into());
+                return;
+            }
+        };
         let out = unique_path(&exports, &sanitize(&project.title), format.extension());
         let job = ExportJob {
             out: out.clone(),
@@ -574,6 +611,48 @@ impl EditorWindow {
         self.ui.set_export_progress(0.0);
         self.ui.set_export_status("Exporting… 0%".into());
         *self.export.borrow_mut() = Some(job);
+    }
+
+    /// The recording's `exports` folder, created if needed.
+    fn exports_dir(&self) -> anyhow::Result<PathBuf> {
+        let exports = self.dir.join("exports");
+        // A symlinked exports folder would let a shared project make the
+        // export write outside it.
+        if exports.is_symlink() {
+            anyhow::bail!("the exports folder is a link");
+        }
+        std::fs::create_dir_all(&exports)?;
+        Ok(exports)
+    }
+
+    /// Writes the thumbnail to the exports folder as a JPEG and shows it.
+    fn save_thumbnail(&self) {
+        let project = self.project.borrow().clone();
+        let out = match self.exports_dir() {
+            Ok(dir) => unique_path(
+                &dir,
+                &format!("{} thumbnail", sanitize(&project.title)),
+                "jpg",
+            ),
+            Err(e) => {
+                self.ui
+                    .set_export_status(format!("Saving the thumbnail failed: {e}").into());
+                return;
+            }
+        };
+        let dir = self.dir.clone();
+        let weak = self.ui.as_weak();
+        std::thread::spawn(move || {
+            let result = visor_media::export::save_thumbnail(&dir, &project, &out);
+            let _ = weak.upgrade_in_event_loop(move |ui| match result {
+                Ok(()) => platform::reveal(&out),
+                Err(e) => {
+                    tracing::error!("saving the thumbnail failed: {e:#}");
+                    ui.set_export_done(false);
+                    ui.set_export_status(format!("Saving the thumbnail failed: {e:#}").into());
+                }
+            });
+        });
     }
 
     fn poll_export(&self) {

@@ -1,5 +1,6 @@
 //! Streaming time stretch for 48 kHz stereo audio: changes speed without
 //! changing pitch (FFmpeg's `atempo`), so sped-up speech still sounds natural.
+//! Export also runs its audio cleanup filters through it.
 
 use anyhow::{Context, bail};
 use ffmpeg_next::{ChannelLayout, filter, format::Sample, format::sample::Type, frame};
@@ -21,15 +22,30 @@ unsafe impl Send for Tempo {}
 
 impl Tempo {
     pub fn new(speed: f64) -> anyhow::Result<Self> {
+        Self::with_filters(speed, &[])
+    }
+
+    /// Changes speed, then runs `filters` (FFmpeg filter descriptions, in
+    /// order) on the result. Output stays 48 kHz stereo.
+    pub fn with_filters(speed: f64, filters: &[&str]) -> anyhow::Result<Self> {
         if !(MIN_SPEED..=MAX_SPEED).contains(&speed) {
             bail!("speed {speed} is outside {MIN_SPEED}..{MAX_SPEED}");
         }
-        if (speed - 1.0).abs() < 1e-6 {
+        let mut chain: Vec<String> = Vec::new();
+        if (speed - 1.0).abs() >= 1e-6 {
+            chain.push(format!("atempo={speed}"));
+        }
+        chain.extend(filters.iter().map(|f| f.to_string()));
+        if chain.is_empty() {
             return Ok(Self {
                 graph: None,
                 pts: 0,
             });
         }
+        // Some filters (loudnorm) change the rate; resample back.
+        chain.push(format!(
+            "aresample={SAMPLE_RATE},aformat=sample_fmts=flt:sample_rates={SAMPLE_RATE}:channel_layouts=stereo"
+        ));
         let mut graph = filter::Graph::new();
         let args = format!(
             "time_base=1/{SAMPLE_RATE}:sample_rate={SAMPLE_RATE}:sample_fmt=flt:channel_layout=stereo"
@@ -47,10 +63,8 @@ impl Tempo {
         graph
             .output("in", 0)?
             .input("out", 0)?
-            .parse(&format!(
-                "atempo={speed},aformat=sample_fmts=flt:channel_layouts=stereo"
-            ))
-            .context("FFmpeg has no atempo filter")?;
+            .parse(&chain.join(","))
+            .with_context(|| format!("FFmpeg can't run the audio filters {chain:?}"))?;
         graph.validate()?;
         Ok(Self {
             graph: Some(graph),

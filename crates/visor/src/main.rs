@@ -15,6 +15,7 @@ mod editor;
 mod instance;
 mod platform;
 mod settings;
+mod shortcuts;
 mod tray;
 mod updates;
 mod util;
@@ -71,39 +72,10 @@ fn main() -> anyhow::Result<()> {
     slint::Timer::single_shot(Duration::ZERO, move || {
         app.recover_interrupted();
         app.create_tray();
+        app.create_shortcuts();
         match args {
             Args::Edit(dir) => app.open_editor(dir),
-            Args::Record { stop_after } => {
-                app.open_panel();
-                // Starts once the saved camera is open, then stops after
-                // `stop_after` seconds of recorded time (excluding the countdown).
-                let timer = std::rc::Rc::new(slint::Timer::default());
-                let this = timer.clone();
-                let started = std::cell::Cell::new(false);
-                timer.start(
-                    slint::TimerMode::Repeated,
-                    Duration::from_millis(20),
-                    move || {
-                        let app = app::app();
-                        if !started.get() {
-                            if app.devices_ready() {
-                                app.start_recording();
-                                started.set(true);
-                            }
-                        } else if let Some(secs) = stop_after {
-                            if app
-                                .recorded()
-                                .is_some_and(|t| t.as_secs_f64() >= secs as f64)
-                            {
-                                app.stop_recording(false);
-                                this.stop();
-                            }
-                        } else {
-                            this.stop();
-                        }
-                    },
-                );
-            }
+            Args::Record { stop_after } => app.record_when_ready(stop_after),
             Args::Panel => app.open_panel(),
         }
     });
