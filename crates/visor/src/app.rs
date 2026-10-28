@@ -131,11 +131,14 @@ enum Session {
         /// What is being captured, in global logical coordinates, when that
         /// is a fixed region (a display or an area).
         captured: Option<Rect>,
+        /// Started by an agent.
+        agent: Option<agent::AgentRun>,
     },
     Recording {
         recorder: Recorder,
         bar: ControlBar,
         captured: Option<Rect>,
+        agent: Option<agent::AgentRun>,
         _timer: Timer,
     },
     Stopping,
@@ -698,12 +701,7 @@ impl App {
                 d.name, d.frame.width as u32, d.frame.height as u32
             )
         })));
-        ui.set_windows(strings(
-            sources
-                .windows
-                .iter()
-                .map(|w| format!("{} — {}", w.app, w.title)),
-        ));
+        ui.set_windows(strings(sources.windows.iter().map(window_label)));
         ui.set_apps(strings(sources.apps.iter().map(|a| a.name.clone())));
         ui.set_audio_apps(strings(
             std::iter::once("All apps".to_string())
@@ -1160,8 +1158,9 @@ impl App {
             CaptureTarget::Window { .. } | CaptureTarget::App { .. } => None,
         };
         let save_dir = self.settings.borrow().save_dir.clone();
-        // An agent may have named it (see `agent`).
-        let (dir, title) = match self.agent.borrow_mut().name.take() {
+        // An agent may have started it, and named it (see `agent`).
+        let run = self.agent.borrow_mut().start_request.take();
+        let (dir, title) = match run.as_ref().and_then(|r| r.name.clone()) {
             Some(name) => (named_project_dir(&save_dir, &name), name),
             None => {
                 let dir = new_project_dir(&save_dir, "Recording");
@@ -1216,6 +1215,7 @@ impl App {
             recorder: None,
             display,
             captured,
+            agent: run,
         };
         self.refresh_tray();
     }
@@ -1384,11 +1384,6 @@ impl App {
     /// Back to Idle with the panel showing, e.g. after a cancelled start.
     fn return_to_panel(&self, error: Option<&str>) {
         *self.session.borrow_mut() = Session::Idle;
-        {
-            let mut agent = self.agent.borrow_mut();
-            agent.recording = false;
-            agent.named = false;
-        }
         self.refresh_tray();
         self.open_panel();
         if let Some(e) = error {
@@ -1402,6 +1397,7 @@ impl App {
             recorder: Some(recorder),
             display,
             captured,
+            agent,
             ..
         } = session
         else {
@@ -1411,7 +1407,7 @@ impl App {
         recorder.resume();
 
         let Ok(bar) = ControlBar::new() else { return };
-        bar.set_agent(self.agent.borrow().recording);
+        bar.set_agent(agent.is_some());
         let width = f64::from(bar.get_bar_width());
         bar.window().set_position(LogicalPosition::new(
             (display.frame.x + (display.frame.width - width) / 2.0) as f32,
@@ -1446,6 +1442,7 @@ impl App {
             recorder,
             bar,
             captured,
+            agent,
             _timer: timer,
         };
         if let Some(p) = &*self.panel.borrow() {
@@ -1481,15 +1478,20 @@ impl App {
 
     pub fn stop_recording(&self, discard: bool) {
         let session = std::mem::replace(&mut *self.session.borrow_mut(), Session::Stopping);
-        let (recorder, overlay) = match session {
+        let (recorder, overlay, run) = match session {
             Session::Recording {
                 recorder,
                 bar,
                 captured,
+                agent,
                 ..
             } => {
                 let _ = bar.hide();
-                (recorder, captured.and_then(|c| self.bubble_overlay(c)))
+                (
+                    recorder,
+                    captured.and_then(|c| self.bubble_overlay(c)),
+                    agent,
+                )
             }
             Session::Starting {
                 recorder,
@@ -1528,16 +1530,20 @@ impl App {
                             tracing::warn!("could not save the bubble position: {e}");
                         }
                     }
-                    dir
+                    (dir, project)
                 });
-                post(move |app| app.on_stopped(result));
+                post(move |app| app.on_stopped(result, run));
             }
         });
     }
 
-    fn on_stopped(&self, result: anyhow::Result<PathBuf>) {
+    fn on_stopped(
+        &self,
+        result: anyhow::Result<(PathBuf, visor_core::Project)>,
+        run: Option<agent::AgentRun>,
+    ) {
         *self.session.borrow_mut() = Session::Idle;
-        let after = self.agent_stopped(&result);
+        let after = self.agent_stopped(&result, run);
         let open_editor = after != agent::AfterStop::Nothing;
         if self.quit_pending.get() {
             if let Err(e) = &result {
@@ -1547,7 +1553,7 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) => match after {
+            Ok((dir, _)) => match after {
                 agent::AfterStop::Name => self.open_new_recording(dir),
                 agent::AfterStop::Edit => self.open_editor(dir),
                 agent::AfterStop::Nothing => {}
@@ -1796,6 +1802,11 @@ fn discard_in_background(recorder: Recorder) {
             tracing::warn!("discarding an abandoned recording failed: {e:#}");
         }
     });
+}
+
+/// How the panel lists a window; agents match windows against it too.
+fn window_label(w: &visor_capture::WindowInfo) -> String {
+    format!("{} — {}", w.app, w.title)
 }
 
 /// How the panel describes a chosen area.

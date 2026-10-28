@@ -14,19 +14,23 @@ use super::*;
 
 pub type Reply = crossbeam_channel::Sender<Value>;
 
-/// What agents are waiting for.
+/// What agents asked for and are waiting for.
 #[derive(Default)]
 pub(super) struct AgentState {
-    /// The current recording was started by an agent; the control bar says so.
-    pub recording: bool,
+    /// A start an agent asked for, waiting for the devices; taken by
+    /// `start_recording` into the session.
+    pub start_request: Option<AgentRun>,
     start: Option<(Reply, Timer)>,
     /// Whether to open the editor once it's saved.
     stop: Option<(Reply, bool)>,
     discard: Option<Reply>,
-    /// Name for the recording being started; taken by `start_recording`.
+}
+
+/// A recording an agent started, kept with the session: the control bar
+/// says so, and the editor doesn't ask for a name the agent gave.
+#[derive(Debug, Clone)]
+pub struct AgentRun {
     pub name: Option<String>,
-    /// The current recording was named by the agent.
-    pub named: bool,
 }
 
 /// What follows a recording being saved.
@@ -112,10 +116,6 @@ fn find<T>(
                 .join(", ")
         )),
     }
-}
-
-fn window_label(w: &visor_capture::WindowInfo) -> String {
-    format!("{} — {}", w.app, w.title)
 }
 
 fn sources_json(sources: &Sources) -> Value {
@@ -217,12 +217,7 @@ impl App {
             .and_then(Value::as_str)
             .map(|n| n.trim().chars().take(200).collect())
             .filter(|n: &String| !n.is_empty());
-        {
-            let mut agent = self.agent.borrow_mut();
-            agent.recording = true;
-            agent.named = name.is_some();
-            agent.name = name;
-        }
+        self.agent.borrow_mut().start_request = Some(AgentRun { name });
         self.record_when_ready(None);
         let started = Instant::now();
         let timer = Timer::default();
@@ -246,10 +241,18 @@ impl App {
             }
             Session::Stopping => Err("The recording was stopped as it began.".into()),
             _ if started.elapsed() > START_TIMEOUT => {
-                Err("The recording didn't start within a minute.".into())
+                Err("The recording didn't start within a minute, so it was cancelled.".into())
             }
             _ => return,
         };
+        if outcome.is_err() {
+            // Nothing may start once the agent is told it didn't.
+            self.agent.borrow_mut().start_request = None;
+            self.cancel_pending_start();
+            if matches!(*self.session.borrow(), Session::Starting { .. }) {
+                self.stop_recording(true);
+            }
+        }
         let Some((reply, timer)) = self.agent.borrow_mut().start.take() else {
             return;
         };
@@ -258,13 +261,7 @@ impl App {
         slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
         match outcome {
             Ok(()) => send(reply, Ok(self.agent_status())),
-            Err(e) => {
-                let mut agent = self.agent.borrow_mut();
-                agent.recording = false;
-                agent.name = None;
-                drop(agent);
-                send(reply, Err(e));
-            }
+            Err(e) => send(reply, Err(e)),
         }
     }
 
@@ -452,7 +449,6 @@ impl App {
     /// Stops or discards the recording and answers once that's done.
     fn agent_stop(&self, args: &Value, reply: Reply, discard: bool) {
         if self.cancel_pending_start() {
-            self.agent.borrow_mut().recording = false;
             return send(reply, Ok(json!({"cancelled": true})));
         }
         let recording = match &*self.session.borrow() {
@@ -476,36 +472,33 @@ impl App {
 
     /// A recording finished saving (or failed to). Answers an agent that
     /// stopped it; returns what to open.
-    pub(super) fn agent_stopped(&self, result: &anyhow::Result<PathBuf>) -> AfterStop {
-        let mut agent = self.agent.borrow_mut();
-        agent.recording = false;
-        let named = std::mem::take(&mut agent.named);
-        let editor = if named {
+    pub(super) fn agent_stopped(
+        &self,
+        result: &anyhow::Result<(PathBuf, visor_core::Project)>,
+        run: Option<AgentRun>,
+    ) -> AfterStop {
+        let editor = if run.is_some_and(|r| r.name.is_some()) {
             AfterStop::Edit
         } else {
             AfterStop::Name
         };
-        let Some((reply, open_editor)) = agent.stop.take() else {
+        let Some((reply, open_editor)) = self.agent.borrow_mut().stop.take() else {
             // Stopped by the user.
             return editor;
         };
-        drop(agent);
         send(
             reply,
             match result {
-                Ok(dir) => {
-                    let project = visor_core::Project::load(dir).ok();
-                    Ok(json!({
-                        "name": project.as_ref().map(|p| p.title.clone()),
-                        "folder": dir.display().to_string(),
-                        "duration_seconds": project.as_ref().map(|p| seconds(p.duration_us)),
-                        "markers": project.map(|p| p.markers.iter().map(|m| json!({
-                            "at_seconds": seconds(m.at_us),
-                            "text": m.text,
-                        })).collect::<Vec<_>>()),
-                        "editor_opened": open_editor,
-                    }))
-                }
+                Ok((dir, project)) => Ok(json!({
+                    "name": project.title,
+                    "folder": dir.display().to_string(),
+                    "duration_seconds": seconds(project.duration_us),
+                    "markers": project.markers.iter().map(|m| json!({
+                        "at_seconds": seconds(m.at_us),
+                        "text": m.text,
+                    })).collect::<Vec<_>>(),
+                    "editor_opened": open_editor,
+                })),
                 Err(e) => Err(format!("Saving the recording failed: {e:#}")),
             },
         );
@@ -519,13 +512,9 @@ impl App {
     /// A recording was discarded. Answers an agent that discarded it;
     /// returns whether to show the recorder panel as usual.
     pub(super) fn agent_discarded(&self, result: &anyhow::Result<()>) -> bool {
-        let mut agent = self.agent.borrow_mut();
-        agent.recording = false;
-        agent.named = false;
-        let Some(reply) = agent.discard.take() else {
+        let Some(reply) = self.agent.borrow_mut().discard.take() else {
             return true;
         };
-        drop(agent);
         send(
             reply,
             match result {

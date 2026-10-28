@@ -20,6 +20,8 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub enum Request {
     ShowPanel,
+    /// Started in the background for an agent: nothing to show.
+    Background,
     Edit(PathBuf),
     /// An agent command (see `app::agent`), answered through the sender.
     Control(Value, crossbeam_channel::Sender<Value>),
@@ -42,9 +44,13 @@ pub struct Primary {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(2);
-/// How long an agent command may take: starting waits for the camera and
-/// the countdown, stopping for the files to be finalized.
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a launch waits for a Visor that holds the lock to listen.
+const STARTUP_GRACE: Duration = Duration::from_secs(3);
+/// How long an agent command may take before its reply is given up on.
+/// Starting gives up by itself within a minute (see `app::agent`); this
+/// only guards against a reply that never comes, so it is generous enough
+/// for any stop to finish saving.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Becomes the running Visor, or hands `request` to the one already running.
 pub fn claim(request: &Request) -> Instance {
@@ -87,13 +93,23 @@ fn try_claim(dir: &Path, request: &Request) -> std::io::Result<Instance> {
                 token,
             }))
         }
-        Err(TryLockError::WouldBlock) => match hand_over(dir, request) {
-            Ok(()) => Ok(Instance::HandedOver),
-            Err(e) => {
-                tracing::warn!("another Visor is running but didn't answer: {e}");
-                Ok(Instance::Unchecked)
+        Err(TryLockError::WouldBlock) => {
+            // A Visor that has only just started may not be listening yet.
+            let deadline = std::time::Instant::now() + STARTUP_GRACE;
+            let error = loop {
+                match hand_over(dir, request) {
+                    Ok(()) => return Ok(Instance::HandedOver),
+                    Err(e) if std::time::Instant::now() > deadline => break e,
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
+            };
+            tracing::warn!("another Visor is running but didn't answer: {error}");
+            // Started for an agent: the running one will answer it.
+            if matches!(request, Request::Background) {
+                return Ok(Instance::HandedOver);
             }
-        },
+            Ok(Instance::Unchecked)
+        }
         Err(TryLockError::Error(e)) => Err(e),
     }
 }
@@ -172,6 +188,7 @@ fn read_request(stream: &TcpStream, token: &str) -> std::io::Result<Parsed> {
     }
     Ok(match (lines.next(), lines.next()) {
         (Some("show"), _) => Parsed::Launch(Request::ShowPanel),
+        (Some("background"), _) => Parsed::Launch(Request::Background),
         (Some("edit"), Some(path)) if !path.is_empty() => {
             Parsed::Launch(Request::Edit(PathBuf::from(path)))
         }
@@ -198,32 +215,35 @@ impl std::fmt::Display for ControlError {
     }
 }
 
-/// Whether a Visor is running for the user whose settings are in `dir`.
-fn running_in(dir: &Path) -> bool {
-    // Taking the lock (and letting go of it at once) means nobody holds it.
-    matches!(
-        open_lock(dir).map(|lock| lock.try_lock()),
-        Ok(Err(TryLockError::WouldBlock))
-    )
-}
-
 /// Sends an agent command to the running Visor and returns its reply.
 pub fn control(command: &Value) -> Result<Value, ControlError> {
     control_in(&settings_dir().ok_or(ControlError::NotRunning)?, command)
 }
 
 fn control_in(dir: &Path, command: &Value) -> Result<Value, ControlError> {
-    if !running_in(dir) {
-        return Err(ControlError::NotRunning);
-    }
+    // Whether Visor runs is told by its port answering, not by its lock:
+    // taking the lock to check could make a Visor starting at that moment
+    // think another one holds it.
     let message = format!("control\n{command}\n");
-    let reply = send(dir, &message, CONTROL_TIMEOUT + TIMEOUT).map_err(ControlError::Io)?;
+    let reply = match send(dir, &message, CONTROL_TIMEOUT + TIMEOUT) {
+        Ok(reply) => reply,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Err(ControlError::NotRunning);
+        }
+        Err(e) => return Err(ControlError::Io(e)),
+    };
     serde_json::from_str(&reply).map_err(|e| ControlError::Io(std::io::Error::other(e)))
 }
 
 fn hand_over(dir: &Path, request: &Request) -> std::io::Result<()> {
     let message = match request {
         Request::ShowPanel => "show\n".to_string(),
+        Request::Background => "background\n".to_string(),
         Request::Edit(path) => {
             // The running Visor has its own working directory.
             let path = std::path::absolute(path)?;

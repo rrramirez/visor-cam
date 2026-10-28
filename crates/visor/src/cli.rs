@@ -143,32 +143,35 @@ fn start_args(args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
-/// Sends a command to the running Visor, starting Visor first if needed
-/// (except to ask its status). Always returns a reply object with `ok`.
+/// Sends a command to the running Visor, starting Visor first for the
+/// commands that need it. Always returns a reply object with `ok`.
 pub fn call(command: &Value) -> Value {
     match instance::control(command) {
         Ok(reply) => reply,
-        Err(ControlError::NotRunning) if command["command"] == "status" => {
-            json!({"ok": true, "state": "not_running"})
-        }
-        Err(ControlError::NotRunning) => {
-            if let Err(e) = launch() {
-                return json!({"ok": false, "error": format!("Couldn't start Visor: {e}")});
-            }
-            // Wait for it to listen.
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                std::thread::sleep(Duration::from_millis(250));
-                match instance::control(command) {
-                    Ok(reply) => return reply,
-                    Err(e) if Instant::now() > deadline => {
-                        return json!({"ok": false, "error": format!("Visor didn't start: {e}")});
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
+        Err(ControlError::NotRunning) => match command["command"].as_str() {
+            Some("start_recording" | "list_sources") => launch_and_call(command),
+            Some("status") => json!({"ok": true, "state": "not_running"}),
+            _ => json!({"ok": false, "error": "Visor isn't running, so it isn't recording."}),
+        },
         Err(e) => json!({"ok": false, "error": e.to_string()}),
+    }
+}
+
+fn launch_and_call(command: &Value) -> Value {
+    if let Err(e) = launch() {
+        return json!({"ok": false, "error": format!("Couldn't start Visor: {e}")});
+    }
+    // Wait for it to listen.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        match instance::control(command) {
+            Ok(reply) => return reply,
+            Err(e) if Instant::now() > deadline => {
+                return json!({"ok": false, "error": format!("Visor didn't start: {e}")});
+            }
+            Err(_) => {}
+        }
     }
 }
 

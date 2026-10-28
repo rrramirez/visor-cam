@@ -136,22 +136,24 @@ fn tools() -> Value {
 }
 
 /// Serves requests from stdin until it closes. Returns the exit code.
+///
+/// Each message is answered on its own thread: starting and stopping wait
+/// for the recording, and meanwhile the client's pings must still be
+/// answered or it may think the server hung.
 pub fn serve() -> i32 {
-    let mut out = std::io::stdout().lock();
+    let out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
-        let Some(response) = respond(&line) else {
-            continue;
-        };
-        if writeln!(out, "{response}")
-            .and_then(|()| out.flush())
-            .is_err()
-        {
-            break;
-        }
+        let out = out.clone();
+        std::thread::spawn(move || {
+            if let Some(response) = respond(&line) {
+                let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = writeln!(out, "{response}").and_then(|()| out.flush());
+            }
+        });
     }
     0
 }

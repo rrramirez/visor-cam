@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     // Launching Visor while it runs shows the running one instead.
     let request = match &args {
         Args::Edit(dir) => instance::Request::Edit(dir.clone()),
+        Args::Background => instance::Request::Background,
         _ => instance::Request::ShowPanel,
     };
     let instance = instance::claim(&request);
@@ -72,6 +73,7 @@ fn main() -> anyhow::Result<()> {
         primary.serve(|request| {
             app::post(move |app| match request {
                 instance::Request::ShowPanel => app.open_panel(),
+                instance::Request::Background => {}
                 instance::Request::Edit(dir) => app.open_editor(dir),
                 instance::Request::Control(command, reply) => app.agent_command(command, reply),
             })
