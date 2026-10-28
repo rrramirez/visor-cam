@@ -191,14 +191,19 @@ impl Recorder {
         self.clock.lock().unwrap().elapsed(host_now())
     }
 
-    /// Notes this moment of the recording; saved with the project on stop.
-    /// Returns the recorded time it marks.
+    /// Notes this moment of the recording. Returns the recorded time it
+    /// marks.
     pub fn mark(&mut self, text: impl Into<String>) -> Micros {
         let at_us = self.elapsed();
         self.project.markers.push(visor_core::Marker {
             at_us,
             text: text.into(),
         });
+        // Saved now (still with no duration) so a recording recovered after
+        // a crash keeps its markers.
+        if let Err(e) = self.project.save(&self.dir) {
+            tracing::warn!("could not save the marker: {e}");
+        }
         at_us
     }
 
@@ -268,25 +273,19 @@ impl Drop for Recorder {
     }
 }
 
-/// A new folder under `root` named after a recording's name, as the editor
-/// names folders (`Demo`, then `Demo 2`…), or after the time if the name
-/// makes no folder name.
-pub fn named_project_dir(root: &Path, title: &str) -> PathBuf {
-    let Some(name) = visor_core::project::folder_name(title) else {
-        return new_project_dir(root, "Recording");
-    };
-    let mut dir = root.join(&name);
-    let mut n = 2;
-    while dir.symlink_metadata().is_ok() {
-        dir = root.join(format!("{name} {n}"));
-        n += 1;
+/// Creates a folder under `root` named after a recording's name, as the
+/// editor names folders (`Demo`, then `Demo 2`…), or after the time if the
+/// name makes no folder name.
+pub fn named_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
+    match visor_core::project::folder_name(title) {
+        Some(name) => visor_core::project::create_unique_dir(root, &name),
+        None => new_project_dir(root, "Recording"),
     }
-    dir
 }
 
-/// A new folder under `root` named after the local time and title, e.g.
-/// `2026-10-20 14.03.27 Recording`.
-pub fn new_project_dir(root: &Path, title: &str) -> PathBuf {
+/// Creates a folder under `root` named after the local time and title,
+/// e.g. `2026-10-20 14.03.27 Recording`.
+pub fn new_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
     let safe: String = title
         .chars()
@@ -298,14 +297,7 @@ pub fn new_project_dir(root: &Path, title: &str) -> PathBuf {
             }
         })
         .collect();
-    let base = root.join(format!("{stamp} {}", safe.trim()));
-    let mut dir = base.clone();
-    let mut n = 2;
-    while dir.exists() {
-        dir = PathBuf::from(format!("{} {n}", base.display()));
-        n += 1;
-    }
-    dir
+    visor_core::project::create_unique_dir(root, &format!("{stamp} {}", safe.trim()))
 }
 
 fn spawn_video<F: Borrow<VideoFrame> + Send + 'static>(
@@ -408,27 +400,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_dirs_are_unique_and_sanitized() {
+    fn project_dirs_are_created_unique_and_sanitized() {
         let root = std::env::temp_dir().join(format!("visor-dirs-{}", std::process::id()));
-        let a = new_project_dir(&root, "Demo: a/b");
+        let a = new_project_dir(&root, "Demo: a/b").unwrap();
+        assert!(a.is_dir());
         assert!(
             a.file_name()
                 .unwrap()
                 .to_string_lossy()
                 .ends_with("Demo- a-b")
         );
-        std::fs::create_dir_all(&a).unwrap();
-        let b = new_project_dir(&root, "Demo: a/b");
+        let b = new_project_dir(&root, "Demo: a/b").unwrap();
         assert_ne!(a, b);
-        let named = named_project_dir(&root, "Safari demo: v2");
+        let named = named_project_dir(&root, "Safari demo: v2").unwrap();
         assert_eq!(named, root.join("Safari demo- v2"));
-        std::fs::create_dir_all(&named).unwrap();
+        // Taken as soon as it's chosen, before anything is recorded in it.
         assert_eq!(
-            named_project_dir(&root, "Safari demo: v2"),
+            named_project_dir(&root, "Safari demo: v2").unwrap(),
             root.join("Safari demo- v2 2")
         );
         assert!(
             named_project_dir(&root, " .. ")
+                .unwrap()
                 .to_string_lossy()
                 .ends_with(" Recording")
         );

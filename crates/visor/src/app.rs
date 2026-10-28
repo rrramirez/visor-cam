@@ -237,7 +237,7 @@ impl App {
         };
         match shortcut {
             // A second press while waiting for the devices backs out.
-            Shortcut::StartStop if idle && self.cancel_pending_start() => {}
+            Shortcut::StartStop if idle && self.abandon_pending_start() => {}
             Shortcut::StartStop if idle => self.record_when_ready(None),
             // Stopping during the countdown cancels, as the bar does.
             Shortcut::StartStop if recording || starting => self.stop_recording(false),
@@ -276,7 +276,7 @@ impl App {
                 }
             } else if started.elapsed() > Duration::from_secs(15) {
                 app.cancel_pending_start();
-                app.set_panel_error("The camera didn't start; try again.");
+                app.start_failed("The camera didn't start; try again.");
             }
         });
         *self.pending_start.borrow_mut() = Some(timer);
@@ -292,6 +292,16 @@ impl App {
         let timer = self.pending_start.borrow_mut().take();
         slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
         true
+    }
+
+    /// Cancels a start waiting for the devices, telling an agent that asked
+    /// for it. Returns whether one was waiting.
+    fn abandon_pending_start(&self) -> bool {
+        let cancelled = self.cancel_pending_start();
+        if cancelled {
+            self.agent_start_finished(Err("The recording was cancelled.".into()));
+        }
+        cancelled
     }
 
     /// Stops the recording after `secs` seconds of recorded time.
@@ -600,7 +610,7 @@ impl App {
             // Closing the panel releases the camera and mic, and backs out of
             // a start that was waiting for them.
             let app = app();
-            app.cancel_pending_start();
+            app.abandon_pending_start();
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
             }
@@ -1140,12 +1150,12 @@ impl App {
             return;
         }
         if self.devices.borrow().camera_pending.is_some() {
-            return self.set_panel_error("The camera is still starting; try again in a moment.");
+            return self.start_failed("The camera is still starting; try again in a moment.");
         }
         let built = self.build_config();
         let (config, display) = match built {
             Ok(v) => v,
-            Err(e) => return self.set_panel_error(&e.to_string()),
+            Err(e) => return self.start_failed(&e.to_string()),
         };
         {
             let mut s = self.settings.borrow_mut();
@@ -1160,18 +1170,24 @@ impl App {
         let save_dir = self.settings.borrow().save_dir.clone();
         // An agent may have started it, and named it (see `agent`).
         let run = self.agent.borrow_mut().start_request.take();
-        let (dir, title) = match run.as_ref().and_then(|r| r.name.clone()) {
-            Some(name) => (named_project_dir(&save_dir, &name), name),
-            None => {
-                let dir = new_project_dir(&save_dir, "Recording");
-                let title = dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                (dir, title)
+        // The folder is created now, which claims its name.
+        let name = run.as_ref().and_then(|r| r.name.clone());
+        let created = match &name {
+            Some(name) => named_project_dir(&save_dir, name),
+            None => new_project_dir(&save_dir, "Recording"),
+        };
+        let dir = match created {
+            Ok(dir) => dir,
+            Err(e) => {
+                return self.start_failed(&format!("Could not create the recording folder: {e}"));
             }
         };
+        let title = name.unwrap_or_else(|| {
+            dir.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
         let (mic, camera) = {
             let d = self.devices.borrow();
             (
@@ -1200,7 +1216,12 @@ impl App {
         let id = self.next_start_id.get();
         self.next_start_id.set(id + 1);
         std::thread::spawn(move || {
+            let dir = options.dir.clone();
             let result = Recorder::start(backend.as_ref(), options);
+            if result.is_err() {
+                // Don't leave the folder created for it behind.
+                let _ = std::fs::remove_dir_all(&dir);
+            }
             post(move |app| app.on_recorder_ready(id, result));
         });
 
@@ -1218,6 +1239,13 @@ impl App {
             agent: run,
         };
         self.refresh_tray();
+    }
+
+    /// A start that couldn't begin: says why in the panel, and to an agent
+    /// that asked for it.
+    fn start_failed(&self, error: &str) {
+        self.set_panel_error(error);
+        self.agent_start_finished(Err(error.to_string()));
     }
 
     fn build_config(&self) -> anyhow::Result<(RecordingConfig, DisplayInfo)> {
@@ -1389,6 +1417,10 @@ impl App {
         if let Some(e) = error {
             self.set_panel_error(e);
         }
+        // An agent waiting for this start hears why it didn't.
+        self.agent_start_finished(Err(error
+            .unwrap_or("The recording was cancelled.")
+            .to_string()));
     }
 
     fn begin_recording(&self) {
@@ -1404,9 +1436,17 @@ impl App {
             *self.session.borrow_mut() = session;
             return;
         };
+        let bar = match ControlBar::new() {
+            Ok(bar) => bar,
+            Err(e) => {
+                // Recording without its controls would leave no way to stop it.
+                tracing::error!("could not create the control bar: {e}");
+                discard_in_background(recorder);
+                return self
+                    .return_to_panel(Some(&format!("Could not show the recording controls: {e}")));
+            }
+        };
         recorder.resume();
-
-        let Ok(bar) = ControlBar::new() else { return };
         bar.set_agent(agent.is_some());
         let width = f64::from(bar.get_bar_width());
         bar.window().set_position(LogicalPosition::new(
@@ -1449,6 +1489,7 @@ impl App {
             p.ui.set_busy(false);
         }
         self.refresh_tray();
+        self.agent_start_finished(Ok(()));
     }
 
     fn toggle_pause(&self) {

@@ -6,8 +6,6 @@
 //! fields are its arguments. Replies are JSON objects with `ok` and either
 //! the result's fields or an `error` for the agent to show or act on.
 
-use std::time::Instant;
-
 use serde_json::{Value, json};
 
 use super::*;
@@ -217,148 +215,215 @@ impl App {
             .and_then(Value::as_str)
             .map(|n| n.trim().chars().take(200).collect())
             .filter(|n: &String| !n.is_empty());
-        self.agent.borrow_mut().start_request = Some(AgentRun { name });
-        self.record_when_ready(None);
-        let started = Instant::now();
-        let timer = Timer::default();
-        timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
-            app().agent_watch_start(started)
+        // Answered by `agent_start_finished` once it records or fails;
+        // the timer only guards against a start that never gets that far.
+        let guard = Timer::default();
+        guard.start(TimerMode::SingleShot, START_TIMEOUT, || {
+            app().agent_start_timed_out()
         });
-        self.agent.borrow_mut().start = Some((reply, timer));
+        {
+            let mut agent = self.agent.borrow_mut();
+            agent.start_request = Some(AgentRun { name });
+            agent.start = Some((reply, guard));
+        }
+        self.record_when_ready(None);
     }
 
-    fn agent_watch_start(&self, started: Instant) {
-        let outcome = match &*self.session.borrow() {
-            Session::Recording { .. } => Ok(()),
-            Session::Idle if self.pending_start.borrow().is_none() => {
-                let error = self
-                    .panel
-                    .borrow()
-                    .as_ref()
-                    .map(|p| p.ui.get_error().to_string())
-                    .filter(|e| !e.is_empty());
-                Err(error.unwrap_or_else(|| "The recording was cancelled.".into()))
-            }
-            Session::Stopping => Err("The recording was stopped as it began.".into()),
-            _ if started.elapsed() > START_TIMEOUT => {
-                Err("The recording didn't start within a minute, so it was cancelled.".into())
-            }
-            _ => return,
+    /// Answers an agent waiting for a start: it is recording, or why not.
+    /// Called wherever a start ends; does nothing if no agent is waiting.
+    pub(super) fn agent_start_finished(&self, result: Result<(), String>) {
+        let waiting = {
+            let mut agent = self.agent.borrow_mut();
+            // Nothing may start for an agent once it was told it didn't.
+            agent.start_request = None;
+            agent.start.take()
         };
-        if outcome.is_err() {
-            // Nothing may start once the agent is told it didn't.
-            self.agent.borrow_mut().start_request = None;
-            self.cancel_pending_start();
-            if matches!(*self.session.borrow(), Session::Starting { .. }) {
-                self.stop_recording(true);
-            }
-        }
-        let Some((reply, timer)) = self.agent.borrow_mut().start.take() else {
+        let Some((reply, guard)) = waiting else {
             return;
         };
-        timer.stop();
-        // Not dropped here: this runs inside the timer's own callback.
-        slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
-        match outcome {
-            Ok(()) => send(reply, Ok(self.agent_status())),
-            Err(e) => send(reply, Err(e)),
+        // Not dropped here: this may run inside the timer's own callback.
+        guard.stop();
+        slint::Timer::single_shot(Duration::ZERO, move || drop(guard));
+        send(reply, result.map(|()| self.agent_status()));
+    }
+
+    fn agent_start_timed_out(&self) {
+        self.agent_start_finished(Err(
+            "The recording didn't start within a minute, so it was cancelled.".into(),
+        ));
+        self.cancel_pending_start();
+        if matches!(*self.session.borrow(), Session::Starting { .. }) {
+            self.stop_recording(true);
         }
     }
 
-    /// Sets the recorder panel's choices from a start command's arguments.
-    /// Missing arguments keep what the panel has.
+    /// Sets the recorder panel's choices from a start command's arguments,
+    /// as if the user had made them. Missing arguments keep what the panel
+    /// has. All are checked before any is applied, and if a camera or mic
+    /// then fails to open, the panel's earlier choices are put back.
     fn apply_agent_choices(&self, args: &Value) -> Result<(), String> {
-        let mut area = None;
+        let choices = self.resolve_choices(args)?;
+        let before = self.panel_choices();
+        self.set_choices(&choices);
+        if let Err(e) = self.open_chosen_devices(&choices) {
+            if let Some(before) = before {
+                self.restore_choices(before);
+            }
+            return Err(e);
+        }
+        self.update_hint();
+        self.update_screen_highlight();
+        Ok(())
+    }
+
+    fn resolve_choices(&self, args: &Value) -> Result<Choices, String> {
+        let panel = self.panel.borrow();
+        let p = panel
+            .as_ref()
+            .ok_or("The recorder panel didn't open.".to_string())?;
+        let (ui, sources) = (&p.ui, &p.sources);
+        let mut c = Choices::default();
+        if let Some(query) = arg(args, "display") {
+            c.display = Some(find(
+                "display",
+                &sources.displays,
+                query,
+                |d| d.id.to_string(),
+                |d| d.name.clone(),
+            )?);
+        }
+        // A window, app or area says what to record by itself.
+        const KINDS: [&str; 3] = ["window", "app", "area"];
+        let target = match arg(args, "target") {
+            Some(t) => Some(
+                t.as_str()
+                    .ok_or("target is screen, window, app or area.")?
+                    .to_string(),
+            ),
+            None => match KINDS
+                .iter()
+                .filter(|k| arg(args, k).is_some())
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [] => None,
+                [kind] => Some(kind.to_string()),
+                _ => return Err("Give only one of window, app or area.".into()),
+            },
+        };
+        if let Some(target) = &target
+            && let Some(other) = KINDS
+                .iter()
+                .find(|k| *k != target && arg(args, k).is_some())
         {
-            let panel = self.panel.borrow();
-            let p = panel
-                .as_ref()
-                .ok_or("The recorder panel didn't open.".to_string())?;
-            let (ui, sources) = (&p.ui, &p.sources);
-            if let Some(query) = arg(args, "display") {
-                let i = find(
-                    "display",
-                    &sources.displays,
+            return Err(format!("\"{other}\" doesn't go with target {target}."));
+        }
+        match target.as_deref() {
+            None => {}
+            Some("screen") => c.mode = Some(0),
+            Some("window") => {
+                let query = arg(args, "window")
+                    .ok_or("Say which window to record (list_sources shows them).")?;
+                c.window = Some(find(
+                    "window",
+                    &sources.windows,
                     query,
-                    |d| d.id.to_string(),
-                    |d| d.name.clone(),
-                )?;
-                ui.set_display_index(i as i32);
+                    |w| w.id.to_string(),
+                    window_label,
+                )?);
+                c.mode = Some(1);
             }
-            match arg(args, "target").map(|t| t.as_str().unwrap_or_default()) {
-                None => {}
-                Some("screen") => ui.set_mode(0),
-                Some("window") => {
-                    let query = arg(args, "window")
-                        .ok_or("Say which window to record (list_sources shows them).")?;
-                    let i = find(
-                        "window",
-                        &sources.windows,
-                        query,
-                        |w| w.id.to_string(),
-                        window_label,
-                    )?;
-                    ui.set_window_index(i as i32);
-                    ui.set_mode(1);
-                }
-                Some("app") => {
-                    let query = arg(args, "app")
-                        .ok_or("Say which app to record (list_sources shows them).")?;
-                    let i = find(
-                        "app",
-                        &sources.apps,
-                        query,
-                        |a| a.pid.to_string(),
-                        |a| a.name.clone(),
-                    )?;
-                    ui.set_app_index(i as i32);
-                    ui.set_mode(2);
-                }
-                Some("area") => {
-                    let display = usize::try_from(ui.get_display_index())
-                        .ok()
-                        .and_then(|i| sources.displays.get(i))
-                        .or(sources.displays.first())
-                        .ok_or("No display available to record.")?;
-                    let rect = area_arg(args, display)?;
-                    area = Some((display.id, rect));
-                    ui.set_mode(3);
-                }
-                Some(other) => {
-                    return Err(format!(
-                        "Unknown target \"{other}\": use screen, window, app or area."
-                    ));
-                }
-            }
-            if let Some(on) = arg(args, "system_audio") {
-                ui.set_system_audio(on.as_bool().ok_or("system_audio is true or false.")?);
-            }
-            if let Some(query) = arg(args, "system_audio_app") {
-                let i = find(
+            Some("app") => {
+                let query =
+                    arg(args, "app").ok_or("Say which app to record (list_sources shows them).")?;
+                c.app = Some(find(
                     "app",
                     &sources.apps,
                     query,
                     |a| a.pid.to_string(),
                     |a| a.name.clone(),
-                )?;
-                ui.set_system_audio(true);
-                // Index 0 is "All apps".
-                ui.set_audio_app_index(i as i32 + 1);
+                )?);
+                c.mode = Some(2);
+            }
+            Some("area") => {
+                let display = c
+                    .display
+                    .or(usize::try_from(ui.get_display_index()).ok())
+                    .and_then(|i| sources.displays.get(i))
+                    .or(sources.displays.first())
+                    .ok_or("No display available to record.")?;
+                c.area = Some((display.id, area_arg(args, display)?));
+                c.mode = Some(3);
+            }
+            Some(other) => {
+                return Err(format!(
+                    "Unknown target \"{other}\": use screen, window, app or area."
+                ));
             }
         }
-        if let Some((display, rect)) = area
-            && let Some(p) = &mut *self.panel.borrow_mut()
-        {
-            p.area = Some((display, rect));
-            p.ui.set_area_label(area_label(rect).into());
+        if let Some(on) = arg(args, "system_audio") {
+            c.system_audio = Some(on.as_bool().ok_or("system_audio is true or false.")?);
+        }
+        if let Some(query) = arg(args, "system_audio_app") {
+            c.audio_app = Some(find(
+                "app",
+                &sources.apps,
+                query,
+                |a| a.pid.to_string(),
+                |a| a.name.clone(),
+            )?);
         }
         if let Some(query) = arg(args, "camera") {
-            let index = self.device_index("camera", query, |p| {
-                p.cameras
-                    .iter()
-                    .map(|c| (c.id.clone(), c.name.clone()))
-                    .collect()
-            })?;
+            let cameras: Vec<_> = p
+                .cameras
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone()))
+                .collect();
+            c.camera = Some(device_index("camera", &cameras, query)?);
+        }
+        if let Some(query) = arg(args, "mic") {
+            let mics: Vec<_> = p
+                .mics
+                .iter()
+                .map(|m| (m.id.clone(), m.name.clone()))
+                .collect();
+            c.mic = Some(device_index("microphone", &mics, query)?);
+        }
+        Ok(c)
+    }
+
+    fn set_choices(&self, c: &Choices) {
+        let mut panel = self.panel.borrow_mut();
+        let Some(p) = panel.as_mut() else { return };
+        let ui = &p.ui;
+        if let Some(i) = c.display {
+            ui.set_display_index(i as i32);
+        }
+        if let Some(i) = c.window {
+            ui.set_window_index(i as i32);
+        }
+        if let Some(i) = c.app {
+            ui.set_app_index(i as i32);
+        }
+        if let Some((display, rect)) = c.area {
+            ui.set_area_label(area_label(rect).into());
+            p.area = Some((display, rect));
+        }
+        if let Some(mode) = c.mode {
+            p.ui.set_mode(mode);
+        }
+        if let Some(on) = c.system_audio {
+            p.ui.set_system_audio(on);
+        }
+        if let Some(i) = c.audio_app {
+            p.ui.set_system_audio(true);
+            // Index 0 is "All apps".
+            p.ui.set_audio_app_index(i as i32 + 1);
+        }
+    }
+
+    fn open_chosen_devices(&self, c: &Choices) -> Result<(), String> {
+        if let Some(index) = c.camera {
             if let Some(p) = &*self.panel.borrow() {
                 p.ui.set_camera_index(index as i32);
             }
@@ -368,13 +433,7 @@ impl App {
                 return Err(self.device_error("camera"));
             }
         }
-        if let Some(query) = arg(args, "mic") {
-            let index = self.device_index("microphone", query, |p| {
-                p.mics
-                    .iter()
-                    .map(|m| (m.id.clone(), m.name.clone()))
-                    .collect()
-            })?;
+        if let Some(index) = c.mic {
             if let Some(p) = &*self.panel.borrow() {
                 p.ui.set_mic_index(index as i32);
             }
@@ -383,27 +442,57 @@ impl App {
                 return Err(self.device_error("microphone"));
             }
         }
-        self.update_hint();
-        self.update_screen_highlight();
         Ok(())
     }
 
-    /// The panel's index for a camera or mic argument: 0 is none.
-    fn device_index(
-        &self,
-        what: &str,
-        query: &Value,
-        devices: impl Fn(&Panel) -> Vec<(String, String)>,
-    ) -> Result<usize, String> {
-        if query == &Value::Bool(false) || query.as_str().is_some_and(|s| s == "none") {
-            return Ok(0);
-        }
+    fn panel_choices(&self) -> Option<PanelChoices> {
         let panel = self.panel.borrow();
-        let p = panel
-            .as_ref()
-            .ok_or("The recorder panel didn't open.".to_string())?;
-        let list = devices(p);
-        find(what, &list, query, |d| d.0.clone(), |d| d.1.clone()).map(|i| i + 1)
+        let p = panel.as_ref()?;
+        let ui = &p.ui;
+        let settings = self.settings.borrow();
+        Some(PanelChoices {
+            mode: ui.get_mode(),
+            display: ui.get_display_index(),
+            window: ui.get_window_index(),
+            app: ui.get_app_index(),
+            area: p.area,
+            area_label: ui.get_area_label(),
+            system_audio: ui.get_system_audio(),
+            audio_app: ui.get_audio_app_index(),
+            last_camera: settings.last_camera.clone(),
+            last_mic: settings.last_mic.clone(),
+        })
+    }
+
+    fn restore_choices(&self, before: PanelChoices) {
+        {
+            let mut panel = self.panel.borrow_mut();
+            let Some(p) = panel.as_mut() else { return };
+            let ui = &p.ui;
+            ui.set_mode(before.mode);
+            ui.set_display_index(before.display);
+            ui.set_window_index(before.window);
+            ui.set_app_index(before.app);
+            ui.set_area_label(before.area_label);
+            p.area = before.area;
+        }
+        {
+            let mut settings = self.settings.borrow_mut();
+            settings.last_camera = before.last_camera;
+            settings.last_mic = before.last_mic;
+            settings.save();
+        }
+        // Reopens the camera and mic the user had chosen.
+        let error = self.panel.borrow().as_ref().map(|p| p.ui.get_error());
+        self.restore_device_choices();
+        if let Some(p) = &*self.panel.borrow() {
+            p.ui.set_system_audio(before.system_audio);
+            p.ui.set_audio_app_index(before.audio_app);
+            // Keep saying why the agent's choice failed.
+            if let Some(error) = error {
+                p.ui.set_error(error);
+            }
+        }
     }
 
     fn device_error(&self, what: &str) -> String {
@@ -448,7 +537,7 @@ impl App {
 
     /// Stops or discards the recording and answers once that's done.
     fn agent_stop(&self, args: &Value, reply: Reply, discard: bool) {
-        if self.cancel_pending_start() {
+        if self.abandon_pending_start() {
             return send(reply, Ok(json!({"cancelled": true})));
         }
         let recording = match &*self.session.borrow() {
@@ -524,6 +613,45 @@ impl App {
         );
         false
     }
+}
+
+/// A start command's choices, checked against the panel's lists before
+/// any is applied: indexes into them, and the panel mode to record with.
+#[derive(Default)]
+struct Choices {
+    display: Option<usize>,
+    mode: Option<i32>,
+    window: Option<usize>,
+    app: Option<usize>,
+    area: Option<(u32, Rect)>,
+    system_audio: Option<bool>,
+    audio_app: Option<usize>,
+    /// Panel indexes, where 0 is none.
+    camera: Option<usize>,
+    mic: Option<usize>,
+}
+
+/// The panel's choices before an agent's, to put back if those fail.
+struct PanelChoices {
+    mode: i32,
+    display: i32,
+    window: i32,
+    app: i32,
+    area: Option<(u32, Rect)>,
+    area_label: SharedString,
+    system_audio: bool,
+    audio_app: i32,
+    last_camera: Option<String>,
+    last_mic: Option<String>,
+}
+
+/// The panel's index for a camera or mic argument among `devices` (id,
+/// name): 0 is none.
+fn device_index(what: &str, devices: &[(String, String)], query: &Value) -> Result<usize, String> {
+    if query == &Value::Bool(false) || query.as_str().is_some_and(|s| s == "none") {
+        return Ok(0);
+    }
+    find(what, devices, query, |d| d.0.clone(), |d| d.1.clone()).map(|i| i + 1)
 }
 
 /// An `area` argument (`x`, `y`, `width`, `height` in points from the
