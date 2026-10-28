@@ -40,7 +40,7 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      keeps its pitch. The preview plays at that speed.
    - Drag, resize, reshape, mirror or hide the camera bubble. It starts where
      it was on screen while recording, mirrored as you saw it.
-   - **Thumbnail**: *Use this frame* picks the frame MP4 exports carry as
+   - **Thumbnail**: *Use frame* picks the frame MP4 exports carry as
      their cover (shown by Finder, Explorer and players); *Save image* writes
      it as a full-size JPEG.
    - **Export** to MP4, WebM (VP9 or AV1) or GIF, at original size, 1080p or

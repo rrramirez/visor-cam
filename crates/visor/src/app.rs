@@ -725,7 +725,7 @@ impl App {
                     shortcuts::label(Shortcut::StartStop)
                 ));
             }
-            p.ui.set_hint(hint.join(" · ").into());
+            p.ui.set_hint(hint.join("\n").into());
         }
     }
 
