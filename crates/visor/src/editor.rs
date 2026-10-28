@@ -41,7 +41,7 @@ pub struct EditorWindow {
     save_error: RefCell<Option<String>>,
     /// The edit after the last nudge of a cut's edge, and that edge, so
     /// the nudges that follow join its step to undo.
-    nudged: RefCell<Option<(EditList, bool, Micros)>>,
+    nudged: RefCell<Option<(EditList, bool, Micros, std::time::Instant)>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -233,17 +233,17 @@ impl EditorWindow {
         on!(on_undo, |e| e.undo_redo(true));
         on!(on_redo, |e| e.undo_redo(false));
         on!(on_step, |e, frames| {
-            let pos = e.player.borrow().position() as i64;
-            let to = (pos + i64::from(frames) * e.frame_us() as i64).max(0) as Micros;
+            let pos = e.player.borrow().position();
+            let to = e.frames_from(pos, frames);
             e.control().seek(to);
         });
-        on!(on_preview, |e, f| {
-            let d = e.duration();
-            e.control().preview((f64::from(f) * d as f64) as Micros);
+        on!(on_preview, |e, f, end| {
+            // The frame the edge will show once let go.
+            let t = e.edge_frame(e.nearest_frame(f), end);
+            e.control().preview(t);
         });
         on!(on_cut_edge_moved, |e, index, end, f| {
-            // To the nearest frame.
-            let t = e.frame_time((e.frames_at(f64::from(f) * e.duration() as f64)).round());
+            let t = e.nearest_frame(f);
             e.move_cut_edge(index as usize, end, t, false);
         });
         on!(on_nudge_edge, |e, frames| {
@@ -253,25 +253,23 @@ impl EditorWindow {
             let Some(&cut) = e.cuts().get(index) else {
                 return;
             };
-            // From frame to frame, even from an edge between frames.
-            let at_frame = e.frames_at(at as f64);
-            let from = if frames > 0 {
-                (at_frame + 0.01).floor()
-            } else {
-                (at_frame - 0.01).ceil()
-            };
-            let to = e.frame_time((from + f64::from(frames)).max(0.0));
+            let to = e.frames_from(at, frames);
             // Nudging shrinks a cut to a frame at least, never away.
             if (end && to <= cut.0) || (!end && to >= cut.1) {
                 return;
             }
-            // Held down, the nudges of one edge are one step to undo.
+            // Held down (key repeats come faster than this), the nudges of
+            // one edge are one step to undo.
             let edit = e.project.borrow().edit.clone();
-            let again = e.nudged.borrow().as_ref() == Some(&(edit, end, at));
+            let again = e.nudged.borrow().as_ref().is_some_and(|n| {
+                (&n.0, n.1, n.2) == (&edit, end, at)
+                    && n.3.elapsed() < std::time::Duration::from_millis(400)
+            });
             e.move_cut_edge(index, end, to, again);
-            let nudged = e
-                .picked_edge()
-                .map(|(_, end, t)| (e.project.borrow().edit.clone(), end, t));
+            let nudged = e.picked_edge().map(|(_, end, t)| {
+                let edit = e.project.borrow().edit.clone();
+                (edit, end, t, std::time::Instant::now())
+            });
             *e.nudged.borrow_mut() = nudged;
         });
         on!(on_bubble_changed, |e| {
@@ -442,7 +440,31 @@ impl EditorWindow {
 
     /// When frame `n` starts, on the exact grid so it doesn't drift.
     fn frame_time(&self, n: f64) -> Micros {
-        (n * 1_000_000.0 / self.fps()).round() as Micros
+        (n.max(0.0) * 1_000_000.0 / self.fps()).round() as Micros
+    }
+
+    /// The frame nearest timeline position `f` (0..1).
+    fn nearest_frame(&self, f: f32) -> Micros {
+        let t = f64::from(f) * self.duration() as f64;
+        self.frame_time(self.frames_at(t).round())
+    }
+
+    /// `frames` frames on from `t`, from frame to frame even when `t` is
+    /// between frames.
+    fn frames_from(&self, t: Micros, frames: i32) -> Micros {
+        let at = self.frames_at(t as f64);
+        let from = if frames > 0 {
+            (at + 0.01).floor()
+        } else {
+            (at - 0.01).ceil()
+        };
+        self.frame_time(from + f64::from(frames))
+    }
+
+    /// The frame to show for a cut edge at `t`: the first kept after the
+    /// cut, or the last kept before it.
+    fn edge_frame(&self, t: Micros, end: bool) -> Micros {
+        if end { t } else { self.frames_from(t, -1) }
     }
 
     /// The cut stretches, as the timeline shows them.
@@ -459,20 +481,19 @@ impl EditorWindow {
         let d = self.duration();
         let frame = self.frame_us();
         let cuts = self.cuts();
-        // Less than a frame from the next cut (or either end of the
+        // Less than a frame from the cut it comes to (or either end of the
         // recording) would leave a flash frame: take it all.
         let mut t = t.min(d);
         if end {
-            let next = cuts.get(index + 1).map_or(d, |c| c.0);
-            if t < next && next - t < frame {
+            let next = cuts.iter().map(|c| c.0).filter(|&s| s >= t).min();
+            let next = next.unwrap_or(d);
+            if next - t < frame {
                 t = next;
             }
         } else {
-            let prev = index
-                .checked_sub(1)
-                .and_then(|i| cuts.get(i))
-                .map_or(0, |c| c.1);
-            if t > prev && t - prev < frame {
+            let prev = cuts.iter().map(|c| c.1).filter(|&e| e <= t).max();
+            let prev = prev.unwrap_or(0);
+            if t - prev < frame {
                 t = prev;
             }
         }
@@ -483,15 +504,18 @@ impl EditorWindow {
             .with_cut_edge_moved(d, index, end, t);
         let Some(edit) = moved else { return };
         let steps = self.undo.borrow().len();
-        self.apply(|e| *e = edit);
+        self.apply(|e| *e = edit.clone());
+        // Refused (it would remove everything): leave things as they were.
+        if self.project.borrow().edit != edit {
+            return;
+        }
         if merge && self.undo.borrow().len() > steps {
             self.undo.borrow_mut().pop();
         }
         // Still picked where it now is, unless it went away or joined
         // another cut.
         self.pick_edge(Some((end, t)));
-        let shown = if end { t } else { t.saturating_sub(frame) };
-        self.control().seek(shown);
+        self.control().seek(self.edge_frame(t, end));
     }
 
     /// The cut edge picked for nudging: its cut's index, whether it's the
@@ -623,7 +647,7 @@ impl EditorWindow {
         } else {
             -1.0
         });
-        let at = project.edit.to_output(thumbnail).unwrap_or(0);
+        let at = project.edit.kept_before(thumbnail);
         self.ui.set_thumbnail_label(
             if chosen {
                 format!(

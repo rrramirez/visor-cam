@@ -85,13 +85,19 @@ component CutEdge inherits Rectangle {
     }
     TouchArea {
         property <bool> dragged;
+        // Where it was pressed, on the track (this moves with the edge).
+        property <length> pressed-at;
         mouse-cursor: ew-resize;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 self.dragged = false;
+                self.pressed-at = root.x + self.mouse-x;
                 root.grab();
             }
-            if (event.kind == PointerEventKind.up) { root.release(self.dragged); }
+            // Brought back to where it was grabbed: not moved after all.
+            if (event.kind == PointerEventKind.up) {
+                root.release(self.dragged && abs(root.x + self.mouse-x - self.pressed-at) >= 1px);
+            }
             if (event.kind == PointerEventKind.cancel) { root.cancel(); }
         }
         moved => {
@@ -162,7 +168,7 @@ export component Editor inherits Window {
     }
     function drag-edge(pos: float) {
         root.drag-pos = pos;
-        root.preview(pos);
+        root.preview(pos, root.drag-end);
     }
     // Picks the edge, and moves it there if it was dragged.
     function release-edge(cut: int, end: bool, dragged: bool) {
@@ -203,7 +209,7 @@ export component Editor inherits Window {
     callback toggle-play();
     callback seek(float);
     // Shows a frame even inside a cut.
-    callback preview(float);
+    callback preview(float, bool);
     callback cut-edge-moved(int, bool, float);
     callback nudge-edge(int);
     callback selection-changed(float, float);
