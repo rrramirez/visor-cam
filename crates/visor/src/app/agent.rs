@@ -208,8 +208,13 @@ impl App {
                 Err("Visor is already recording. Stop or discard that recording first.".into()),
             );
         }
-        self.open_panel();
+        if self.quit_after_start.get().is_some() {
+            return send(reply, Err("Visor is quitting.".into()));
+        }
+        // Cleared first: opening the panel reopens the user's devices and
+        // says if one of those fails.
         self.set_panel_error("");
+        self.open_panel();
         if let Err(e) = self.apply_agent_choices(args) {
             return send(reply, Err(e));
         }
@@ -444,7 +449,7 @@ impl App {
             self.choose_camera(index);
             let d = self.devices.borrow();
             if index > 0 && d.camera.is_none() && d.camera_pending.is_none() {
-                return Err(self.device_error("camera"));
+                return Err(self.device_error(Permission::Camera));
             }
         }
         if let Some(index) = c.mic {
@@ -453,7 +458,7 @@ impl App {
             }
             self.choose_mic(index);
             if index > 0 && self.devices.borrow().mic.is_none() {
-                return Err(self.device_error("microphone"));
+                return Err(self.device_error(Permission::Microphone));
             }
         }
         Ok(())
@@ -473,6 +478,7 @@ impl App {
             area_label: ui.get_area_label(),
             system_audio: ui.get_system_audio(),
             audio_app: ui.get_audio_app_index(),
+            saved_system_audio: settings.system_audio,
             last_camera: settings.last_camera.clone(),
             last_mic: settings.last_mic.clone(),
         })
@@ -494,6 +500,7 @@ impl App {
             let mut settings = self.settings.borrow_mut();
             settings.last_camera = before.last_camera;
             settings.last_mic = before.last_mic;
+            settings.system_audio = before.saved_system_audio;
             settings.save();
         }
         // Reopens the camera and mic the user had chosen.
@@ -512,19 +519,27 @@ impl App {
     /// Why the camera or mic chosen for an agent's recording isn't open:
     /// what the panel says (it failed or access is off), or else that
     /// Visor is asking the user for access.
-    pub(super) fn device_error(&self, what: &str) -> String {
+    pub(super) fn device_error(&self, which: Permission) -> String {
+        let (what, arg) = match which {
+            Permission::Camera => ("camera", "camera"),
+            Permission::Microphone => ("microphone", "mic"),
+        };
         let shown = self
             .panel
             .borrow()
             .as_ref()
             .map(|p| p.ui.get_error().to_string())
             .filter(|e| !e.is_empty());
-        let why = shown.unwrap_or_else(|| {
-            format!(
+        let why = shown.unwrap_or_else(|| match access(which) {
+            Access::Asking => format!(
                 "Visor is asking the user for access to the {what}; once they allow it, try again."
-            )
+            ),
+            Access::Off => format!(
+                "The user has turned off {what} access for Visor (System Settings › Privacy & Security)."
+            ),
+            Access::Granted => format!("The {what} couldn't be opened."),
         });
-        format!("{why} To record without it, pass {what} \"none\".")
+        format!("{why} To record without it, pass {arg} \"none\".")
     }
 
     fn agent_pause(&self, pause: bool) -> Result<Value, String> {
@@ -649,6 +664,36 @@ struct Choices {
     mic: Option<usize>,
 }
 
+// Only macOS asks for access; elsewhere it is always granted.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum Access {
+    Granted,
+    Asking,
+    Off,
+}
+
+/// Whether Visor may use the camera or mic (always, outside macOS).
+fn access(which: Permission) -> Access {
+    #[cfg(target_os = "macos")]
+    {
+        use visor_capture::macos_permissions::{Kind, Status, status};
+        let kind = match which {
+            Permission::Camera => Kind::Camera,
+            Permission::Microphone => Kind::Microphone,
+        };
+        match status(kind) {
+            Status::Granted => Access::Granted,
+            Status::NotDetermined => Access::Asking,
+            Status::Denied => Access::Off,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = which;
+        Access::Granted
+    }
+}
+
 /// The panel's choices before an agent's, to put back if those fail.
 struct PanelChoices {
     mode: i32,
@@ -659,6 +704,8 @@ struct PanelChoices {
     area_label: SharedString,
     system_audio: bool,
     audio_app: i32,
+    /// The saved setting, which a start that got far enough changes.
+    saved_system_audio: bool,
     last_camera: Option<String>,
     last_mic: Option<String>,
 }

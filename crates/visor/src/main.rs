@@ -69,23 +69,25 @@ fn main() -> anyhow::Result<()> {
     backend_selector.select()?;
 
     let app = app::App::install(visor_capture::backend()?);
-
-    // The tray needs a running event loop on macOS.
-    slint::Timer::single_shot(Duration::ZERO, move || {
-        app.recover_interrupted();
-        // Only once interrupted recordings are found: an agent's recording
-        // starting before that could be taken for one. Requests wait in the
-        // listener's queue until then.
-        if let instance::Instance::Primary(primary) = instance {
-            primary.serve(|request| {
-                app::post(move |app| match request {
+    // Requests are acknowledged as soon as they arrive, so senders don't
+    // take a slow start for no Visor and send again, but handled only once
+    // startup is done (see `App::when_ready`).
+    if let instance::Instance::Primary(primary) = instance {
+        primary.serve(|request| {
+            app::post(move |app| {
+                app.when_ready(move |app| match request {
                     instance::Request::ShowPanel => app.open_panel(),
                     instance::Request::Background => {}
                     instance::Request::Edit(dir) => app.open_editor(dir),
                     instance::Request::Control(command, reply) => app.agent_command(command, reply),
                 })
-            });
-        }
+            })
+        });
+    }
+
+    // The tray needs a running event loop on macOS.
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        app.recover_interrupted();
         app.create_tray();
         app.create_shortcuts();
         match args {
@@ -94,6 +96,9 @@ fn main() -> anyhow::Result<()> {
             Args::Panel => app.open_panel(),
             Args::Background => {}
         }
+        // After crash recovery has looked for interrupted recordings: an
+        // agent's recording starting before that could be taken for one.
+        app.set_ready();
     });
     slint::run_event_loop_until_quit()?;
     Ok(())

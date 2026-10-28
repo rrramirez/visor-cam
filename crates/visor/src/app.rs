@@ -34,6 +34,9 @@ use crate::{
 
 mod agent;
 
+/// Work waiting for startup to finish (see `App::when_ready`).
+type Deferred = Box<dyn FnOnce(&App)>;
+
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
 }
@@ -80,7 +83,12 @@ pub struct App {
     polling: std::cell::Cell<bool>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
+    /// Quit once this start (cancelled by quitting) has resolved.
+    quit_after_start: std::cell::Cell<Option<u64>>,
     agent: RefCell<agent::AgentState>,
+    /// Startup is done (see `when_ready`); until then, what to run after.
+    ready: std::cell::Cell<bool>,
+    deferred: RefCell<Vec<Deferred>>,
 }
 
 struct Highlight {
@@ -165,10 +173,31 @@ impl App {
             next_start_id: std::cell::Cell::new(1),
             polling: std::cell::Cell::new(false),
             quit_pending: std::cell::Cell::new(false),
+            quit_after_start: std::cell::Cell::new(None),
             agent: RefCell::default(),
+            ready: std::cell::Cell::new(false),
+            deferred: RefCell::default(),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
         app
+    }
+
+    /// Runs `f` now if startup is done, else once it is.
+    pub fn when_ready(&self, f: impl FnOnce(&App) + 'static) {
+        if self.ready.get() {
+            f(self);
+        } else {
+            self.deferred.borrow_mut().push(Box::new(f));
+        }
+    }
+
+    /// Marks startup done and runs what waited for it.
+    pub fn set_ready(&self) {
+        self.ready.set(true);
+        let deferred = std::mem::take(&mut *self.deferred.borrow_mut());
+        for f in deferred {
+            f(self);
+        }
     }
 
     // ---- tray -------------------------------------------------------------
@@ -398,14 +427,39 @@ impl App {
     }
 
     fn quit(&self) {
-        if matches!(
-            *self.session.borrow(),
-            Session::Stopping | Session::Starting { recorder: None, .. }
-        ) {
-            // A recording is being finalized, or its capture is still
-            // starting (and would recreate its folder if left behind):
-            // quit once it's saved, or started and discarded.
+        if matches!(*self.session.borrow(), Session::Stopping) {
+            // A recording is being finalized; quit once it's saved.
             self.quit_pending.set(true);
+            return;
+        }
+        if self.quit_after_start.get().is_some() {
+            return; // Already quitting, once a start resolves.
+        }
+        let starting = match &*self.session.borrow() {
+            Session::Starting {
+                id, recorder: None, ..
+            } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = starting {
+            // Capture is still starting and would recreate its folder if
+            // left behind: cancel it now, and quit once it has started and
+            // been discarded, or after a few seconds if it never does.
+            if let Session::Starting {
+                countdown: Some((ui, _)),
+                ..
+            } = std::mem::replace(&mut *self.session.borrow_mut(), Session::Idle)
+            {
+                let _ = ui.hide();
+            }
+            self.agent_start_finished(Err("Visor is quitting.".into()));
+            self.quit_after_start.set(Some(id));
+            slint::Timer::single_shot(Duration::from_secs(5), || {
+                let app = app();
+                if app.quit_after_start.take().is_some() {
+                    app.quit();
+                }
+            });
             return;
         }
         // Name the folders of recordings still open: once, without
@@ -1277,16 +1331,16 @@ impl App {
     }
 
     /// A camera or mic chosen in the panel that isn't open.
-    fn missing_device(&self) -> Option<&'static str> {
+    fn missing_device(&self) -> Option<Permission> {
         let devices = self.devices.borrow();
         if self.panel_index(Permission::Camera).is_some_and(|i| i > 0) && devices.camera.is_none() {
-            Some("camera")
+            Some(Permission::Camera)
         } else if self
             .panel_index(Permission::Microphone)
             .is_some_and(|i| i > 0)
             && devices.mic.is_none()
         {
-            Some("microphone")
+            Some(Permission::Microphone)
         } else {
             None
         }
@@ -1418,18 +1472,13 @@ impl App {
     }
 
     fn on_recorder_ready(&self, start_id: u64, result: anyhow::Result<Recorder>) {
-        if self.quit_pending.get() {
-            // Quitting: nothing was recorded yet, so discard it and go on.
+        if self.quit_after_start.get() == Some(start_id) {
+            // Quit was chosen while this started: discard it and go on.
             if let Ok(r) = result {
                 let _ = r.discard();
             }
-            let current =
-                matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
-            if current {
-                *self.session.borrow_mut() = Session::Idle;
-                self.quit();
-            }
-            return;
+            self.quit_after_start.set(None);
+            return self.quit();
         }
         let current =
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
