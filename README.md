@@ -69,7 +69,8 @@ that many seconds of recorded time.
 
 Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
 you: name the recording, start it, mark each step, pause while they set
-something up or retry a step, and stop. Turn on **Let AI agents control recording** in Preferences (it's off
+something up or retry a step, stop, and cut what went wrong before handing
+it to you in the editor. Turn on **Let AI agents control recording** in Preferences (it's off
 until you do). Recordings an agent starts say *Agent* on the control bar,
 and your own controls and shortcuts keep working.
 
@@ -91,10 +92,17 @@ visor pause; visor resume
 visor stop                                   # prints the folder and markers
 visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
+visor cut 12 19.5                            # remove 0:12–0:19.5 (recorded time)
+visor trim 2 1:05                            # keep only 0:02–1:05
+visor restore                                # undo all cuts
+visor open                                   # open it in the editor
 visor help                                   # every option
 ```
 
-Either way Visor starts in the background if it isn't running. Replies are
+Edits apply to the recording the agent last stopped (or `--folder`), in
+recorded time, so they line up with marker times. If the recording is open
+in the editor, an agent's cut shows there and **⌘Z** undoes it. Either way
+Visor starts in the background if it isn't running. Replies are
 JSON. Commands reach Visor through a local port that only your user account
 can use (its token is in your settings folder).
 

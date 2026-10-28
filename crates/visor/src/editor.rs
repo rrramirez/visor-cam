@@ -37,6 +37,8 @@ pub struct EditorWindow {
     /// when idle so an open editor doesn't keep waking the CPU.
     timer: Timer,
     idle_ticks: Cell<u32>,
+    /// Why the last save failed, for an agent's edit to report.
+    save_error: RefCell<Option<String>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -150,6 +152,7 @@ impl EditorWindow {
                 last_export: RefCell::default(),
                 timer,
                 idle_ticks: Cell::new(0),
+                save_error: RefCell::default(),
                 jobs: Jobs::default(),
             }
         });
@@ -377,7 +380,7 @@ impl EditorWindow {
         self.player.borrow_mut()
     }
 
-    fn duration(&self) -> Micros {
+    pub fn duration(&self) -> Micros {
         self.project.borrow().duration_us.max(1)
     }
 
@@ -422,7 +425,6 @@ impl EditorWindow {
         let frame = self.frame_us();
         // On a frame, except the very end of the recording.
         let t = ((t + frame / 2) / frame * frame).min(d);
-        let before = self.cuts().len();
         let moved = self
             .project
             .borrow()
@@ -430,12 +432,28 @@ impl EditorWindow {
             .with_cut_edge_moved(d, index, end, t);
         let Some(edit) = moved else { return };
         self.apply(|e| *e = edit);
-        // The cuts were renumbered: nothing is picked any more.
-        if self.cuts().len() != before {
-            self.ui.set_active_edge(-1);
-        }
         let shown = if end { t } else { t.saturating_sub(frame) };
         self.control().seek(shown);
+    }
+
+    /// The project as edited here.
+    pub fn project(&self) -> Project {
+        self.project.borrow().clone()
+    }
+
+    /// Sets an agent's edit as if it were made here, so it shows at once
+    /// and the user can undo it. Fails if it couldn't be saved.
+    pub fn apply_agent_edit(&self, edit: EditList) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.apply(|e| *e = edit);
+        // Its cuts may be numbered differently: no edge stays picked.
+        self.ui.set_active_edge(-1);
+        match self.save_error.borrow_mut().take() {
+            Some(e) => Err(format!(
+                "The change shows in the editor but couldn't be saved: {e}"
+            )),
+            None => Ok(self.project()),
+        }
     }
 
     fn apply(&self, change: impl FnOnce(&mut EditList)) {
@@ -471,7 +489,12 @@ impl EditorWindow {
     }
 
     fn set_edit(&self, edit: EditList) {
+        let cuts = self.cuts().len();
         self.project.borrow_mut().edit = edit.clone();
+        // The cuts were renumbered: the picked edge would be another's.
+        if self.cuts().len() != cuts {
+            self.ui.set_active_edge(-1);
+        }
         self.control().set_edit(edit);
         self.save();
         self.refresh_edit_ui();
@@ -480,6 +503,7 @@ impl EditorWindow {
     fn save(&self) {
         if let Err(e) = self.project.borrow().save(&self.dir) {
             tracing::error!("saving project.json failed: {e}");
+            *self.save_error.borrow_mut() = Some(e.to_string());
         }
     }
 

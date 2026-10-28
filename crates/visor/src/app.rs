@@ -1752,6 +1752,9 @@ impl App {
     }
 
     fn show_editor(&self, dir: PathBuf, name_first: bool) {
+        // One path per folder, however it was reached (symlinks, /var vs
+        // /private/var), so a recording never has two editors.
+        let dir = dir.canonicalize().unwrap_or(dir);
         if let Some(existing) = self.editors.borrow().iter().find(|e| e.dir() == dir) {
             existing.show();
             platform::activate();
@@ -1816,6 +1819,7 @@ impl App {
         match visor_core::project::rename_to_title(dir, root) {
             Ok(Some(to)) => {
                 tracing::info!("renamed {} to {}", dir.display(), to.display());
+                self.agent_folder_renamed(dir, &to);
                 self.refresh_tray();
                 false
             }

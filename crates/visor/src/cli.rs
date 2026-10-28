@@ -35,6 +35,13 @@ Control the running Visor (turn on agent control in Preferences first):
   discard                     stop and delete the recording
   mcp                         serve these commands to agents over MCP (stdio)
 
+Edit the recording last stopped, or the one given with --folder FOLDER.
+Times are recorded seconds (or M:SS), as marks and status show them:
+  cut START END               remove START to END
+  trim START END              keep only START to END
+  restore                     undo all cuts
+  open                        open it in the editor
+
 Replies are JSON. Options left out keep what the recorder panel has.";
 
 /// Runs a command-line command, if `args` is one. Returns the exit code.
@@ -65,6 +72,14 @@ pub fn run(args: &[String]) -> Option<i32> {
             "open_editor": rest.iter().any(|a| a == "--open-editor"),
         }),
         "discard" => json!({"command": "discard_recording"}),
+        "cut" | "trim" | "restore" | "open" => match edit_args(first, rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor {first}: {e}\n\n{USAGE}");
+                return Some(2);
+            }
+        },
         _ => return None,
     };
     attach_console();
@@ -149,18 +164,106 @@ fn start_args(args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
+fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
+    let command_name = match name {
+        "cut" => "cut_recording",
+        "trim" => "trim_recording",
+        "restore" => "restore_recording",
+        _ => "open_recording",
+    };
+    let mut command = json!({"command": command_name});
+    let mut times = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--folder" {
+            command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+        } else {
+            times.push(seconds_arg(arg)?);
+        }
+    }
+    match (name, times.as_slice()) {
+        ("cut" | "trim", [start, end]) => {
+            command["start_seconds"] = (*start).into();
+            command["end_seconds"] = (*end).into();
+        }
+        ("cut" | "trim", _) => return Err("give a START and an END time".into()),
+        (_, []) => {}
+        _ => return Err("takes no times".into()),
+    }
+    Ok(command)
+}
+
+/// Seconds, or minutes and seconds as M:SS (seconds below 60).
+fn seconds_arg(s: &str) -> Result<f64, String> {
+    let number = |n: &str| {
+        n.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n >= 0.0 && !n.is_sign_negative())
+    };
+    let parsed = match s.split_once(':') {
+        Some((m, sec)) => m
+            .parse::<u32>()
+            .ok()
+            .zip(number(sec).filter(|sec| *sec < 60.0))
+            .map(|(m, sec)| f64::from(m) * 60.0 + sec),
+        None => number(s),
+    };
+    parsed.ok_or_else(|| format!("\"{s}\" isn't a time (seconds, or M:SS)"))
+}
+
 /// Sends a command to the running Visor, starting Visor first for the
 /// commands that need it. Always returns a reply object with `ok`.
 pub fn call(command: &Value) -> Value {
+    let command = &with_absolute_folder(command);
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
             Some("start_recording" | "list_sources") => launch_and_call(command),
+            // A fresh Visor knows no last recording: only a named one helps.
+            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording")
+                if command.get("folder").is_some() =>
+            {
+                launch_and_call(command)
+            }
+            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording") => {
+                json!({
+                    "ok": false,
+                    "error": "Visor isn't running, so it has no last recording; say which with a folder.",
+                })
+            }
             Some("status") => json!({"ok": true, "state": "not_running"}),
             _ => json!({"ok": false, "error": "Visor isn't running, so it isn't recording."}),
         },
         Err(e) => json!({"ok": false, "error": e.to_string()}),
     }
+}
+
+/// `command` with its folder resolved here, since Visor runs in its own
+/// directory, a leading `~` expanded, as an agent may write one with no
+/// shell to expand it, and a null folder left out, as Visor reads it.
+fn with_absolute_folder(command: &Value) -> Value {
+    let mut command = command.clone();
+    if let Some(args) = command.as_object_mut() {
+        match args.get("folder") {
+            Some(Value::Null) => {
+                args.remove("folder");
+            }
+            Some(Value::String(folder)) => {
+                let home = |rest: &str| dirs::home_dir().map(|h| h.join(rest));
+                let folder = match folder.strip_prefix("~/") {
+                    Some(rest) => home(rest),
+                    None if folder == "~" => home(""),
+                    None => None,
+                }
+                .unwrap_or_else(|| folder.into());
+                if let Ok(folder) = std::path::absolute(folder) {
+                    args.insert("folder".into(), folder.display().to_string().into());
+                }
+            }
+            _ => {}
+        }
+    }
+    command
 }
 
 fn launch_and_call(command: &Value) -> Value {
@@ -267,6 +370,43 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn edit_commands_take_times_and_a_folder() {
+        assert_eq!(
+            edit_args("cut", &args("3 1:10.5 --folder /tmp/Demo")).unwrap(),
+            json!({
+                "command": "cut_recording",
+                "start_seconds": 3.0,
+                "end_seconds": 70.5,
+                "folder": "/tmp/Demo",
+            })
+        );
+        assert_eq!(
+            edit_args("open", &[]).unwrap(),
+            json!({"command": "open_recording"})
+        );
+        assert!(edit_args("trim", &args("5")).is_err());
+        for bad in ["-0:30", "1:-5", "1:75", "-3", "1:2:3", "x:10"] {
+            assert!(seconds_arg(bad).is_err(), "{bad}");
+        }
+        assert_eq!(seconds_arg("0:59.5"), Ok(59.5));
+        let relative = with_absolute_folder(&edit_args("open", &args("--folder Demo")).unwrap());
+        assert!(std::path::Path::new(relative["folder"].as_str().unwrap()).is_absolute());
+        let null = with_absolute_folder(&json!({"command": "open_recording", "folder": null}));
+        assert_eq!(null, json!({"command": "open_recording"}));
+        let home = with_absolute_folder(&json!({"folder": "~/Movies/Visor/Demo"}));
+        assert_eq!(
+            home["folder"].as_str().unwrap(),
+            dirs::home_dir()
+                .unwrap()
+                .join("Movies/Visor/Demo")
+                .display()
+                .to_string()
+        );
+        assert!(edit_args("cut", &args("a b")).is_err());
+        assert!(edit_args("restore", &args("5")).is_err());
     }
 
     #[test]
