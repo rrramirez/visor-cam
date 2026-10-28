@@ -17,7 +17,7 @@ use visor_media::{ExportFormat, ExportOptions};
 use crate::app::app;
 use crate::platform;
 use crate::util;
-use crate::{Editor, Region, Thumb};
+use crate::{Editor, MarkerMark, Region, Thumb};
 
 const THUMBNAILS: usize = 24;
 const WAVE_BUCKETS: usize = 600;
@@ -97,6 +97,20 @@ impl EditorWindow {
         ui.set_bubble_size(o.size as f32);
         ui.set_bubble_mirror(o.mirror);
         ui.set_speed(project.speed as f32);
+        let d = project.duration_us.max(1) as f64;
+        let markers: Vec<MarkerMark> = project
+            .markers
+            .iter()
+            .map(|m| MarkerMark {
+                pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
+                label: match m.text.as_str() {
+                    "" => util::clock(m.at_us),
+                    text => format!("{}  {text}", util::clock(m.at_us)),
+                }
+                .into(),
+            })
+            .collect();
+        ui.set_markers(ModelRc::new(VecModel::from(markers)));
         {
             let folded = app().settings.borrow().folded_sections.clone();
             let open = |name: &str| !folded.iter().any(|s| s == name);

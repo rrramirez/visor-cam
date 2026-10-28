@@ -6,13 +6,18 @@
 //!   visor --record [--stop-after S]
 //!                                 start recording right away with the saved
 //!                                 preferences (optionally stopping after S s)
+//!   visor <command>               control the running Visor, e.g. for an
+//!                                 agent (see `cli`); `visor mcp` serves
+//!                                 the same over MCP
 
 // A windowed app on Windows (no console window); logs go to visor.log.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod editor;
 mod instance;
+mod mcp;
 mod platform;
 mod settings;
 mod shortcuts;
@@ -28,6 +33,10 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 slint::include_modules!();
 
 fn main() -> anyhow::Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run(&argv) {
+        std::process::exit(code);
+    }
     init_logging();
     log_panics();
     let args = parse_args();
@@ -35,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     // Launching Visor while it runs shows the running one instead.
     let request = match &args {
         Args::Edit(dir) => instance::Request::Edit(dir.clone()),
+        Args::Background => instance::Request::Background,
         _ => instance::Request::ShowPanel,
     };
     let instance = instance::claim(&request);
@@ -59,11 +69,18 @@ fn main() -> anyhow::Result<()> {
     backend_selector.select()?;
 
     let app = app::App::install(visor_capture::backend()?);
+    // Requests are acknowledged as soon as they arrive, so senders don't
+    // take a slow start for no Visor and send again, but handled only once
+    // startup is done (see `App::when_ready`).
     if let instance::Instance::Primary(primary) = instance {
         primary.serve(|request| {
-            app::post(move |app| match request {
-                instance::Request::ShowPanel => app.open_panel(),
-                instance::Request::Edit(dir) => app.open_editor(dir),
+            app::post(move |app| {
+                app.when_ready(move |app| match request {
+                    instance::Request::ShowPanel => app.open_panel(),
+                    instance::Request::Background => {}
+                    instance::Request::Edit(dir) => app.open_editor(dir),
+                    instance::Request::Control(command, reply) => app.agent_command(command, reply),
+                })
             })
         });
     }
@@ -77,7 +94,11 @@ fn main() -> anyhow::Result<()> {
             Args::Edit(dir) => app.open_editor(dir),
             Args::Record { stop_after } => app.record_when_ready(stop_after),
             Args::Panel => app.open_panel(),
+            Args::Background => {}
         }
+        // After crash recovery has looked for interrupted recordings: an
+        // agent's recording starting before that could be taken for one.
+        app.set_ready();
     });
     slint::run_event_loop_until_quit()?;
     Ok(())
@@ -85,8 +106,12 @@ fn main() -> anyhow::Result<()> {
 
 enum Args {
     Panel,
+    /// Started for an agent: just the menu bar icon.
+    Background,
     Edit(PathBuf),
-    Record { stop_after: Option<u64> },
+    Record {
+        stop_after: Option<u64>,
+    },
 }
 
 fn parse_args() -> Args {
@@ -108,14 +133,13 @@ fn parse_args() -> Args {
                 let secs = args.next().and_then(|s| s.parse().ok());
                 parsed = Args::Record { stop_after: secs };
             }
+            "--background" => parsed = Args::Background,
             "--version" => {
                 println!("visor {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                println!(
-                    "usage: visor [--edit <recording folder> | --record [--stop-after SECONDS]]"
-                );
+                cli::run(&["help".into()]);
                 std::process::exit(0);
             }
             _ => {}

@@ -62,6 +62,39 @@ Command line: `visor --edit <recording folder>` opens a recording;
 preferences as soon as the saved camera is ready, optionally stopping after
 that many seconds of recorded time.
 
+## Letting AI agents record
+
+Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
+you: name the recording, start it, mark each step, pause while they set
+something up or retry a step, and stop. Turn on **Let AI agents control recording** in Preferences (it's off
+until you do). Recordings an agent starts say *Agent* on the control bar,
+and your own controls and shortcuts keep working.
+
+Add Visor to the agent as an MCP server. The command is shown in
+Preferences; for the installed app on macOS, with Claude Code:
+
+```sh
+claude mcp add visor -- /Applications/Visor.app/Contents/MacOS/visor mcp
+```
+
+Other agents take the same command and the `mcp` argument in their MCP
+settings. Agents that run shell commands can use the command line instead:
+
+```sh
+visor sources                                # what can be recorded
+visor start --window "Safari" --name "Safari tour"  # returns once recording
+visor mark "Step 2: open settings"           # shown on the editor's timeline
+visor pause; visor resume
+visor stop                                   # prints the folder and markers
+visor stop --open-editor                     # ...and opens it for you to edit
+visor discard
+visor help                                   # every option
+```
+
+Either way Visor starts in the background if it isn't running. Replies are
+JSON. Commands reach Visor through a local port that only your user account
+can use (its token is in your settings folder).
+
 ## Troubleshooting
 
 - **Logs:** `~/Library/Logs/Visor/visor.log`. Crashes inside Visor (panics)

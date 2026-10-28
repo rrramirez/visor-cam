@@ -93,6 +93,17 @@ pub struct Project {
     /// the first frame kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_us: Option<Micros>,
+    /// Points of interest noted while recording, in source time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+/// A note at a moment of the recording, e.g. "Step 2: open settings".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub at_us: Micros,
+    #[serde(default)]
+    pub text: String,
 }
 
 fn speed_default() -> f64 {
@@ -127,6 +138,7 @@ impl Project {
             camera_overlay: CameraOverlay::default(),
             speed: 1.0,
             thumbnail_us: None,
+            markers: Vec::new(),
         }
     }
 
@@ -281,16 +293,35 @@ pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     if dir.file_name() == Some(name.as_ref()) {
         return Ok(None);
     }
-    let mut target = root.join(&name);
-    let mut n = 2;
     // Taken unless it is this folder under another case (on case-insensitive
     // file systems), which a rename can still change.
-    while target.symlink_metadata().is_ok() && target.canonicalize().ok().as_ref() != Some(&dir) {
-        target = root.join(format!("{name} {n}"));
-        n += 1;
-    }
+    let target = numbered(&name)
+        .map(|n| root.join(n))
+        .find(|t| t.symlink_metadata().is_err() || t.canonicalize().ok().as_ref() == Some(&dir))
+        .expect("numbered names never run out");
     fs::rename(&dir, &target)?;
     Ok(Some(target))
+}
+
+/// `name`, then `name 2`, `name 3`…: the names to try when one is taken.
+pub fn numbered(name: &str) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(name.to_string()).chain((2u64..).map(move |n| format!("{name} {n}")))
+}
+
+/// Creates a new folder in `root` named `name`, or the first free name
+/// from [`numbered`]. Creating it (rather than checking that the name is
+/// free) claims it, so two recordings can't end up in one folder.
+pub fn create_unique_dir(root: &Path, name: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    for candidate in numbered(name) {
+        let dir = root.join(candidate);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("numbered names never run out")
 }
 
 #[cfg(test)]
@@ -380,6 +411,10 @@ mod tests {
             fps: Some(60),
         });
         p.edit.cut(2_000_000, 3_000_000);
+        p.markers.push(Marker {
+            at_us: 4_000_000,
+            text: "Step 2: open settings".into(),
+        });
         p.save(&dir).unwrap();
 
         assert_eq!(Project::load(&dir).unwrap(), p);

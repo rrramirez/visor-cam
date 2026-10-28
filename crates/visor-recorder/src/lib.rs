@@ -44,12 +44,23 @@ struct Worker {
     handle: JoinHandle<anyhow::Result<()>>,
 }
 
+/// Marker saves run in the background (see [`Recorder::mark`]); this keeps
+/// them from overwriting a newer save, or the final one at stop.
+#[derive(Default)]
+struct Saves {
+    /// Markers in the newest project.json written.
+    markers: usize,
+    /// The recording stopped or was discarded.
+    done: bool,
+}
+
 pub struct Recorder {
     clock: ClockRef,
     session: Option<ScreenSession>,
     workers: Vec<Worker>,
     dir: PathBuf,
     project: Project,
+    saves: Arc<Mutex<Saves>>,
     // Keep the shared streams alive for as long as we record from them.
     _mic: Option<Arc<MicStream>>,
     _camera: Option<Arc<CameraStream>>,
@@ -169,6 +180,7 @@ impl Recorder {
             workers,
             dir,
             project,
+            saves: Arc::default(),
             _mic: mic,
             _camera: camera,
         })
@@ -191,6 +203,32 @@ impl Recorder {
         self.clock.lock().unwrap().elapsed(host_now())
     }
 
+    /// Notes this moment of the recording. Returns the recorded time it
+    /// marks.
+    pub fn mark(&mut self, text: impl Into<String>) -> Micros {
+        let at_us = self.elapsed();
+        self.project.markers.push(visor_core::Marker {
+            at_us,
+            text: text.into(),
+        });
+        // Saved now (still with no duration) so a recording recovered after
+        // a crash keeps its markers; in the background, as the folder may be
+        // slow to write to.
+        let (project, dir, saves) = (self.project.clone(), self.dir.clone(), self.saves.clone());
+        thread::spawn(move || {
+            let mut saves = saves.lock().unwrap_or_else(|e| e.into_inner());
+            let markers = project.markers.len();
+            if saves.done || saves.markers >= markers {
+                return;
+            }
+            match project.save(&dir) {
+                Ok(()) => saves.markers = markers,
+                Err(e) => tracing::warn!("could not save the marker: {e}"),
+            }
+        });
+        at_us
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -211,13 +249,18 @@ impl Recorder {
         }
         self.project.duration_us = duration;
         self.project.edit = visor_core::EditList::full(duration);
-        self.project.save(&self.dir)?;
+        {
+            let mut saves = self.saves.lock().unwrap_or_else(|e| e.into_inner());
+            saves.done = true;
+            self.project.save(&self.dir)?;
+        }
         tracing::info!(duration_ms = duration / 1000, "recording saved");
         Ok((std::mem::take(&mut self.dir), self.project.clone()))
     }
 
     /// Stops recording and deletes the project folder.
     pub fn discard(mut self) -> anyhow::Result<()> {
+        self.saves.lock().unwrap_or_else(|e| e.into_inner()).done = true;
         self.join_workers(host_now())?;
         std::fs::remove_dir_all(&self.dir)
             .with_context(|| format!("removing {}", self.dir.display()))
@@ -257,28 +300,22 @@ impl Drop for Recorder {
     }
 }
 
-/// A new folder under `root` named after the local time and title, e.g.
-/// `2026-10-20 14.03.27 Recording`.
-pub fn new_project_dir(root: &Path, title: &str) -> PathBuf {
-    let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
-    let safe: String = title
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | '\\' | ':') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let base = root.join(format!("{stamp} {}", safe.trim()));
-    let mut dir = base.clone();
-    let mut n = 2;
-    while dir.exists() {
-        dir = PathBuf::from(format!("{} {n}", base.display()));
-        n += 1;
+/// Creates a folder under `root` named after a recording's name, as the
+/// editor names folders (`Demo`, then `Demo 2`…), or after the time if the
+/// name makes no folder name.
+pub fn named_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
+    match visor_core::project::folder_name(title) {
+        Some(name) => visor_core::project::create_unique_dir(root, &name),
+        None => new_project_dir(root, "Recording"),
     }
-    dir
+}
+
+/// Creates a folder under `root` named after the local time and title,
+/// e.g. `2026-10-20 14.03.27 Recording`.
+pub fn new_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S").to_string();
+    let name = visor_core::project::folder_name(&format!("{stamp} {title}")).unwrap_or(stamp);
+    visor_core::project::create_unique_dir(root, &name)
 }
 
 fn spawn_video<F: Borrow<VideoFrame> + Send + 'static>(
@@ -381,18 +418,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_dirs_are_unique_and_sanitized() {
+    fn project_dirs_are_created_unique_and_sanitized() {
         let root = std::env::temp_dir().join(format!("visor-dirs-{}", std::process::id()));
-        let a = new_project_dir(&root, "Demo: a/b");
+        let a = new_project_dir(&root, "Demo: a/b").unwrap();
+        assert!(a.is_dir());
         assert!(
             a.file_name()
                 .unwrap()
                 .to_string_lossy()
                 .ends_with("Demo- a-b")
         );
-        std::fs::create_dir_all(&a).unwrap();
-        let b = new_project_dir(&root, "Demo: a/b");
+        let b = new_project_dir(&root, "Demo: a/b").unwrap();
         assert_ne!(a, b);
+        let named = named_project_dir(&root, "Safari demo: v2").unwrap();
+        assert_eq!(named, root.join("Safari demo- v2"));
+        // Taken as soon as it's chosen, before anything is recorded in it.
+        assert_eq!(
+            named_project_dir(&root, "Safari demo: v2").unwrap(),
+            root.join("Safari demo- v2 2")
+        );
+        assert!(
+            named_project_dir(&root, " .. ")
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(" Recording")
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

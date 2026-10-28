@@ -20,7 +20,7 @@ use visor_capture::mic::{self, MicDevice, MicStream};
 use visor_capture::{Backend, DisplayInfo, Shareable};
 use visor_core::project::BubbleShape;
 use visor_core::{AudioConfig, CameraOverlay, CaptureTarget, RecordingConfig, Rect};
-use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
+use visor_recorder::{Recorder, RecorderOptions, named_project_dir, new_project_dir};
 
 use crate::editor::{EditorWindow, Jobs};
 use crate::platform::{self, Overlay};
@@ -31,6 +31,11 @@ use crate::util;
 use crate::{
     AreaSelector, CameraBubble, ControlBar, Countdown, Preferences, RecorderPanel, ScreenHighlight,
 };
+
+mod agent;
+
+/// Work waiting for startup to finish (see `App::when_ready`).
+type Deferred = Box<dyn FnOnce(&App)>;
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -78,6 +83,12 @@ pub struct App {
     polling: std::cell::Cell<bool>,
     /// Quit once the recording being finalized is saved.
     quit_pending: std::cell::Cell<bool>,
+    /// Quit once this start (cancelled by quitting) has resolved.
+    quit_after_start: std::cell::Cell<Option<u64>>,
+    agent: RefCell<agent::AgentState>,
+    /// Startup is done (see `when_ready`); until then, what to run after.
+    ready: std::cell::Cell<bool>,
+    deferred: RefCell<Vec<Deferred>>,
 }
 
 struct Highlight {
@@ -128,11 +139,14 @@ enum Session {
         /// What is being captured, in global logical coordinates, when that
         /// is a fixed region (a display or an area).
         captured: Option<Rect>,
+        /// Started by an agent.
+        agent: Option<agent::AgentRun>,
     },
     Recording {
         recorder: Recorder,
         bar: ControlBar,
         captured: Option<Rect>,
+        agent: Option<agent::AgentRun>,
         _timer: Timer,
     },
     Stopping,
@@ -159,9 +173,31 @@ impl App {
             next_start_id: std::cell::Cell::new(1),
             polling: std::cell::Cell::new(false),
             quit_pending: std::cell::Cell::new(false),
+            quit_after_start: std::cell::Cell::new(None),
+            agent: RefCell::default(),
+            ready: std::cell::Cell::new(false),
+            deferred: RefCell::default(),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
         app
+    }
+
+    /// Runs `f` now if startup is done, else once it is.
+    pub fn when_ready(&self, f: impl FnOnce(&App) + 'static) {
+        if self.ready.get() {
+            f(self);
+        } else {
+            self.deferred.borrow_mut().push(Box::new(f));
+        }
+    }
+
+    /// Marks startup done and runs what waited for it.
+    pub fn set_ready(&self) {
+        self.ready.set(true);
+        let deferred = std::mem::take(&mut *self.deferred.borrow_mut());
+        for f in deferred {
+            f(self);
+        }
     }
 
     // ---- tray -------------------------------------------------------------
@@ -230,7 +266,7 @@ impl App {
         };
         match shortcut {
             // A second press while waiting for the devices backs out.
-            Shortcut::StartStop if idle && self.cancel_pending_start() => {}
+            Shortcut::StartStop if idle && self.abandon_pending_start() => {}
             Shortcut::StartStop if idle => self.record_when_ready(None),
             // Stopping during the countdown cancels, as the bar does.
             Shortcut::StartStop if recording || starting => self.stop_recording(false),
@@ -269,7 +305,7 @@ impl App {
                 }
             } else if started.elapsed() > Duration::from_secs(15) {
                 app.cancel_pending_start();
-                app.set_panel_error("The camera didn't start; try again.");
+                app.start_failed("The camera didn't start; try again.");
             }
         });
         *self.pending_start.borrow_mut() = Some(timer);
@@ -285,6 +321,16 @@ impl App {
         let timer = self.pending_start.borrow_mut().take();
         slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
         true
+    }
+
+    /// Cancels a start waiting for the devices, telling an agent that asked
+    /// for it. Returns whether one was waiting.
+    fn abandon_pending_start(&self) -> bool {
+        let cancelled = self.cancel_pending_start();
+        if cancelled {
+            self.agent_start_finished(Err("The recording was cancelled.".into()));
+        }
+        cancelled
     }
 
     /// Stops the recording after `secs` seconds of recorded time.
@@ -384,6 +430,36 @@ impl App {
         if matches!(*self.session.borrow(), Session::Stopping) {
             // A recording is being finalized; quit once it's saved.
             self.quit_pending.set(true);
+            return;
+        }
+        if self.quit_after_start.get().is_some() {
+            return; // Already quitting, once a start resolves.
+        }
+        let starting = match &*self.session.borrow() {
+            Session::Starting {
+                id, recorder: None, ..
+            } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = starting {
+            // Capture is still starting and would recreate its folder if
+            // left behind: cancel it now, and quit once it has started and
+            // been discarded, or after a few seconds if it never does.
+            if let Session::Starting {
+                countdown: Some((ui, _)),
+                ..
+            } = std::mem::replace(&mut *self.session.borrow_mut(), Session::Idle)
+            {
+                let _ = ui.hide();
+            }
+            self.agent_start_finished(Err("Visor is quitting.".into()));
+            self.quit_after_start.set(Some(id));
+            slint::Timer::single_shot(Duration::from_secs(5), || {
+                let app = app();
+                if app.quit_after_start.take().is_some() {
+                    app.quit();
+                }
+            });
             return;
         }
         // Name the folders of recordings still open: once, without
@@ -593,7 +669,7 @@ impl App {
             // Closing the panel releases the camera and mic, and backs out of
             // a start that was waiting for them.
             let app = app();
-            app.cancel_pending_start();
+            app.abandon_pending_start();
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
             }
@@ -694,12 +770,7 @@ impl App {
                 d.name, d.frame.width as u32, d.frame.height as u32
             )
         })));
-        ui.set_windows(strings(
-            sources
-                .windows
-                .iter()
-                .map(|w| format!("{} — {}", w.app, w.title)),
-        ));
+        ui.set_windows(strings(sources.windows.iter().map(window_label)));
         ui.set_apps(strings(sources.apps.iter().map(|a| a.name.clone())));
         ui.set_audio_apps(strings(
             std::iter::once("All apps".to_string())
@@ -825,7 +896,13 @@ impl App {
         {
             return;
         }
-        if !self.ensure_permission(Permission::Microphone, move |app| app.choose_mic(index)) {
+        // Once allowed, only if this mic is still the one chosen.
+        let retry = move |app: &App| {
+            if app.panel_index(Permission::Microphone) == Some(index) {
+                app.choose_mic(index);
+            }
+        };
+        if !self.ensure_permission(Permission::Microphone, retry) {
             return;
         }
         match MicStream::open(Some(&id)) {
@@ -865,7 +942,13 @@ impl App {
         {
             return;
         }
-        if !self.ensure_permission(Permission::Camera, move |app| app.choose_camera(index)) {
+        // Once allowed, only if this camera is still the one chosen.
+        let retry = move |app: &App| {
+            if app.panel_index(Permission::Camera) == Some(index) {
+                app.choose_camera(index);
+            }
+        };
+        if !self.ensure_permission(Permission::Camera, retry) {
             return;
         }
         self.devices.borrow_mut().camera_pending = Some(id.clone());
@@ -1054,6 +1137,17 @@ impl App {
         }
     }
 
+    /// The panel's camera or mic choice (0 is none).
+    fn panel_index(&self, which: Permission) -> Option<usize> {
+        let panel = self.panel.borrow();
+        let ui = &panel.as_ref()?.ui;
+        let index = match which {
+            Permission::Camera => ui.get_camera_index(),
+            Permission::Microphone => ui.get_mic_index(),
+        };
+        usize::try_from(index).ok()
+    }
+
     fn main_display(&self) -> Option<DisplayInfo> {
         let from_panel = self
             .panel
@@ -1102,13 +1196,7 @@ impl App {
                 let _ = area.hide();
                 if let Some(p) = &mut *app.panel.borrow_mut() {
                     p.area = Some((id, rect));
-                    p.ui.set_area_label(
-                        format!(
-                            "{}×{} at {}, {}",
-                            rect.width as u32, rect.height as u32, rect.x as i32, rect.y as i32
-                        )
-                        .into(),
-                    );
+                    p.ui.set_area_label(area_label(rect).into());
                     let _ = p.ui.show();
                 }
             }
@@ -1144,12 +1232,12 @@ impl App {
             return;
         }
         if self.devices.borrow().camera_pending.is_some() {
-            return self.set_panel_error("The camera is still starting; try again in a moment.");
+            return self.start_failed("The camera is still starting; try again in a moment.");
         }
         let built = self.build_config();
         let (config, display) = match built {
             Ok(v) => v,
-            Err(e) => return self.set_panel_error(&e.to_string()),
+            Err(e) => return self.start_failed(&e.to_string()),
         };
         {
             let mut s = self.settings.borrow_mut();
@@ -1162,12 +1250,33 @@ impl App {
             CaptureTarget::Window { .. } | CaptureTarget::App { .. } => None,
         };
         let save_dir = self.settings.borrow().save_dir.clone();
-        let dir = new_project_dir(&save_dir, "Recording");
-        let title = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        // An agent may have started it, and named it (see `agent`).
+        let run = self.agent.borrow_mut().start_request.take();
+        // An agent is told if a camera or mic the panel chose didn't open,
+        // rather than getting a recording without it.
+        if run.is_some()
+            && let Some(what) = self.missing_device()
+        {
+            return self.start_failed(&self.device_error(what));
+        }
+        // The folder is created now, which claims its name.
+        let name = run.as_ref().and_then(|r| r.name.clone());
+        let created = match &name {
+            Some(name) => named_project_dir(&save_dir, name),
+            None => new_project_dir(&save_dir, "Recording"),
+        };
+        let dir = match created {
+            Ok(dir) => dir,
+            Err(e) => {
+                return self.start_failed(&format!("Could not create the recording folder: {e}"));
+            }
+        };
+        let title = name.unwrap_or_else(|| {
+            dir.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
         let (mic, camera) = {
             let d = self.devices.borrow();
             (
@@ -1196,7 +1305,12 @@ impl App {
         let id = self.next_start_id.get();
         self.next_start_id.set(id + 1);
         std::thread::spawn(move || {
+            let dir = options.dir.clone();
             let result = Recorder::start(backend.as_ref(), options);
+            if result.is_err() {
+                // Don't leave the folder created for it behind.
+                let _ = std::fs::remove_dir_all(&dir);
+            }
             post(move |app| app.on_recorder_ready(id, result));
         });
 
@@ -1211,8 +1325,32 @@ impl App {
             recorder: None,
             display,
             captured,
+            agent: run,
         };
         self.refresh_tray();
+    }
+
+    /// A camera or mic chosen in the panel that isn't open.
+    fn missing_device(&self) -> Option<Permission> {
+        let devices = self.devices.borrow();
+        if self.panel_index(Permission::Camera).is_some_and(|i| i > 0) && devices.camera.is_none() {
+            Some(Permission::Camera)
+        } else if self
+            .panel_index(Permission::Microphone)
+            .is_some_and(|i| i > 0)
+            && devices.mic.is_none()
+        {
+            Some(Permission::Microphone)
+        } else {
+            None
+        }
+    }
+
+    /// A start that couldn't begin: says why in the panel, and to an agent
+    /// that asked for it.
+    fn start_failed(&self, error: &str) {
+        self.set_panel_error(error);
+        self.agent_start_finished(Err(error.to_string()));
     }
 
     fn build_config(&self) -> anyhow::Result<(RecordingConfig, DisplayInfo)> {
@@ -1334,6 +1472,14 @@ impl App {
     }
 
     fn on_recorder_ready(&self, start_id: u64, result: anyhow::Result<Recorder>) {
+        if self.quit_after_start.get() == Some(start_id) {
+            // Quit was chosen while this started: discard it and go on.
+            if let Ok(r) = result {
+                let _ = r.discard();
+            }
+            self.quit_after_start.set(None);
+            return self.quit();
+        }
         let current =
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
         if !current {
@@ -1384,6 +1530,10 @@ impl App {
         if let Some(e) = error {
             self.set_panel_error(e);
         }
+        // An agent waiting for this start hears why it didn't.
+        self.agent_start_finished(Err(error
+            .unwrap_or("The recording was cancelled.")
+            .to_string()));
     }
 
     fn begin_recording(&self) {
@@ -1392,17 +1542,28 @@ impl App {
             recorder: Some(recorder),
             display,
             captured,
+            agent,
             ..
         } = session
         else {
             *self.session.borrow_mut() = session;
             return;
         };
+        let bar = match ControlBar::new() {
+            Ok(bar) => bar,
+            Err(e) => {
+                // Recording without its controls would leave no way to stop it.
+                tracing::error!("could not create the control bar: {e}");
+                discard_in_background(recorder);
+                return self
+                    .return_to_panel(Some(&format!("Could not show the recording controls: {e}")));
+            }
+        };
         recorder.resume();
-
-        let Ok(bar) = ControlBar::new() else { return };
+        bar.set_agent(agent.is_some());
+        let width = f64::from(bar.get_bar_width());
         bar.window().set_position(LogicalPosition::new(
-            (display.frame.x + (display.frame.width - 236.0) / 2.0) as f32,
+            (display.frame.x + (display.frame.width - width) / 2.0) as f32,
             (display.frame.y + display.frame.height - 110.0) as f32,
         ));
         bar.on_toggle_pause(|| app().toggle_pause());
@@ -1434,12 +1595,14 @@ impl App {
             recorder,
             bar,
             captured,
+            agent,
             _timer: timer,
         };
         if let Some(p) = &*self.panel.borrow() {
             p.ui.set_busy(false);
         }
         self.refresh_tray();
+        self.agent_start_finished(Ok(()));
     }
 
     fn toggle_pause(&self) {
@@ -1469,15 +1632,20 @@ impl App {
 
     pub fn stop_recording(&self, discard: bool) {
         let session = std::mem::replace(&mut *self.session.borrow_mut(), Session::Stopping);
-        let (recorder, overlay) = match session {
+        let (recorder, overlay, run) = match session {
             Session::Recording {
                 recorder,
                 bar,
                 captured,
+                agent,
                 ..
             } => {
                 let _ = bar.hide();
-                (recorder, captured.and_then(|c| self.bubble_overlay(c)))
+                (
+                    recorder,
+                    captured.and_then(|c| self.bubble_overlay(c)),
+                    agent,
+                )
             }
             Session::Starting {
                 recorder,
@@ -1516,15 +1684,21 @@ impl App {
                             tracing::warn!("could not save the bubble position: {e}");
                         }
                     }
-                    dir
+                    (dir, project)
                 });
-                post(move |app| app.on_stopped(result));
+                post(move |app| app.on_stopped(result, run));
             }
         });
     }
 
-    fn on_stopped(&self, result: anyhow::Result<PathBuf>) {
+    fn on_stopped(
+        &self,
+        result: anyhow::Result<(PathBuf, visor_core::Project)>,
+        run: Option<agent::AgentRun>,
+    ) {
         *self.session.borrow_mut() = Session::Idle;
+        let after = self.agent_stopped(&result, run);
+        let open_editor = after != agent::AfterStop::Nothing;
         if self.quit_pending.get() {
             if let Err(e) = &result {
                 tracing::error!("finishing the recording failed: {e:#}");
@@ -1533,16 +1707,24 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) => self.open_new_recording(dir),
+            Ok((dir, _)) => match after {
+                agent::AfterStop::Name => self.open_new_recording(dir),
+                agent::AfterStop::Edit => self.open_editor(dir),
+                agent::AfterStop::Nothing => {}
+            },
             Err(e) => {
                 tracing::error!("finishing the recording failed: {e:#}");
-                self.open_panel();
-                self.set_panel_error(&format!("Saving the recording failed: {e:#}"));
+                // An agent that stopped it was told.
+                if open_editor {
+                    self.open_panel();
+                    self.set_panel_error(&format!("Saving the recording failed: {e:#}"));
+                }
             }
         }
     }
 
     fn on_discarded(&self, result: anyhow::Result<()>) {
+        let show_panel = self.agent_discarded(&result);
         if let Err(e) = result {
             tracing::warn!("discarding the recording failed: {e:#}");
         }
@@ -1550,7 +1732,12 @@ impl App {
             *self.session.borrow_mut() = Session::Idle;
             return self.quit();
         }
-        self.return_to_panel(None);
+        if show_panel {
+            self.return_to_panel(None);
+        } else {
+            *self.session.borrow_mut() = Session::Idle;
+            self.refresh_tray();
+        }
     }
 
     // ---- editor & preferences ---------------------------------------------
@@ -1693,6 +1880,8 @@ impl App {
             ui.set_show_cursor(s.show_cursor);
             ui.set_export_format(s.export_format);
             ui.set_shortcuts(s.shortcuts);
+            ui.set_agent_control(s.agent_control);
+            ui.set_mcp_command(crate::cli::mcp_command().into());
             ui.set_shortcuts_available(self.shortcuts.borrow().is_some());
             ui.set_shortcut_list(
                 [
@@ -1727,6 +1916,10 @@ impl App {
             s.countdown_secs = [0, 3, 5][ui.get_countdown_index().clamp(0, 2) as usize];
             s.show_cursor = ui.get_show_cursor();
             s.export_format = ui.get_export_format();
+            if s.agent_control != ui.get_agent_control() {
+                s.agent_control = ui.get_agent_control();
+                tracing::info!(on = s.agent_control, "agent control");
+            }
             s.save();
         }
         let shortcuts = ui.get_shortcuts();
@@ -1763,6 +1956,19 @@ fn discard_in_background(recorder: Recorder) {
             tracing::warn!("discarding an abandoned recording failed: {e:#}");
         }
     });
+}
+
+/// How the panel lists a window; agents match windows against it too.
+fn window_label(w: &visor_capture::WindowInfo) -> String {
+    format!("{} — {}", w.app, w.title)
+}
+
+/// How the panel describes a chosen area.
+fn area_label(rect: Rect) -> String {
+    format!(
+        "{}×{} at {}, {}",
+        rect.width as u32, rect.height as u32, rect.x as i32, rect.y as i32
+    )
 }
 
 fn strings(items: impl Iterator<Item = String>) -> ModelRc<SharedString> {
