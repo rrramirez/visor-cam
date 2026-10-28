@@ -58,9 +58,11 @@ pub struct App {
     shortcuts: RefCell<Option<Shortcuts>>,
     /// Shortcuts another app already uses.
     taken_shortcuts: RefCell<Vec<Shortcut>>,
-    /// A recording starts as soon as the devices are ready (see
-    /// `record_when_ready`).
-    record_pending: std::cell::Cell<bool>,
+    /// Starts a recording once the devices are ready (see
+    /// `record_when_ready`); dropping it cancels.
+    pending_start: RefCell<Option<Timer>>,
+    /// Stops a `--record --stop-after` recording.
+    stop_after: RefCell<Option<Timer>>,
     /// Sparkle, in the packaged macOS app.
     updater: Option<crate::updates::Updater>,
     panel: RefCell<Option<Panel>>,
@@ -144,7 +146,8 @@ impl App {
             tray: RefCell::default(),
             shortcuts: RefCell::default(),
             taken_shortcuts: RefCell::default(),
-            record_pending: std::cell::Cell::new(false),
+            pending_start: RefCell::default(),
+            stop_after: RefCell::default(),
             updater: crate::updates::Updater::start(),
             panel: RefCell::default(),
             devices: RefCell::default(),
@@ -226,6 +229,8 @@ impl App {
             Session::Stopping => (false, false, false),
         };
         match shortcut {
+            // A second press while waiting for the devices backs out.
+            Shortcut::StartStop if idle && self.cancel_pending_start() => {}
             Shortcut::StartStop if idle => self.record_when_ready(None),
             // Stopping during the countdown cancels, as the bar does.
             Shortcut::StartStop if recording || starting => self.stop_recording(false),
@@ -237,9 +242,11 @@ impl App {
 
     /// Starts recording with the panel's choices (the saved ones if the
     /// panel isn't open) once the chosen camera is open. With `stop_after`,
-    /// stops after that many seconds of recorded time.
+    /// stops after that many seconds of recorded time. Closing the panel
+    /// meanwhile cancels; so does a camera that takes too long.
     pub fn record_when_ready(&self, stop_after: Option<u64>) {
-        if self.record_pending.get() || !matches!(*self.session.borrow(), Session::Idle) {
+        if self.pending_start.borrow().is_some() || !matches!(*self.session.borrow(), Session::Idle)
+        {
             return;
         }
         let panel_shown = self
@@ -250,30 +257,56 @@ impl App {
         if !panel_shown {
             self.open_panel();
         }
-        self.record_pending.set(true);
-        let timer = Rc::new(Timer::default());
-        let this = timer.clone();
-        let started = std::cell::Cell::new(false);
+        let started = std::time::Instant::now();
+        let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
             let app = app();
-            if !started.get() {
-                if app.devices_ready() {
-                    app.record_pending.set(false);
-                    app.start_recording();
-                    started.set(true);
+            if app.devices_ready() {
+                app.cancel_pending_start();
+                app.start_recording();
+                if let Some(secs) = stop_after {
+                    app.stop_after_recorded(secs);
                 }
-            } else if let Some(secs) = stop_after {
-                if app
-                    .recorded()
-                    .is_some_and(|t| t.as_secs_f64() >= secs as f64)
-                {
-                    app.stop_recording(false);
-                    this.stop();
-                }
-            } else {
-                this.stop();
+            } else if started.elapsed() > Duration::from_secs(15) {
+                app.cancel_pending_start();
+                app.set_panel_error("The camera didn't start; try again.");
             }
         });
+        *self.pending_start.borrow_mut() = Some(timer);
+    }
+
+    /// Cancels a start waiting for the devices. Returns whether one was.
+    fn cancel_pending_start(&self) -> bool {
+        match self.pending_start.borrow().as_ref() {
+            Some(timer) => timer.stop(),
+            None => return false,
+        }
+        // Not dropped here: this may run inside the timer's own callback.
+        let timer = self.pending_start.borrow_mut().take();
+        slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
+        true
+    }
+
+    /// Stops the recording after `secs` seconds of recorded time.
+    fn stop_after_recorded(&self, secs: u64) {
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let app = app();
+            if app
+                .recorded()
+                .is_some_and(|t| t.as_secs_f64() >= secs as f64)
+            {
+                app.stop_recording(false);
+            }
+            let running = matches!(
+                *app.session.borrow(),
+                Session::Starting { .. } | Session::Recording { .. }
+            );
+            if !running && let Some(t) = &*app.stop_after.borrow() {
+                t.stop();
+            }
+        });
+        *self.stop_after.borrow_mut() = Some(timer);
     }
 
     fn on_tray(&self, action: Action) {
@@ -325,6 +358,10 @@ impl App {
         if let Some(tray) = &mut *self.tray.borrow_mut() {
             tray.set_recent(&recent);
             tray.set_recording(recording, paused);
+        }
+        let live = matches!(*self.session.borrow(), Session::Recording { .. });
+        if let Some(s) = &mut *self.shortcuts.borrow_mut() {
+            s.set_recording(live);
         }
     }
 
@@ -537,8 +574,10 @@ impl App {
             }
         });
         ui.window().on_close_requested(|| {
-            // Closing the panel releases the camera and mic.
+            // Closing the panel releases the camera and mic, and backs out of
+            // a start that was waiting for them.
             let app = app();
+            app.cancel_pending_start();
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
             }

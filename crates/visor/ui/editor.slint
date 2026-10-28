@@ -88,6 +88,9 @@ export component Editor inherits Window {
     // Thumbnail position on the timeline, or -1 for the first frame kept.
     in property <float> thumbnail-pos: -1;
     in property <string> thumbnail-label;
+    // A thumbnail image is being saved; its outcome when it failed.
+    in property <bool> saving-thumbnail;
+    in property <string> thumbnail-error;
 
     in property <bool> playing;
     in property <float> position;
@@ -466,10 +469,17 @@ export component Editor inherits Window {
                                         clicked => { root.set-thumbnail(); keys.focus(); }
                                     }
                                     PillButton {
-                                        text: "Save image";
+                                        text: root.saving-thumbnail ? "Saving…" : "Save image";
                                         icon: Icons.export;
+                                        enabled: !root.saving-thumbnail;
                                         clicked => { root.save-thumbnail(); keys.focus(); }
                                     }
+                                }
+                                if root.thumbnail-error != "": Text {
+                                    text: root.thumbnail-error;
+                                    color: Theme.record;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
                                 }
                                 Text {
                                     text: "MP4 exports carry it as their cover, shown by " + root.file-manager + " and players. Save image writes it as a JPEG.";

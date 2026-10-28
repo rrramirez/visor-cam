@@ -117,13 +117,9 @@ impl EditorWindow {
         this.load_previews();
         ui.show()?;
         if name_first {
-            // Once the window is up and has keyboard focus.
-            let weak = ui.as_weak();
-            slint::Timer::single_shot(Duration::from_millis(50), move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.invoke_focus_name();
-                }
-            });
+            // Focus belongs to the window, so it is in place whenever the
+            // window becomes active.
+            ui.invoke_focus_name();
         }
         Ok(this)
     }
@@ -243,7 +239,8 @@ impl EditorWindow {
         });
         on!(on_set_thumbnail, |e| {
             let position = e.player.borrow().position();
-            e.project.borrow_mut().thumbnail_us = Some(position);
+            let frame = kept_frame(&e.project.borrow().edit, position);
+            e.project.borrow_mut().thumbnail_us = Some(frame);
             e.save();
             e.refresh_edit_ui();
         });
@@ -639,6 +636,9 @@ impl EditorWindow {
 
     /// Writes the thumbnail to the exports folder as a JPEG and shows it.
     fn save_thumbnail(&self) {
+        if self.ui.get_saving_thumbnail() {
+            return;
+        }
         let project = self.project.borrow().clone();
         let out = match self.exports_dir() {
             Ok(dir) => unique_path(
@@ -648,20 +648,24 @@ impl EditorWindow {
             ),
             Err(e) => {
                 self.ui
-                    .set_export_status(format!("Saving the thumbnail failed: {e}").into());
+                    .set_thumbnail_error(format!("Saving the image failed: {e}").into());
                 return;
             }
         };
+        self.ui.set_thumbnail_error("".into());
+        self.ui.set_saving_thumbnail(true);
         let dir = self.dir.clone();
         let weak = self.ui.as_weak();
         std::thread::spawn(move || {
             let result = visor_media::export::save_thumbnail(&dir, &project, &out);
-            let _ = weak.upgrade_in_event_loop(move |ui| match result {
-                Ok(()) => platform::reveal(&out),
-                Err(e) => {
-                    tracing::error!("saving the thumbnail failed: {e:#}");
-                    ui.set_export_done(false);
-                    ui.set_export_status(format!("Saving the thumbnail failed: {e:#}").into());
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_saving_thumbnail(false);
+                match result {
+                    Ok(()) => platform::reveal(&out),
+                    Err(e) => {
+                        tracing::error!("saving the thumbnail failed: {e:#}");
+                        ui.set_thumbnail_error(format!("Saving the image failed: {e:#}").into());
+                    }
                 }
             });
         });
@@ -716,6 +720,23 @@ impl EditorWindow {
     }
 }
 
+/// `t` if the edit keeps it, else the closest kept frame before it (the
+/// playhead rests just past the last kept frame after playing to the end),
+/// else the first kept frame.
+fn kept_frame(edit: &EditList, t: Micros) -> Micros {
+    if edit.to_output(t).is_some() {
+        return t;
+    }
+    let ranges = edit.ranges();
+    ranges
+        .iter()
+        .rev()
+        .find(|r| r.1 <= t)
+        .map(|r| r.1 - 1)
+        .or_else(|| ranges.first().map(|r| r.0))
+        .unwrap_or(0)
+}
+
 fn sanitize(title: &str) -> String {
     let cleaned: String = title
         .chars()
@@ -750,6 +771,20 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnails_snap_to_kept_frames() {
+        let mut edit = EditList::full(10_000_000);
+        edit.cut(4_000_000, 6_000_000);
+        edit.trim(1_000_000, 9_000_000);
+        assert_eq!(kept_frame(&edit, 2_000_000), 2_000_000);
+        // At the end of the last kept range: its last frame.
+        assert_eq!(kept_frame(&edit, 9_000_000), 8_999_999);
+        // In a cut: the frame before it.
+        assert_eq!(kept_frame(&edit, 5_000_000), 3_999_999);
+        // Before everything kept: the first kept frame.
+        assert_eq!(kept_frame(&edit, 0), 1_000_000);
+    }
 
     #[test]
     fn export_names_are_safe_and_unique() {

@@ -186,11 +186,13 @@ fn run(
 
     // MP4s carry the project's thumbnail as cover art, which file managers
     // and players show for the file.
+    // A nicety: the export goes ahead without it if it can't be made.
     let cover = if opts.format == ExportFormat::Mp4 {
         let t = thumbnail_time(project);
-        let jpeg = encode_jpeg(renderer.render_source(t)?)?;
+        let jpeg = renderer.render_source(t).and_then(|f| encode_jpeg(f));
         renderer.reset()?;
-        Some(jpeg)
+        jpeg.inspect_err(|e| tracing::warn!("exporting without cover art: {e:#}"))
+            .ok()
     } else {
         None
     };
@@ -388,26 +390,36 @@ pub fn save_thumbnail(dir: &Path, project: &Project, out: &Path) -> anyhow::Resu
     std::fs::write(out, jpeg).with_context(|| format!("writing {}", out.display()))
 }
 
-/// One frame as a JPEG file's bytes.
+/// One frame (video-range YUV 4:2:0) as a JPEG file's bytes.
 fn encode_jpeg(f: &frame::Video) -> anyhow::Result<Vec<u8>> {
     let codec = encoder::find(codec::Id::MJPEG).context("FFmpeg has no JPEG encoder")?;
+    let (w, h) = (f.width(), f.height());
+    // JPEG viewers assume full range: stretch video range (16–235) to
+    // 0–255, or blacks would show grey and whites dim.
+    let mut full = frame::Video::empty();
+    scaling::Context::get(
+        f.format(),
+        w,
+        h,
+        format::Pixel::YUVJ420P,
+        w,
+        h,
+        scaling::Flags::POINT,
+    )?
+    .run(f, &mut full)?;
+    full.set_pts(Some(0));
     let mut enc = codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()?;
-    enc.set_width(f.width());
-    enc.set_height(f.height());
-    enc.set_format(format::Pixel::YUV420P);
+    enc.set_width(w);
+    enc.set_height(h);
+    enc.set_format(format::Pixel::YUVJ420P);
+    enc.set_color_range(ffmpeg::color::Range::JPEG);
     enc.set_time_base(Rational(1, 30));
-    // Video range, as the frames are; JPEG readers handle it.
-    enc.set_color_range(ffmpeg::color::Range::MPEG);
     enc.set_flags(codec::Flags::QSCALE);
     enc.set_global_quality(2 * ffmpeg::ffi::FF_QP2LAMBDA);
-    let mut opts = Dictionary::new();
-    opts.set("strict", "unofficial");
-    let mut enc = enc.open_with(opts)?;
-    let mut src = f.clone();
-    src.set_pts(Some(0));
-    enc.send_frame(&src)?;
+    let mut enc = enc.open()?;
+    enc.send_frame(&full)?;
     enc.send_eof()?;
     let mut packet = Packet::empty();
     enc.receive_packet(&mut packet)

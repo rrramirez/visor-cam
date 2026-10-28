@@ -212,6 +212,18 @@ fn decode_jpeg(jpeg: &[u8]) -> ffmpeg::frame::Video {
     f
 }
 
+/// A video-range luma level as JPEG (full range) stores it.
+fn full_range(y: u8) -> f64 {
+    (f64::from(y) - 16.0) * 255.0 / 219.0
+}
+
+fn assert_jpeg_full_range(f: &ffmpeg::frame::Video) {
+    // JPEG decodes to the "J" (full range) formats, or says so outright.
+    let full = f.format() == ffmpeg::format::Pixel::YUVJ420P
+        || f.color_range() == ffmpeg::color::Range::JPEG;
+    assert!(full, "{:?} {:?}", f.format(), f.color_range());
+}
+
 #[test]
 fn mp4_cover_is_the_chosen_thumbnail() {
     let (dir, mut project) = project("export-cover", 4);
@@ -231,8 +243,10 @@ fn mp4_cover_is_the_chosen_thumbnail() {
     let jpeg = cover(&out).expect("no cover art");
     assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
     // Most of the frame is screen (the bubble covers the bottom left).
-    let l = mean_luma(&decode_jpeg(&jpeg));
-    let expected = f64::from(luma(75));
+    let f = decode_jpeg(&jpeg);
+    assert_jpeg_full_range(&f);
+    let l = mean_luma(&f);
+    let expected = full_range(luma(75));
     assert!((l - expected).abs() < 25.0, "cover luma {l} vs {expected}");
 
     // Cut away, the thumbnail falls back to the first kept frame.
@@ -244,13 +258,21 @@ fn mp4_cover_is_the_chosen_thumbnail() {
     save_thumbnail(&dir, &project, &image).unwrap();
     let saved = std::fs::read(&image).unwrap();
     let f = decode_jpeg(&saved);
-    let expected = f64::from(luma(15));
+    assert_jpeg_full_range(&f);
+    let expected = full_range(luma(15));
     assert!(
         (mean_luma(&f) - expected).abs() < 25.0,
         "saved luma vs {expected}"
     );
     // Full size.
     assert_eq!((f.width(), f.height()), (640, 360));
+
+    // Video black (16) must come out as JPEG black (0), not grey.
+    project.edit = visor_core::EditList::full(project.duration_us);
+    project.thumbnail_us = Some(0);
+    save_thumbnail(&dir, &project, &image).unwrap();
+    let black = top_luma(&decode_jpeg(&std::fs::read(&image).unwrap()));
+    assert!(black < 4.0, "black came out as {black}");
     common::cleanup(&dir);
 }
 
