@@ -133,8 +133,6 @@ enum Session {
         captured: Option<Rect>,
         /// Started by an agent.
         agent: Option<agent::AgentRun>,
-        /// The recording's folder, created when the start began.
-        dir: PathBuf,
     },
     Recording {
         recorder: Recorder,
@@ -400,8 +398,13 @@ impl App {
     }
 
     fn quit(&self) {
-        if matches!(*self.session.borrow(), Session::Stopping) {
-            // A recording is being finalized; quit once it's saved.
+        if matches!(
+            *self.session.borrow(),
+            Session::Stopping | Session::Starting { recorder: None, .. }
+        ) {
+            // A recording is being finalized, or its capture is still
+            // starting (and would recreate its folder if left behind):
+            // quit once it's saved, or started and discarded.
             self.quit_pending.set(true);
             return;
         }
@@ -431,10 +434,6 @@ impl App {
                 ..
             } => {
                 let _ = recorder.discard();
-            }
-            // Still starting: don't leave its folder behind.
-            Session::Starting { dir, .. } => {
-                let _ = std::fs::remove_dir_all(dir);
             }
             _ => {}
         }
@@ -1204,14 +1203,7 @@ impl App {
         if run.is_some()
             && let Some(what) = self.missing_device()
         {
-            let shown = self
-                .panel
-                .borrow()
-                .as_ref()
-                .map(|p| p.ui.get_error().to_string())
-                .filter(|e| !e.is_empty());
-            return self
-                .start_failed(&shown.unwrap_or_else(|| format!("The {what} couldn't be opened.")));
+            return self.start_failed(&self.device_error(what));
         }
         // The folder is created now, which claims its name.
         let name = run.as_ref().and_then(|r| r.name.clone());
@@ -1249,7 +1241,7 @@ impl App {
         let backend = self.backend.clone();
         let options = RecorderOptions {
             config,
-            dir: dir.clone(),
+            dir,
             title,
             mic,
             camera,
@@ -1280,7 +1272,6 @@ impl App {
             display,
             captured,
             agent: run,
-            dir,
         };
         self.refresh_tray();
     }
@@ -1427,6 +1418,19 @@ impl App {
     }
 
     fn on_recorder_ready(&self, start_id: u64, result: anyhow::Result<Recorder>) {
+        if self.quit_pending.get() {
+            // Quitting: nothing was recorded yet, so discard it and go on.
+            if let Ok(r) = result {
+                let _ = r.discard();
+            }
+            let current =
+                matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
+            if current {
+                *self.session.borrow_mut() = Session::Idle;
+                self.quit();
+            }
+            return;
+        }
         let current =
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
         if !current {

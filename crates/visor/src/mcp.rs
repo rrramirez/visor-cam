@@ -35,7 +35,7 @@ fn tool_list() -> Value {
         json!({
             "type": ["string", "integer", "boolean"],
             "description": format!(
-                "The {what}'s name (or part of it) or id from list_sources; \"none\" or false for no {what}. Left out: the one the user last chose."
+                "The {what}'s name (or part of it) or id from list_sources; \"none\" or false for no {what}; true for one (the user's last choice, else the first). Left out: the user's last choice, which may be none."
             ),
         })
     };
@@ -225,17 +225,11 @@ fn call_tool(params: &Value) -> Result<Value, (i64, &'static str)> {
         _ => json!({}),
     };
     command["command"] = name.into();
-    let mut reply = crate::cli::call(&command);
-    let ok = reply["ok"].as_bool().unwrap_or(false);
-    let text = if ok {
-        if let Some(fields) = reply.as_object_mut() {
-            fields.remove("ok");
-        }
-        serde_json::to_string_pretty(&reply).unwrap_or_default()
-    } else {
-        reply["error"].as_str().unwrap_or("Failed.").to_string()
+    let (text, is_error) = match crate::cli::reply_text(crate::cli::call(&command)) {
+        Ok(text) => (text, false),
+        Err(error) => (error, true),
     };
-    Ok(json!({"content": [{"type": "text", "text": text}], "isError": !ok}))
+    Ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}))
 }
 
 #[cfg(test)]

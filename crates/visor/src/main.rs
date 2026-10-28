@@ -69,20 +69,23 @@ fn main() -> anyhow::Result<()> {
     backend_selector.select()?;
 
     let app = app::App::install(visor_capture::backend()?);
-    if let instance::Instance::Primary(primary) = instance {
-        primary.serve(|request| {
-            app::post(move |app| match request {
-                instance::Request::ShowPanel => app.open_panel(),
-                instance::Request::Background => {}
-                instance::Request::Edit(dir) => app.open_editor(dir),
-                instance::Request::Control(command, reply) => app.agent_command(command, reply),
-            })
-        });
-    }
 
     // The tray needs a running event loop on macOS.
     slint::Timer::single_shot(Duration::ZERO, move || {
         app.recover_interrupted();
+        // Only once interrupted recordings are found: an agent's recording
+        // starting before that could be taken for one. Requests wait in the
+        // listener's queue until then.
+        if let instance::Instance::Primary(primary) = instance {
+            primary.serve(|request| {
+                app::post(move |app| match request {
+                    instance::Request::ShowPanel => app.open_panel(),
+                    instance::Request::Background => {}
+                    instance::Request::Edit(dir) => app.open_editor(dir),
+                    instance::Request::Control(command, reply) => app.agent_command(command, reply),
+                })
+            });
+        }
         app.create_tray();
         app.create_shortcuts();
         match args {

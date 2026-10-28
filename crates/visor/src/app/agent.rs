@@ -19,6 +19,8 @@ pub(super) struct AgentState {
     /// `start_recording` into the session.
     pub start_request: Option<AgentRun>,
     start: Option<(Reply, Timer)>,
+    /// The panel's choices before the waiting start's, put back if it fails.
+    undo: Option<PanelChoices>,
     /// Whether to open the editor once it's saved.
     stop: Option<(Reply, bool)>,
     discard: Option<Reply>,
@@ -232,15 +234,21 @@ impl App {
     /// Answers an agent waiting for a start: it is recording, or why not.
     /// Called wherever a start ends; does nothing if no agent is waiting.
     pub(super) fn agent_start_finished(&self, result: Result<(), String>) {
-        let waiting = {
+        let (waiting, undo) = {
             let mut agent = self.agent.borrow_mut();
             // Nothing may start for an agent once it was told it didn't.
             agent.start_request = None;
-            agent.start.take()
+            (agent.start.take(), agent.undo.take())
         };
         let Some((reply, guard)) = waiting else {
             return;
         };
+        // A start that failed leaves the user's choices as they were.
+        if result.is_err()
+            && let Some(before) = undo
+        {
+            self.restore_choices(before);
+        }
         // Not dropped here: this may run inside the timer's own callback.
         guard.stop();
         slint::Timer::single_shot(Duration::ZERO, move || drop(guard));
@@ -271,6 +279,8 @@ impl App {
             }
             return Err(e);
         }
+        // A camera still opening may yet fail, failing the start.
+        self.agent.borrow_mut().undo = before;
         self.update_hint();
         self.update_screen_highlight();
         Ok(())
@@ -306,6 +316,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .as_slice()
             {
+                // A display alone means its whole screen.
+                [] if c.display.is_some() => Some("screen".into()),
                 [] => None,
                 [kind] => Some(kind.to_string()),
                 _ => return Err("Give only one of window, app or area.".into()),
@@ -379,7 +391,8 @@ impl App {
                 .iter()
                 .map(|c| (c.id.clone(), c.name.clone()))
                 .collect();
-            c.camera = Some(device_index("camera", &cameras, query)?);
+            let current = usize::try_from(ui.get_camera_index()).unwrap_or(0);
+            c.camera = Some(device_index("camera", &cameras, current, query)?);
         }
         if let Some(query) = arg(args, "mic") {
             let mics: Vec<_> = p
@@ -387,7 +400,8 @@ impl App {
                 .iter()
                 .map(|m| (m.id.clone(), m.name.clone()))
                 .collect();
-            c.mic = Some(device_index("microphone", &mics, query)?);
+            let current = usize::try_from(ui.get_mic_index()).unwrap_or(0);
+            c.mic = Some(device_index("microphone", &mics, current, query)?);
         }
         Ok(c)
     }
@@ -495,18 +509,22 @@ impl App {
         }
     }
 
-    fn device_error(&self, what: &str) -> String {
+    /// Why the camera or mic chosen for an agent's recording isn't open:
+    /// what the panel says (it failed or access is off), or else that
+    /// Visor is asking the user for access.
+    pub(super) fn device_error(&self, what: &str) -> String {
         let shown = self
             .panel
             .borrow()
             .as_ref()
             .map(|p| p.ui.get_error().to_string())
             .filter(|e| !e.is_empty());
-        shown.unwrap_or_else(|| {
+        let why = shown.unwrap_or_else(|| {
             format!(
-                "Visor is asking the user for access to the {what}. Once they allow it, try again."
+                "Visor is asking the user for access to the {what}; once they allow it, try again."
             )
-        })
+        });
+        format!("{why} To record without it, pass {what} \"none\".")
     }
 
     fn agent_pause(&self, pause: bool) -> Result<Value, String> {
@@ -646,12 +664,22 @@ struct PanelChoices {
 }
 
 /// The panel's index for a camera or mic argument among `devices` (id,
-/// name): 0 is none.
-fn device_index(what: &str, devices: &[(String, String)], query: &Value) -> Result<usize, String> {
-    if query == &Value::Bool(false) || query.as_str().is_some_and(|s| s == "none") {
-        return Ok(0);
+/// name), where 0 is none: a name or id, `"none"` or false for none, or
+/// true for the one chosen now (`current`), else the first.
+fn device_index(
+    what: &str,
+    devices: &[(String, String)],
+    current: usize,
+    query: &Value,
+) -> Result<usize, String> {
+    match query {
+        Value::Bool(false) => Ok(0),
+        Value::String(s) if s.trim().eq_ignore_ascii_case("none") => Ok(0),
+        Value::Bool(true) if current > 0 => Ok(current),
+        Value::Bool(true) if !devices.is_empty() => Ok(1),
+        Value::Bool(true) => Err(format!("No {what} is connected.")),
+        _ => find(what, devices, query, |d| d.0.clone(), |d| d.1.clone()).map(|i| i + 1),
     }
-    find(what, devices, query, |d| d.0.clone(), |d| d.1.clone()).map(|i| i + 1)
 }
 
 /// An `area` argument (`x`, `y`, `width`, `height` in points from the
@@ -702,5 +730,19 @@ mod tests {
         assert_eq!(find(json!("tech")), Ok(1));
         assert!(find(json!("saf")).unwrap_err().contains("Several"));
         assert!(find(json!("Mail")).unwrap_err().contains("No app"));
+    }
+
+    #[test]
+    fn devices_take_none_true_or_a_name() {
+        let cams = [
+            ("a".to_string(), "FaceTime HD".to_string()),
+            ("b".into(), "Studio".into()),
+        ];
+        assert_eq!(device_index("camera", &cams, 2, &json!("None")), Ok(0));
+        assert_eq!(device_index("camera", &cams, 2, &json!(false)), Ok(0));
+        assert_eq!(device_index("camera", &cams, 2, &json!(true)), Ok(2));
+        assert_eq!(device_index("camera", &cams, 0, &json!(true)), Ok(1));
+        assert_eq!(device_index("camera", &cams, 0, &json!("studio")), Ok(2));
+        assert!(device_index("camera", &[], 0, &json!(true)).is_err());
     }
 }

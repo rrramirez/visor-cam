@@ -138,7 +138,8 @@ impl Primary {
                 let _lock = _lock;
                 let handle = std::sync::Arc::new(handle);
                 // Connections whose request hasn't been read yet; capped so
-                // connections that send nothing can't pile up threads.
+                // connections that send nothing can't pile up threads, and
+                // each holds its slot for at most TIMEOUT (see read_request).
                 let unread = std::sync::Arc::new(AtomicUsize::new(0));
                 for stream in listener.incoming().flatten() {
                     if unread.fetch_add(1, Ordering::SeqCst) >= MAX_UNREAD {
@@ -147,17 +148,21 @@ impl Primary {
                     }
                     // Agent commands can take a while; answer each
                     // connection on its own thread.
-                    let (handle, token, unread) = (handle.clone(), token.clone(), unread.clone());
+                    let (handle, token) = (handle.clone(), token.clone());
                     let spawned = std::thread::Builder::new()
                         .name("visor-request".into())
-                        .spawn(move || {
-                            let request = read_request(&stream, &token);
-                            unread.fetch_sub(1, Ordering::SeqCst);
-                            if let Err(e) = request.and_then(|r| answer(stream, r, &*handle)) {
-                                tracing::warn!("ignored a request: {e}");
+                        .spawn({
+                            let unread = unread.clone();
+                            move || {
+                                let request = read_request(&stream, &token);
+                                unread.fetch_sub(1, Ordering::SeqCst);
+                                if let Err(e) = request.and_then(|r| answer(stream, r, &*handle)) {
+                                    tracing::warn!("ignored a request: {e}");
+                                }
                             }
                         });
                     if let Err(e) = spawned {
+                        unread.fetch_sub(1, Ordering::SeqCst);
                         tracing::warn!("could not answer a request: {e}");
                     }
                 }
@@ -192,11 +197,24 @@ enum Parsed {
 }
 
 /// Request format: the token, then `show`, `edit` and a path, or `control`
-/// and a JSON command, one per line.
-fn read_request(stream: &TcpStream, token: &str) -> std::io::Result<Parsed> {
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    let mut text = String::new();
-    stream.take(64 * 1024).read_to_string(&mut text)?;
+/// and a JSON command, one per line. The whole request must arrive within
+/// [`TIMEOUT`], so a slow sender can't hold a connection slot for long.
+fn read_request(mut stream: &TcpStream, token: &str) -> std::io::Result<Parsed> {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || bytes.len() > 64 * 1024 {
+            return Err(std::io::Error::other("request too slow or too long"));
+        }
+        stream.set_read_timeout(Some(left))?;
+        match stream.read(&mut chunk)? {
+            0 => break,
+            n => bytes.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let text = String::from_utf8(bytes).map_err(std::io::Error::other)?;
     let mut lines = text.lines();
     if lines.next() != Some(token) {
         return Err(std::io::Error::other("wrong token"));

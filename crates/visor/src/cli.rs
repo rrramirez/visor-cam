@@ -68,21 +68,27 @@ pub fn run(args: &[String]) -> Option<i32> {
         _ => return None,
     };
     attach_console();
-    let mut reply = call(&command);
-    let ok = reply["ok"].as_bool().unwrap_or(false);
-    if ok {
-        if let Some(fields) = reply.as_object_mut() {
-            fields.remove("ok");
+    match reply_text(call(&command)) {
+        Ok(text) => {
+            println!("{text}");
+            Some(0)
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&reply).unwrap_or_default()
-        );
-        Some(0)
-    } else {
-        eprintln!("visor: {}", reply["error"].as_str().unwrap_or("failed"));
-        Some(1)
+        Err(error) => {
+            eprintln!("visor: {error}");
+            Some(1)
+        }
     }
+}
+
+/// A reply as text: its fields as JSON, or why it failed.
+pub fn reply_text(mut reply: Value) -> Result<String, String> {
+    if reply["ok"].as_bool() != Some(true) {
+        return Err(reply["error"].as_str().unwrap_or("Failed.").to_string());
+    }
+    if let Some(fields) = reply.as_object_mut() {
+        fields.remove("ok");
+    }
+    Ok(serde_json::to_string_pretty(&reply).unwrap_or_default())
 }
 
 fn start_args(args: &[String]) -> Result<Value, String> {
@@ -161,16 +167,22 @@ fn launch_and_call(command: &Value) -> Value {
     if let Err(e) = launch() {
         return json!({"ok": false, "error": format!("Couldn't start Visor: {e}")});
     }
-    // Wait for it to listen.
+    // Wait for it to listen. Only a command no Visor took is sent again:
+    // once one has it, sending it twice could start two recordings.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         std::thread::sleep(Duration::from_millis(250));
         match instance::control(command) {
             Ok(reply) => return reply,
-            Err(e) if Instant::now() > deadline => {
-                return json!({"ok": false, "error": format!("Visor didn't start: {e}")});
+            Err(ControlError::NotRunning) if Instant::now() > deadline => {
+                return json!({
+                    "ok": false,
+                    "error": "Visor didn't start. If an older Visor without agent control is \
+                              running, the user needs to quit it first.",
+                });
             }
-            Err(_) => {}
+            Err(ControlError::NotRunning) => {}
+            Err(e) => return json!({"ok": false, "error": e.to_string()}),
         }
     }
 }

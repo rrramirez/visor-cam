@@ -44,12 +44,23 @@ struct Worker {
     handle: JoinHandle<anyhow::Result<()>>,
 }
 
+/// Marker saves run in the background (see [`Recorder::mark`]); this keeps
+/// them from overwriting a newer save, or the final one at stop.
+#[derive(Default)]
+struct Saves {
+    /// Markers in the newest project.json written.
+    markers: usize,
+    /// The recording stopped or was discarded.
+    done: bool,
+}
+
 pub struct Recorder {
     clock: ClockRef,
     session: Option<ScreenSession>,
     workers: Vec<Worker>,
     dir: PathBuf,
     project: Project,
+    saves: Arc<Mutex<Saves>>,
     // Keep the shared streams alive for as long as we record from them.
     _mic: Option<Arc<MicStream>>,
     _camera: Option<Arc<CameraStream>>,
@@ -169,6 +180,7 @@ impl Recorder {
             workers,
             dir,
             project,
+            saves: Arc::default(),
             _mic: mic,
             _camera: camera,
         })
@@ -200,10 +212,20 @@ impl Recorder {
             text: text.into(),
         });
         // Saved now (still with no duration) so a recording recovered after
-        // a crash keeps its markers.
-        if let Err(e) = self.project.save(&self.dir) {
-            tracing::warn!("could not save the marker: {e}");
-        }
+        // a crash keeps its markers; in the background, as the folder may be
+        // slow to write to.
+        let (project, dir, saves) = (self.project.clone(), self.dir.clone(), self.saves.clone());
+        thread::spawn(move || {
+            let mut saves = saves.lock().unwrap_or_else(|e| e.into_inner());
+            let markers = project.markers.len();
+            if saves.done || saves.markers >= markers {
+                return;
+            }
+            match project.save(&dir) {
+                Ok(()) => saves.markers = markers,
+                Err(e) => tracing::warn!("could not save the marker: {e}"),
+            }
+        });
         at_us
     }
 
@@ -227,13 +249,18 @@ impl Recorder {
         }
         self.project.duration_us = duration;
         self.project.edit = visor_core::EditList::full(duration);
-        self.project.save(&self.dir)?;
+        {
+            let mut saves = self.saves.lock().unwrap_or_else(|e| e.into_inner());
+            saves.done = true;
+            self.project.save(&self.dir)?;
+        }
         tracing::info!(duration_ms = duration / 1000, "recording saved");
         Ok((std::mem::take(&mut self.dir), self.project.clone()))
     }
 
     /// Stops recording and deletes the project folder.
     pub fn discard(mut self) -> anyhow::Result<()> {
+        self.saves.lock().unwrap_or_else(|e| e.into_inner()).done = true;
         self.join_workers(host_now())?;
         std::fs::remove_dir_all(&self.dir)
             .with_context(|| format!("removing {}", self.dir.display()))
