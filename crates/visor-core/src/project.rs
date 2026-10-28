@@ -195,18 +195,155 @@ fn is_plain_file_name(name: &str) -> bool {
 /// Lists project folders under `root`, newest first by folder name. This is a
 /// plain directory scan; there is no library database.
 pub fn list_projects(root: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut dirs: Vec<PathBuf> = fs::read_dir(root)?
+    // Newest first, by when they were recorded: folders are renamed after
+    // their titles, so their names don't sort by date.
+    let mut dirs: Vec<(String, PathBuf)> = fs::read_dir(root)?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.join(PROJECT_FILE).is_file())
+        .map(|p| {
+            let created = Project::load(&p).map(|p| p.created_at).unwrap_or_default();
+            (created, p)
+        })
         .collect();
-    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-    Ok(dirs)
+    dirs.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.file_name().cmp(&a.1.file_name()))
+    });
+    Ok(dirs.into_iter().map(|(_, p)| p).collect())
+}
+
+/// A folder name for a recording titled `title`: characters that aren't
+/// allowed in file names (on any platform) become "-", and leading or
+/// trailing dots and spaces go. `None` if nothing usable is left.
+pub fn folder_name(title: &str) -> Option<String> {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .take(120)
+        .collect();
+    let name = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    // Names Windows reserves for devices.
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    match name {
+        "" => None,
+        _ if reserved => Some(format!("{name} recording")),
+        _ => Some(name.to_string()),
+    }
+}
+
+/// Renames the recording folder `dir` after its project's title, if it is
+/// directly inside `root` (the recordings folder) and named otherwise. A
+/// taken name gets " 2", " 3", …. Returns the new path when it moved.
+pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
+    if dir.is_symlink() {
+        return Ok(None);
+    }
+    let dir = dir.canonicalize()?;
+    let root = root.canonicalize()?;
+    if dir.parent() != Some(root.as_path()) {
+        return Ok(None);
+    }
+    let title = Project::load(&dir)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .title;
+    let Some(name) = folder_name(&title) else {
+        return Ok(None);
+    };
+    if dir.file_name() == Some(name.as_ref()) {
+        return Ok(None);
+    }
+    let mut target = root.join(&name);
+    let mut n = 2;
+    // Taken unless it is this folder under another case (on case-insensitive
+    // file systems), which a rename can still change.
+    while target.symlink_metadata().is_ok() && target.canonicalize().ok().as_ref() != Some(&dir) {
+        target = root.join(format!("{name} {n}"));
+        n += 1;
+    }
+    fs::rename(&dir, &target)?;
+    Ok(Some(target))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recording(root: &Path, folder: &str, title: &str, created: &str) -> PathBuf {
+        let dir = root.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        Project::new(title, created, 1_000_000).save(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn folder_names_are_safe() {
+        assert_eq!(folder_name(" Demo: a/b? ").as_deref(), Some("Demo- a-b-"));
+        assert_eq!(folder_name("..hidden.").as_deref(), Some("hidden"));
+        assert_eq!(folder_name(" . "), None);
+        assert_eq!(folder_name("con").as_deref(), Some("con recording"));
+        assert_eq!(
+            folder_name("Com1.mp4").as_deref(),
+            Some("Com1.mp4 recording")
+        );
+        assert_eq!(folder_name("Console").as_deref(), Some("Console"));
+        assert_eq!(folder_name(&"x".repeat(300)).unwrap().len(), 120);
+    }
+
+    #[test]
+    fn folders_follow_titles_inside_the_recordings_folder() {
+        let root = std::env::temp_dir().join(format!("visor-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let a = recording(
+            &root,
+            "2026-10-01 10.00.00 Recording",
+            "Demo",
+            "2026-10-01T10:00:00Z",
+        );
+        let b = recording(
+            &root,
+            "2026-10-02 10.00.00 Recording",
+            "Demo",
+            "2026-10-02T10:00:00Z",
+        );
+        let root = root.canonicalize().unwrap();
+
+        let a = rename_to_title(&a, &root).unwrap().unwrap();
+        assert_eq!(a, root.join("Demo"));
+        // Taken: numbered. Already named: left alone.
+        let b = rename_to_title(&b, &root).unwrap().unwrap();
+        assert_eq!(b, root.join("Demo 2"));
+        assert_eq!(rename_to_title(&a, &root).unwrap(), None);
+        // Newest first, whatever the names.
+        assert_eq!(list_projects(&root).unwrap(), [b.clone(), a.clone()]);
+
+        // A case-only change isn't blocked by the folder itself.
+        let mut p = Project::load(&a).unwrap();
+        p.title = "DEMO".into();
+        p.save(&a).unwrap();
+        let renamed = rename_to_title(&a, &root).unwrap().unwrap();
+        assert_eq!(renamed.file_name().unwrap(), "DEMO");
+
+        // Outside the recordings folder: never moved.
+        let elsewhere = recording(&root.join("nested"), "x", "Moved?", "2026-10-03T10:00:00Z");
+        assert_eq!(rename_to_title(&elsewhere, &root).unwrap(), None);
+        assert!(elsewhere.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn save_load_roundtrip() {

@@ -334,6 +334,17 @@ impl App {
             self.quit_pending.set(true);
             return;
         }
+        // Name the folders of recordings still open.
+        let open: Vec<PathBuf> = self
+            .editors
+            .borrow_mut()
+            .drain(..)
+            .map(|e| e.dir().to_path_buf())
+            .collect();
+        let root = self.settings.borrow().save_dir.clone();
+        for dir in open {
+            rename_folder(&dir, &root);
+        }
         let session = std::mem::take(&mut *self.session.borrow_mut());
         match session {
             // Finish the recording rather than losing it.
@@ -1524,6 +1535,13 @@ impl App {
         self.editors.borrow_mut().retain(|e| e.dir() != dir);
         self.update_dock();
         self.refresh_tray();
+        // The folder takes the recording's name once nothing has it open.
+        let (dir, root) = (dir.to_path_buf(), self.settings.borrow().save_dir.clone());
+        std::thread::spawn(move || {
+            if rename_folder(&dir, &root) {
+                post(|app| app.refresh_tray());
+            }
+        });
     }
 
     fn update_dock(&self) {
@@ -1628,6 +1646,27 @@ impl App {
 enum Permission {
     Camera,
     Microphone,
+}
+
+/// Renames a recording's folder after its title (see
+/// `visor_core::project::rename_to_title`). Retries for a moment: on
+/// Windows the folder can't be renamed while the closing editor's player
+/// threads still have its files open. Returns whether it moved.
+fn rename_folder(dir: &std::path::Path, root: &std::path::Path) -> bool {
+    for attempt in 0..10 {
+        match visor_core::project::rename_to_title(dir, root) {
+            Ok(Some(to)) => {
+                tracing::info!("renamed {} to {}", dir.display(), to.display());
+                return true;
+            }
+            Ok(None) => return false,
+            Err(e) if attempt == 9 => {
+                tracing::warn!("could not rename {}: {e}", dir.display());
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+    false
 }
 
 /// Discards a recorder without blocking the UI thread on its writer threads.

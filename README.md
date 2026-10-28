@@ -33,7 +33,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    Backspace on Windows and Linux/X11; they can be turned off in Preferences).
 5. Stopping opens the editor, ready for you to name the recording: type a
    name and press Enter to get back to editing. Exports are named after it,
-   and you can rename it any time in the sidebar's **Name** field.
+   and you can rename it any time in the sidebar's **Name** field. When the
+   editor closes, the recording's folder is renamed to match.
    In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
      timeline to seek, drag on it to select.
@@ -53,7 +54,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
 
 Recordings are saved to `~/Movies/Visor/<date time> Recording/` (configurable
 in Preferences) as separate tracks plus `project.json`, so edits are
-non-destructive and you can always re-export.
+non-destructive and you can always re-export. Once you name a recording, its
+folder takes that name.
 
 Command line: `visor --edit <recording folder>` opens a recording;
 `visor --record [--stop-after SECONDS]` starts recording with the saved
