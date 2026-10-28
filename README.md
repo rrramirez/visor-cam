@@ -28,7 +28,14 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    With several displays, the chosen one is outlined in red.
 4. Use the floating control bar (or the menu bar menu) to pause, resume, stop
    or discard. The control bar and camera bubble never appear in the recording.
-5. Stopping opens the editor:
+   From any app, **⌥⇧R** starts a recording with your last choices (or stops
+   one), **⌥⇧P** pauses or resumes and **⌥⇧⌫** discards (Alt+Shift+R, P and
+   Backspace on Windows and Linux/X11; they can be turned off in Preferences).
+5. Stopping opens the editor, ready for you to name the recording: type a
+   name and press Enter to get back to editing. Exports are named after it,
+   and you can rename it any time in the sidebar's **Name** field. When the
+   editor closes, the recording's folder is renamed to match.
+   In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
@@ -37,12 +44,18 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      keeps its pitch. The preview plays at that speed.
    - Drag, resize, reshape, mirror or hide the camera bubble. It starts where
      it was on screen while recording, mirrored as you saw it.
+   - **Thumbnail**: *Use frame* picks the frame MP4 exports carry as
+     their cover (shown by Finder, Explorer and players); *Save image* writes
+     it as a full-size JPEG.
    - **Export** to MP4, WebM (VP9 or AV1) or GIF, at original size, 1080p or
-     720p. Files go to the recording's `exports/` folder.
+     720p, optionally with *Reduce background noise* and *Even out volume*
+     (to -16 LUFS; both apply to the export, not the preview). Files go to the
+     recording's `exports/` folder.
 
 Recordings are saved to `~/Movies/Visor/<date time> Recording/` (configurable
 in Preferences) as separate tracks plus `project.json`, so edits are
-non-destructive and you can always re-export.
+non-destructive and you can always re-export. Once you name a recording, its
+folder takes that name.
 
 Command line: `visor --edit <recording folder>` opens a recording;
 `visor --record [--stop-after SECONDS]` starts recording with the saved

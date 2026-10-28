@@ -1,4 +1,4 @@
-import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView, LineEdit } from "std-widgets.slint";
 import { Theme, Glyph, Icons } from "theme.slint";
 import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection } from "widgets.slint";
 
@@ -84,6 +84,13 @@ export component Editor inherits Window {
     in-out property <bool> edit-open: true;
     in-out property <bool> camera-open: true;
     in-out property <bool> speed-open: true;
+    in-out property <bool> thumbnail-open: true;
+    // Thumbnail position on the timeline, or -1 for the first frame kept.
+    in property <float> thumbnail-pos: -1;
+    in property <string> thumbnail-label;
+    // A thumbnail image is being saved; its outcome when it failed.
+    in property <bool> saving-thumbnail;
+    in property <string> thumbnail-error;
 
     in property <bool> playing;
     in property <float> position;
@@ -101,6 +108,9 @@ export component Editor inherits Window {
 
     in-out property <int> export-format;
     in-out property <int> export-resolution;
+    in property <bool> has-audio;
+    in-out property <bool> export-denoise;
+    in-out property <bool> export-normalize;
     in property <bool> exporting;
     in property <float> export-progress;
     in property <string> export-status;
@@ -128,6 +138,15 @@ export component Editor inherits Window {
     callback speed-changed();
     callback sections-changed();
     callback title-edited(string);
+    // Puts the cursor in the name field with the name selected, so typing
+    // replaces it (a fresh recording's editor starts there).
+    public function focus-name() {
+        name-edit.focus();
+        name-edit.select-all();
+    }
+    callback set-thumbnail();
+    callback reset-thumbnail();
+    callback save-thumbnail();
     callback export();
     callback cancel-export();
     callback reveal-export();
@@ -178,15 +197,13 @@ export component Editor inherits Window {
                     width: 22px;
                     Rectangle { width: 12px; height: 12px; border-radius: 6px; background: Theme.record; }
                 }
-                title-input := TextInput {
+                Text {
                     text: root.project-title;
                     color: Theme.text;
                     font-size: Theme.font-large;
                     font-weight: 600;
                     vertical-alignment: center;
-                    single-line: true;
-                    edited => { root.title-edited(self.text); }
-                    accepted => { keys.focus(); }
+                    overflow: elide;
                 }
                 IconButton {
                     icon: Icons.folder;
@@ -275,6 +292,28 @@ export component Editor inherits Window {
                             height: self.preferred-height;
                             padding: 14px;
                             spacing: 14px;
+
+                            VerticalLayout {
+                                spacing: 8px;
+                                SectionLabel { text: "NAME"; }
+                                name-edit := LineEdit {
+                                    text: root.project-title;
+                                    placeholder-text: "Name this recording";
+                                    edited(text) => { root.title-edited(text); }
+                                    // Enter hands the keyboard back to the editor.
+                                    accepted => { keys.focus(); }
+                                    // Leaving it blank keeps the last name.
+                                    changed has-focus => {
+                                        if (!self.has-focus) { self.text = root.project-title; }
+                                    }
+                                }
+                                Text {
+                                    text: "Exports are named after it.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
 
                             CollapsibleSection {
                                 title: "EDIT";
@@ -403,6 +442,52 @@ export component Editor inherits Window {
                                     }
                                 }
                             }
+
+                            CollapsibleSection {
+                                title: "THUMBNAIL";
+                                open <=> root.thumbnail-open;
+                                toggled => { root.sections-changed(); }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.thumbnail-label;
+                                        color: Theme.muted;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.thumbnail-pos >= 0: PillButton {
+                                        horizontal-stretch: 0;
+                                        text: "Reset";
+                                        font-size: Theme.font-small;
+                                        clicked => { root.reset-thumbnail(); keys.focus(); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    PillButton {
+                                        text: "Use frame";
+                                        icon: Icons.image;
+                                        clicked => { root.set-thumbnail(); keys.focus(); }
+                                    }
+                                    PillButton {
+                                        text: root.saving-thumbnail ? "Saving…" : "Save image";
+                                        icon: Icons.export;
+                                        enabled: !root.saving-thumbnail;
+                                        clicked => { root.save-thumbnail(); keys.focus(); }
+                                    }
+                                }
+                                if root.thumbnail-error != "": Text {
+                                    text: root.thumbnail-error;
+                                    color: Theme.record;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "MP4 exports carry it as their cover, shown by " + root.file-manager + " and players. Save image writes it as a JPEG.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
                         }
                     }
 
@@ -420,6 +505,16 @@ export component Editor inherits Window {
                             model: ["Original size", "1080p", "720p"];
                             current-index <=> root.export-resolution;
                             enabled: !root.exporting && root.export-format != 3;
+                        }
+                        if root.has-audio && root.export-format != 3: Switch {
+                            text: "Reduce background noise";
+                            checked <=> root.export-denoise;
+                            enabled: !root.exporting;
+                        }
+                        if root.has-audio && root.export-format != 3: Switch {
+                            text: "Even out volume";
+                            checked <=> root.export-normalize;
+                            enabled: !root.exporting;
                         }
                         if root.exporting: VerticalLayout {
                             spacing: 6px;
@@ -611,6 +706,17 @@ export component Editor inherits Window {
                             if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
                         }
                     }
+                }
+
+                // Thumbnail frame
+                if root.thumbnail-pos >= 0: Rectangle {
+                    x: root.thumbnail-pos * track.width - 5px;
+                    y: 2px;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    background: Theme.warning;
+                    transform-rotation: 45deg;
                 }
 
                 // Playhead

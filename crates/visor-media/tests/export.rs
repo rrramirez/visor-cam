@@ -4,7 +4,8 @@ use std::sync::atomic::AtomicBool;
 
 use common::*;
 use ffmpeg_next as ffmpeg;
-use visor_media::decode::VideoReader;
+use visor_media::decode::{AudioReader, VideoReader};
+use visor_media::export::{AudioCleanup, save_thumbnail};
 use visor_media::{ExportFormat, ExportOptions, export};
 
 fn probe(path: &std::path::Path) -> (f64, Vec<ffmpeg::codec::Id>) {
@@ -44,7 +45,15 @@ fn exports_mp4_with_cuts_and_bubble() {
 
     let (duration, codecs) = probe(&out);
     assert!((duration - 4.5).abs() < 0.08, "duration {duration}");
-    assert_eq!(codecs, [ffmpeg::codec::Id::H264, ffmpeg::codec::Id::AAC]);
+    // The third stream is the cover art.
+    assert_eq!(
+        codecs,
+        [
+            ffmpeg::codec::Id::H264,
+            ffmpeg::codec::Id::AAC,
+            ffmpeg::codec::Id::MJPEG
+        ]
+    );
 
     // Output 1.2 s is source 2.2 s (frame 66); output 3.2 s is source 4.7 s (frame 141).
     let mut reader =
@@ -169,6 +178,166 @@ fn exports_sped_up_video_and_audio() {
         (top_luma(&f) - expected).abs() < 8.0,
         "{} vs {expected}",
         top_luma(&f)
+    );
+    common::cleanup(&dir);
+}
+
+/// The cover art's JPEG bytes, if the file has one.
+fn cover(path: &std::path::Path) -> Option<Vec<u8>> {
+    let mut input = ffmpeg::format::input(path).unwrap();
+    let index = input
+        .streams()
+        .find(|s| {
+            s.disposition()
+                .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
+        })?
+        .index();
+    input
+        .packets()
+        .find(|(s, _)| s.index() == index)
+        .and_then(|(_, p)| p.data().map(<[u8]>::to_vec))
+}
+
+/// A JPEG decoded.
+fn decode_jpeg(jpeg: &[u8]) -> ffmpeg::frame::Video {
+    let codec = ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).unwrap();
+    let mut decoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+        .decoder()
+        .video()
+        .unwrap();
+    decoder.send_packet(&ffmpeg::Packet::copy(jpeg)).unwrap();
+    decoder.send_eof().unwrap();
+    let mut f = ffmpeg::frame::Video::empty();
+    decoder.receive_frame(&mut f).unwrap();
+    f
+}
+
+/// A video-range luma level as JPEG (full range) stores it.
+fn full_range(y: u8) -> f64 {
+    (f64::from(y) - 16.0) * 255.0 / 219.0
+}
+
+fn assert_jpeg_full_range(f: &ffmpeg::frame::Video) {
+    // JPEG decodes to the "J" (full range) formats, or says so outright.
+    let full = f.format() == ffmpeg::format::Pixel::YUVJ420P
+        || f.color_range() == ffmpeg::color::Range::JPEG;
+    assert!(full, "{:?} {:?}", f.format(), f.color_range());
+}
+
+#[test]
+fn mp4_cover_is_the_chosen_thumbnail() {
+    let (dir, mut project) = project("export-cover", 4);
+    // Frame 75: the luma there differs from the first frame's.
+    project.thumbnail_us = Some(75 * FRAME_US + 1000);
+    let out = dir.join("out.mp4");
+    let opts = ExportOptions::new(ExportFormat::Mp4);
+    export(
+        &dir,
+        &project,
+        &out,
+        &opts,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let jpeg = cover(&out).expect("no cover art");
+    assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
+    // Checking what the images show needs a JPEG decoder, which the app
+    // itself doesn't: FFmpeg builds made for packaging leave it out.
+    let can_decode = ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).is_some();
+    if !can_decode {
+        eprintln!("this FFmpeg can't decode JPEG: only checking that images are written");
+    }
+    if can_decode {
+        // Most of the frame is screen (the bubble covers the bottom left).
+        let f = decode_jpeg(&jpeg);
+        assert_jpeg_full_range(&f);
+        let l = mean_luma(&f);
+        let expected = full_range(luma(75));
+        assert!((l - expected).abs() < 25.0, "cover luma {l} vs {expected}");
+    }
+
+    // Cut away, the thumbnail falls back to the first kept frame.
+    project.edit.cut(2_000_000, 3_000_000);
+    project.edit.trim(500_000, 4_000_000);
+    assert_eq!(visor_media::export::thumbnail_time(&project), 500_000);
+
+    let image = dir.join("thumb.jpg");
+    save_thumbnail(&dir, &project, &image).unwrap();
+    let saved = std::fs::read(&image).unwrap();
+    assert_eq!(&saved[..2], [0xFF, 0xD8]);
+    if can_decode {
+        let f = decode_jpeg(&saved);
+        assert_jpeg_full_range(&f);
+        let expected = full_range(luma(15));
+        assert!(
+            (mean_luma(&f) - expected).abs() < 25.0,
+            "saved luma vs {expected}"
+        );
+        // Full size.
+        assert_eq!((f.width(), f.height()), (640, 360));
+
+        // Video black (16) must come out as JPEG black (0), not grey.
+        project.edit = visor_core::EditList::full(project.duration_us);
+        project.thumbnail_us = Some(0);
+        save_thumbnail(&dir, &project, &image).unwrap();
+        let black = top_luma(&decode_jpeg(&std::fs::read(&image).unwrap()));
+        assert!(black < 4.0, "black came out as {black}");
+    }
+    common::cleanup(&dir);
+}
+
+/// RMS level of the first audio stream.
+fn rms(path: &std::path::Path) -> (f64, f64) {
+    let mut reader = AudioReader::open(path).unwrap();
+    let (mut sum, mut n) = (0f64, 0usize);
+    while let Some((_, chunk)) = reader.next_chunk().unwrap() {
+        sum += chunk.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>();
+        n += chunk.len();
+    }
+    ((sum / n.max(1) as f64).sqrt(), n as f64 / 2.0 / 48_000.0)
+}
+
+#[test]
+fn audio_cleanup_keeps_length_and_sets_loudness() {
+    let (dir, project) = project("export-cleanup", 5);
+    let plain = dir.join("plain.mp4");
+    let cleaned = dir.join("cleaned.mp4");
+    let mut opts = ExportOptions::new(ExportFormat::Mp4);
+    export(
+        &dir,
+        &project,
+        &plain,
+        &opts,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    opts.audio = AudioCleanup {
+        denoise: true,
+        normalize: true,
+    };
+    export(
+        &dir,
+        &project,
+        &cleaned,
+        &opts,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    let (loud, plain_secs) = rms(&plain);
+    let (level, secs) = rms(&cleaned);
+    assert!(
+        (secs - plain_secs).abs() < 0.05,
+        "{secs} s vs {plain_secs} s"
+    );
+    // A 0.6 amplitude tone (about -7 dBFS RMS) comes down to about -16.
+    let db = 20.0 * level.log10();
+    assert!(
+        level < loud * 0.6 && (-22.0..-11.0).contains(&db),
+        "{db:.1} dBFS"
     );
     common::cleanup(&dir);
 }

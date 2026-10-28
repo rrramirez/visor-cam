@@ -37,6 +37,32 @@ pub struct EditorWindow {
     /// when idle so an open editor doesn't keep waking the CPU.
     timer: Timer,
     idle_ticks: Cell<u32>,
+    /// Background work writing into the recording's folder (exports,
+    /// thumbnail images); the folder isn't renamed while any runs.
+    jobs: Jobs,
+}
+
+/// Counts running background jobs; each holds a [`JobGuard`].
+#[derive(Clone, Default)]
+pub struct Jobs(Arc<AtomicU32>);
+
+pub struct JobGuard(Arc<AtomicU32>);
+
+impl Jobs {
+    fn start(&self) -> JobGuard {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        JobGuard(self.0.clone())
+    }
+
+    pub fn running(&self) -> bool {
+        self.0.load(Ordering::SeqCst) > 0
+    }
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct ExportJob {
@@ -49,7 +75,9 @@ struct ExportJob {
 }
 
 impl EditorWindow {
-    pub fn open(dir: PathBuf) -> anyhow::Result<Rc<Self>> {
+    /// `name_first`: start with the keyboard in the name field (for a
+    /// recording that was just made).
+    pub fn open(dir: PathBuf, name_first: bool) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
@@ -75,13 +103,17 @@ impl EditorWindow {
             ui.set_edit_open(open("edit"));
             ui.set_camera_open(open("camera"));
             ui.set_speed_open(open("speed"));
+            ui.set_thumbnail_open(open("thumbnail"));
         }
         {
             let app = app();
             let settings = app.settings.borrow();
             ui.set_export_format(settings.export_format.clamp(0, 3));
             ui.set_export_resolution(settings.export_resolution.clamp(0, 2));
+            ui.set_export_denoise(settings.export_denoise);
+            ui.set_export_normalize(settings.export_normalize);
         }
+        ui.set_has_audio(project.tracks.mic.is_some() || project.tracks.system.is_some());
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -104,12 +136,18 @@ impl EditorWindow {
                 last_export: RefCell::default(),
                 timer,
                 idle_ticks: Cell::new(0),
+                jobs: Jobs::default(),
             }
         });
         this.wire(Rc::downgrade(&this));
         this.refresh_edit_ui();
         this.load_previews();
         ui.show()?;
+        if name_first {
+            // Focus belongs to the window, so it is in place whenever the
+            // window becomes active.
+            ui.invoke_focus_name();
+        }
         Ok(this)
     }
 
@@ -200,6 +238,7 @@ impl EditorWindow {
                 ("edit", e.ui.get_edit_open()),
                 ("camera", e.ui.get_camera_open()),
                 ("speed", e.ui.get_speed_open()),
+                ("thumbnail", e.ui.get_thumbnail_open()),
             ]
             .into_iter()
             .filter(|(_, open)| !open)
@@ -220,10 +259,24 @@ impl EditorWindow {
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
             if !title.is_empty() {
+                e.ui.set_project_title(title.clone().into());
                 e.project.borrow_mut().title = title;
                 e.save();
             }
         });
+        on!(on_set_thumbnail, |e| {
+            let position = e.player.borrow().position();
+            let frame = kept_frame(&e.project.borrow().edit, position);
+            e.project.borrow_mut().thumbnail_us = Some(frame);
+            e.save();
+            e.refresh_edit_ui();
+        });
+        on!(on_reset_thumbnail, |e| {
+            e.project.borrow_mut().thumbnail_us = None;
+            e.save();
+            e.refresh_edit_ui();
+        });
+        on!(on_save_thumbnail, |e| e.save_thumbnail());
         on!(on_export, |e| e.start_export());
         on!(on_cancel_export, |e| {
             if let Some(job) = &*e.export.borrow() {
@@ -264,13 +317,20 @@ impl EditorWindow {
 
     /// Stops work for a window that is being hidden, then lets the app drop it.
     fn closing(&self) {
+        self.stop_work();
+        let (dir, jobs) = (self.dir.clone(), self.jobs.clone());
+        // Drop the window (and its player threads) after this callback.
+        slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
+    }
+
+    /// Cancels an export and stops playback. Returns the background jobs,
+    /// which may take a moment to wind down.
+    pub fn stop_work(&self) -> Jobs {
         if let Some(job) = &*self.export.borrow() {
             job.cancel.store(true, Ordering::Relaxed);
         }
         self.control().pause();
-        let dir = self.dir.clone();
-        // Drop the window (and its player threads) after this callback.
-        slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir));
+        self.jobs.clone()
     }
 
     /// The player, for changing it: restarts the UI timer so the change
@@ -381,6 +441,25 @@ impl EditorWindow {
             )
         };
         self.ui.set_speed_label(speed_label.into());
+        let thumbnail = visor_media::export::thumbnail_time(&project);
+        let chosen = project.thumbnail_us == Some(thumbnail);
+        self.ui.set_thumbnail_pos(if chosen {
+            (thumbnail as f64 / d) as f32
+        } else {
+            -1.0
+        });
+        let at = project.edit.to_output(thumbnail).unwrap_or(0);
+        self.ui.set_thumbnail_label(
+            if chosen {
+                format!(
+                    "Frame at {}",
+                    util::clock_tenths((at as f64 / project.speed) as Micros)
+                )
+            } else {
+                "First frame".to_string()
+            }
+            .into(),
+        );
         drop(project);
         self.ui.set_kept_label(self.kept_label().into());
     }
@@ -524,27 +603,28 @@ impl EditorWindow {
             let mut settings = app.settings.borrow_mut();
             settings.export_format = self.ui.get_export_format();
             settings.export_resolution = self.ui.get_export_resolution();
+            settings.export_denoise = self.ui.get_export_denoise();
+            settings.export_normalize = self.ui.get_export_normalize();
             settings.save();
         }
+        options.audio = visor_media::export::AudioCleanup {
+            denoise: self.ui.get_export_denoise(),
+            normalize: self.ui.get_export_normalize(),
+        };
         options.max_height = match self.ui.get_export_resolution() {
             1 => Some(1080),
             2 => Some(720),
             _ => None,
         };
         let project = self.project.borrow().clone();
-        let exports = self.dir.join("exports");
-        // A symlinked exports folder would let a shared project make the
-        // export write outside it.
-        if exports.is_symlink() {
-            self.ui
-                .set_export_status("Export failed: the exports folder is a link".into());
-            return;
-        }
-        if let Err(e) = std::fs::create_dir_all(&exports) {
-            self.ui
-                .set_export_status(format!("Export failed: {e}").into());
-            return;
-        }
+        let exports = match self.exports_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.ui
+                    .set_export_status(format!("Export failed: {e}").into());
+                return;
+            }
+        };
         let out = unique_path(&exports, &sanitize(&project.title), format.extension());
         let job = ExportJob {
             out: out.clone(),
@@ -556,7 +636,9 @@ impl EditorWindow {
         let (cancel, progress, result) =
             (job.cancel.clone(), job.progress.clone(), job.result.clone());
         let dir = self.dir.clone();
+        let guard = self.jobs.start();
         std::thread::spawn(move || {
+            let _guard = guard;
             let r = visor_media::export(
                 &dir,
                 &project,
@@ -574,6 +656,57 @@ impl EditorWindow {
         self.ui.set_export_progress(0.0);
         self.ui.set_export_status("Exporting… 0%".into());
         *self.export.borrow_mut() = Some(job);
+    }
+
+    /// The recording's `exports` folder, created if needed.
+    fn exports_dir(&self) -> anyhow::Result<PathBuf> {
+        let exports = self.dir.join("exports");
+        // A symlinked exports folder would let a shared project make the
+        // export write outside it.
+        if exports.is_symlink() {
+            anyhow::bail!("the exports folder is a link");
+        }
+        std::fs::create_dir_all(&exports)?;
+        Ok(exports)
+    }
+
+    /// Writes the thumbnail to the exports folder as a JPEG and shows it.
+    fn save_thumbnail(&self) {
+        if self.ui.get_saving_thumbnail() {
+            return;
+        }
+        let project = self.project.borrow().clone();
+        let out = match self.exports_dir() {
+            Ok(dir) => unique_path(
+                &dir,
+                &format!("{} thumbnail", sanitize(&project.title)),
+                "jpg",
+            ),
+            Err(e) => {
+                self.ui
+                    .set_thumbnail_error(format!("Saving the image failed: {e}").into());
+                return;
+            }
+        };
+        self.ui.set_thumbnail_error("".into());
+        self.ui.set_saving_thumbnail(true);
+        let dir = self.dir.clone();
+        let weak = self.ui.as_weak();
+        let guard = self.jobs.start();
+        std::thread::spawn(move || {
+            let result = visor_media::export::save_thumbnail(&dir, &project, &out);
+            drop(guard);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_saving_thumbnail(false);
+                match result {
+                    Ok(()) => platform::reveal(&out),
+                    Err(e) => {
+                        tracing::error!("saving the thumbnail failed: {e:#}");
+                        ui.set_thumbnail_error(format!("Saving the image failed: {e:#}").into());
+                    }
+                }
+            });
+        });
     }
 
     fn poll_export(&self) {
@@ -625,23 +758,27 @@ impl EditorWindow {
     }
 }
 
-fn sanitize(title: &str) -> String {
-    let cleaned: String = title
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        "Recording".into()
-    } else {
-        trimmed.into()
+/// `t` if the edit keeps it, else the closest kept frame before it (the
+/// playhead rests just past the last kept frame after playing to the end),
+/// else the first kept frame.
+fn kept_frame(edit: &EditList, t: Micros) -> Micros {
+    if edit.to_output(t).is_some() {
+        return t;
     }
+    let ranges = edit.ranges();
+    ranges
+        .iter()
+        .rev()
+        .find(|r| r.1 <= t)
+        .map(|r| r.1 - 1)
+        .or_else(|| ranges.first().map(|r| r.0))
+        .unwrap_or(0)
+}
+
+/// A file name stem for exports of a recording titled `title`, made safe
+/// the same way as its folder name.
+fn sanitize(title: &str) -> String {
+    visor_core::project::folder_name(title).unwrap_or_else(|| "Recording".into())
 }
 
 /// `dir/name.ext`, or `dir/name 2.ext`, … if taken. Any entry counts as
@@ -659,6 +796,20 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnails_snap_to_kept_frames() {
+        let mut edit = EditList::full(10_000_000);
+        edit.cut(4_000_000, 6_000_000);
+        edit.trim(1_000_000, 9_000_000);
+        assert_eq!(kept_frame(&edit, 2_000_000), 2_000_000);
+        // At the end of the last kept range: its last frame.
+        assert_eq!(kept_frame(&edit, 9_000_000), 8_999_999);
+        // In a cut: the frame before it.
+        assert_eq!(kept_frame(&edit, 5_000_000), 3_999_999);
+        // Before everything kept: the first kept frame.
+        assert_eq!(kept_frame(&edit, 0), 1_000_000);
+    }
 
     #[test]
     fn export_names_are_safe_and_unique() {

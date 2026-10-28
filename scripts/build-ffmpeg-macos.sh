@@ -18,7 +18,11 @@ src="$work/ffmpeg-$version"
 prefix="$work/prefix"
 brew_prefix="$(brew --prefix)"
 
-if [ -f "$prefix/lib/pkgconfig/libavcodec.pc" ] && [ "${1:-}" != "--force" ]; then
+# Rebuilt whenever this script (the configuration) changes.
+stamp="$prefix/.built-by"
+script_hash="$(shasum -a 256 "$0" | cut -d' ' -f1)"
+if [ -f "$prefix/lib/pkgconfig/libavcodec.pc" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$script_hash" ] &&
+    [ "${1:-}" != "--force" ]; then
     echo "Minimal FFmpeg already built in $prefix (pass --force to rebuild)"
     exit 0
 fi
@@ -78,11 +82,11 @@ PKG_CONFIG_PATH="$static/lib/pkgconfig" PKG_CONFIG_LIBDIR="$static/lib/pkgconfig
     --enable-demuxer=mov,matroska,gif,aac \
     --enable-muxer=mp4,ipod,mov,webm,matroska,gif \
     --enable-decoder=h264,aac,rawvideo,vp9,opus,gif \
-    --enable-encoder=libx264,h264_videotoolbox,aac,libvpx_vp9,libsvtav1,libopus,gif \
+    --enable-encoder=libx264,h264_videotoolbox,aac,libvpx_vp9,libsvtav1,libopus,gif,mjpeg \
     --enable-parser=h264,aac,vp9,opus,av1 \
     --enable-hwaccel=h264_videotoolbox \
     --enable-bsfs \
-    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,null,anull,palettegen,paletteuse,split \
+    --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,highpass,afftdn,loudnorm,null,anull,palettegen,paletteuse,split \
     --enable-swscale --enable-swresample \
     --extra-ldflags="-Wl,-headerpad_max_install_names" \
     --install-name-dir='@rpath'
@@ -91,6 +95,7 @@ echo "==> Building"
 make -j"$(sysctl -n hw.ncpu)"
 rm -rf "$prefix"
 make install
+echo "$script_hash" >"$stamp"
 
 echo "==> Done"
 du -sh "$prefix/lib"/*.dylib | sort -h | tail -8

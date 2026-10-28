@@ -1988,6 +1988,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "global-hotkey"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adda8c76a5139df3bae0eb0413c2cd746f66594e0bb66231a4daa0be3172da70"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types 0.8.3",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "once_cell",
+ "thiserror 2.0.21",
+ "windows-sys 0.59.0",
+ "x11rb",
+ "xkeysym",
+]
+
+[[package]]
 name = "glow"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5894,11 +5911,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visor"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
  "dirs",
+ "global-hotkey",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -5919,7 +5937,7 @@ dependencies = [
 
 [[package]]
 name = "visor-capture"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5944,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "visor-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5958,7 +5976,7 @@ dependencies = [
 
 [[package]]
 name = "visor-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5967,7 +5985,7 @@ dependencies = [
 
 [[package]]
 name = "visor-media"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5979,7 +5997,7 @@ dependencies = [
 
 [[package]]
 name = "visor-recorder"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

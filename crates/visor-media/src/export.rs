@@ -50,6 +50,7 @@ pub struct ExportOptions {
     pub max_height: Option<u32>,
     pub gif_fps: u32,
     pub gif_max_width: u32,
+    pub audio: AudioCleanup,
 }
 
 impl ExportOptions {
@@ -59,7 +60,34 @@ impl ExportOptions {
             max_height: None,
             gif_fps: 15,
             gif_max_width: 960,
+            audio: AudioCleanup::default(),
         }
+    }
+}
+
+/// Optional fixes for the exported sound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioCleanup {
+    /// Take out rumble and steady background noise (fans, hum, hiss).
+    pub denoise: bool,
+    /// Bring the loudness to a steady -16 LUFS, the usual level for speech
+    /// online, so quiet and loud passages and recordings sound alike.
+    pub normalize: bool,
+}
+
+impl AudioCleanup {
+    /// FFmpeg filters doing the cleanup, in order.
+    pub fn filters(self) -> Vec<&'static str> {
+        let mut filters = Vec::new();
+        if self.denoise {
+            // Rumble below speech, then spectral noise reduction that keeps
+            // learning the noise floor as it changes.
+            filters.extend(["highpass=f=80", "afftdn=nr=12:nf=-40:tn=1"]);
+        }
+        if self.normalize {
+            filters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+        }
+        filters
     }
 }
 
@@ -93,40 +121,9 @@ fn run(
     if edit.duration() == 0 {
         bail!("nothing to export: the edit keeps no time");
     }
-    let screen_track = project
-        .tracks
-        .screen
-        .as_ref()
-        .context("project has no screen track")?;
-    let screen_path = dir.join(&screen_track.file);
-    let (src_w, src_h) = VideoReader::open(&screen_path, None)?.size();
-
     let gif = opts.format == ExportFormat::Gif;
-    let (out_w, out_h) = output_size(src_w, src_h, opts);
-    let fps = if gif {
-        opts.gif_fps.max(1)
-    } else {
-        screen_track.fps.unwrap_or(30).clamp(1, 120)
-    };
-
-    let mut screen_reader =
-        VideoReader::open(&screen_path, Some((format::Pixel::YUV420P, out_w, out_h)))?;
-    // Half the cores, like the encoder.
-    screen_reader.set_scaling(scaling::Flags::BILINEAR, encoder_threads());
-    let screen = FrameCursor::new(screen_reader);
-    let camera = match &project.tracks.camera {
-        Some(track) => match Bubble::new(&project.camera_overlay, out_w, out_h) {
-            Some(bubble) => {
-                let path = dir.join(&track.file);
-                let (cw, ch) = VideoReader::open(&path, None)?.size();
-                let (sw, sh) = bubble.camera_scale(cw, ch);
-                let reader = VideoReader::open(&path, Some((format::Pixel::YUV420P, sw, sh)))?;
-                Some((FrameCursor::new(reader), bubble))
-            }
-            None => None,
-        },
-        None => None,
-    };
+    let (mut renderer, (out_w, out_h)) = Renderer::open(dir, project, opts)?;
+    let fps = renderer.fps;
     let mut audio = if gif {
         None
     } else {
@@ -143,14 +140,6 @@ fn run(
         (u128::from(project.output_duration()) * u128::from(fps)).div_ceil(1_000_000) as u64;
     // Edit (cut-aware, before speed) time at the end of output frame `k`.
     let edit_us = |k: u64| (k as f64 * 1e6 / f64::from(fps) * speed) as Micros;
-    let mut renderer = Renderer {
-        edit,
-        fps,
-        speed,
-        screen,
-        camera,
-        composed: frame::Video::empty(),
-    };
 
     if gif {
         // Pass 1: build a palette from a sample of the frames; neighbouring
@@ -175,6 +164,7 @@ fn run(
         renderer.reset()?;
         let mut graph = gif_paletteuse_graph(out_w, out_h, fps, &palette)?;
         let mut muxer = Muxer::new(out, opts.format, out_w, out_h, fps, false)?;
+        muxer.start()?;
         graph.get("pal").unwrap().source().add(&palette)?;
         graph.get("pal").unwrap().source().flush()?;
         let mut mapped = frame::Video::empty();
@@ -194,9 +184,25 @@ fn run(
         return muxer.finish();
     }
 
+    // MP4s carry the project's thumbnail as cover art, which file managers
+    // and players show for the file.
+    // A nicety: the export goes ahead without it if it can't be made.
+    let cover = if opts.format == ExportFormat::Mp4 {
+        let t = thumbnail_time(project);
+        let jpeg = renderer.render_source(t).and_then(|f| encode_jpeg(f));
+        renderer.reset()?;
+        jpeg.inspect_err(|e| tracing::warn!("exporting without cover art: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
     let mut muxer = Muxer::new(out, opts.format, out_w, out_h, fps, audio.is_some())?;
+    if let Some(jpeg) = cover {
+        muxer.cover(jpeg)?;
+    }
+    muxer.start()?;
     let segments = SampleMap::new(edit);
-    let mut tempo = Tempo::new(speed)?;
+    let mut tempo = Tempo::with_filters(speed, &opts.audio.filters())?;
     let mut stretched = Vec::new();
     // Edit-time samples read so far (before the speed change).
     let mut audio_read = 0i64;
@@ -264,7 +270,55 @@ struct Renderer<'a> {
     composed: frame::Video,
 }
 
-impl Renderer<'_> {
+impl<'a> Renderer<'a> {
+    /// A renderer for `project`'s export with `opts`, and the output size.
+    fn open(
+        dir: &Path,
+        project: &'a Project,
+        opts: &ExportOptions,
+    ) -> anyhow::Result<(Self, (u32, u32))> {
+        let screen_track = project
+            .tracks
+            .screen
+            .as_ref()
+            .context("project has no screen track")?;
+        let screen_path = dir.join(&screen_track.file);
+        let (src_w, src_h) = VideoReader::open(&screen_path, None)?.size();
+        let (out_w, out_h) = output_size(src_w, src_h, opts);
+        let fps = if opts.format == ExportFormat::Gif {
+            opts.gif_fps.max(1)
+        } else {
+            screen_track.fps.unwrap_or(30).clamp(1, 120)
+        };
+
+        let mut screen_reader =
+            VideoReader::open(&screen_path, Some((format::Pixel::YUV420P, out_w, out_h)))?;
+        // Half the cores, like the encoder.
+        screen_reader.set_scaling(scaling::Flags::BILINEAR, encoder_threads());
+        let camera = match &project.tracks.camera {
+            Some(track) => match Bubble::new(&project.camera_overlay, out_w, out_h) {
+                Some(bubble) => {
+                    let path = dir.join(&track.file);
+                    let (cw, ch) = VideoReader::open(&path, None)?.size();
+                    let (sw, sh) = bubble.camera_scale(cw, ch);
+                    let reader = VideoReader::open(&path, Some((format::Pixel::YUV420P, sw, sh)))?;
+                    Some((FrameCursor::new(reader), bubble))
+                }
+                None => None,
+            },
+            None => None,
+        };
+        let renderer = Self {
+            edit: &project.edit,
+            fps,
+            speed: project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED),
+            screen: FrameCursor::new(screen_reader),
+            camera,
+            composed: frame::Video::empty(),
+        };
+        Ok((renderer, (out_w, out_h)))
+    }
+
     /// Output frame `k`, stamped with pts `k`.
     fn render(&mut self, k: u64) -> anyhow::Result<&frame::Video> {
         // Output frame time, sped up or slowed down into edit time.
@@ -273,6 +327,13 @@ impl Renderer<'_> {
             .edit
             .to_source(t_out)
             .unwrap_or_else(|| self.edit.ranges().last().map_or(0, |r| r.1));
+        let frame = self.render_source(t_src)?;
+        frame.set_pts(Some(k as i64));
+        Ok(frame)
+    }
+
+    /// The composited frame shown at source time `t_src`.
+    fn render_source(&mut self, t_src: Micros) -> anyhow::Result<&mut frame::Video> {
         let (_, screen) = self
             .screen
             .at(t_src)?
@@ -290,7 +351,6 @@ impl Renderer<'_> {
             },
             None => screen,
         };
-        frame.set_pts(Some(k as i64));
         Ok(frame)
     }
 
@@ -308,6 +368,63 @@ impl Renderer<'_> {
 fn copy_frame(dst: &mut frame::Video, src: &frame::Video) {
     reuse_or_alloc(dst, src.format(), src.width(), src.height());
     dst.clone_from(src);
+}
+
+/// Source time of the project's thumbnail: the chosen frame while it's still
+/// in the edit, otherwise the first frame kept.
+pub fn thumbnail_time(project: &Project) -> Micros {
+    let first = project.edit.ranges().first().map_or(0, |r| r.0);
+    project
+        .thumbnail_us
+        .filter(|&t| project.edit.to_output(t).is_some())
+        .unwrap_or(first)
+}
+
+/// Saves the project's thumbnail, composited like the export (camera bubble
+/// included) at the recording's full size, as a JPEG at `out`.
+pub fn save_thumbnail(dir: &Path, project: &Project, out: &Path) -> anyhow::Result<()> {
+    ffmpeg::init()?;
+    let opts = ExportOptions::new(ExportFormat::Mp4);
+    let mut renderer = Renderer::open(dir, project, &opts)?.0;
+    let jpeg = encode_jpeg(renderer.render_source(thumbnail_time(project))?)?;
+    std::fs::write(out, jpeg).with_context(|| format!("writing {}", out.display()))
+}
+
+/// One frame (video-range YUV 4:2:0) as a JPEG file's bytes.
+fn encode_jpeg(f: &frame::Video) -> anyhow::Result<Vec<u8>> {
+    let codec = encoder::find(codec::Id::MJPEG).context("FFmpeg has no JPEG encoder")?;
+    let (w, h) = (f.width(), f.height());
+    // JPEG viewers assume full range: stretch video range (16–235) to
+    // 0–255, or blacks would show grey and whites dim.
+    let mut full = frame::Video::empty();
+    scaling::Context::get(
+        f.format(),
+        w,
+        h,
+        format::Pixel::YUVJ420P,
+        w,
+        h,
+        scaling::Flags::POINT,
+    )?
+    .run(f, &mut full)?;
+    full.set_pts(Some(0));
+    let mut enc = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()?;
+    enc.set_width(w);
+    enc.set_height(h);
+    enc.set_format(format::Pixel::YUVJ420P);
+    enc.set_color_range(ffmpeg::color::Range::JPEG);
+    enc.set_time_base(Rational(1, 30));
+    enc.set_flags(codec::Flags::QSCALE);
+    enc.set_global_quality(2 * ffmpeg::ffi::FF_QP2LAMBDA);
+    let mut enc = enc.open()?;
+    enc.send_frame(&full)?;
+    enc.send_eof()?;
+    let mut packet = Packet::empty();
+    enc.receive_packet(&mut packet)
+        .context("the JPEG encoder produced nothing")?;
+    Ok(packet.data().context("empty JPEG")?.to_vec())
 }
 
 fn check(cancel: &AtomicBool) -> anyhow::Result<()> {
@@ -342,6 +459,9 @@ struct Muxer {
     video_tb: Rational,
     video_stream_tb: Rational,
     audio: Option<AudioOut>,
+    format: ExportFormat,
+    /// Cover art stream index and JPEG, written once the header is.
+    cover: Option<(usize, Vec<u8>)>,
 }
 
 struct AudioOut {
@@ -446,27 +566,61 @@ impl Muxer {
             None
         };
 
-        let mut opts = Dictionary::new();
-        if fmt == ExportFormat::Mp4 {
-            opts.set("movflags", "+faststart");
-        }
-        output.write_header_with(opts)?;
-        let video_stream_tb = output.stream(0).context("no video stream")?.time_base();
-        let mut muxer = Self {
+        Ok(Self {
             output,
             video,
             video_tb,
-            video_stream_tb,
+            video_stream_tb: video_tb,
             audio,
-        };
-        if let Some(a) = &mut muxer.audio {
-            a.stream_tb = muxer
+            format: fmt,
+            cover: None,
+        })
+    }
+
+    /// Adds `jpeg` as the file's cover art. Call before [`start`](Self::start).
+    fn cover(&mut self, jpeg: Vec<u8>) -> anyhow::Result<()> {
+        let mut stream = self.output.add_stream(encoder::find(codec::Id::MJPEG))?;
+        // SAFETY: the stream's own parameters and disposition, set before the
+        // header is written, as FFmpeg expects for attached pictures.
+        unsafe {
+            let st = stream.as_mut_ptr();
+            let par = (*st).codecpar;
+            (*par).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*par).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_MJPEG;
+            (*par).width = self.video.width() as i32;
+            (*par).height = self.video.height() as i32;
+            (*st).disposition |= ffmpeg::ffi::AV_DISPOSITION_ATTACHED_PIC;
+        }
+        self.cover = Some((stream.index(), jpeg));
+        Ok(())
+    }
+
+    /// Writes the header (and cover art); frames can follow.
+    fn start(&mut self) -> anyhow::Result<()> {
+        let mut opts = Dictionary::new();
+        if self.format == ExportFormat::Mp4 {
+            opts.set("movflags", "+faststart");
+        }
+        self.output.write_header_with(opts)?;
+        self.video_stream_tb = self
+            .output
+            .stream(0)
+            .context("no video stream")?
+            .time_base();
+        if let Some(a) = &mut self.audio {
+            a.stream_tb = self
                 .output
                 .stream(1)
                 .context("no audio stream")?
                 .time_base();
         }
-        Ok(muxer)
+        if let Some((index, jpeg)) = self.cover.take() {
+            let mut packet = Packet::copy(&jpeg);
+            packet.set_stream(index);
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+            packet.write_interleaved(&mut self.output)?;
+        }
+        Ok(())
     }
 
     fn video(&mut self, f: &frame::Video) -> anyhow::Result<()> {

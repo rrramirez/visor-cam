@@ -22,9 +22,10 @@ use visor_core::project::BubbleShape;
 use visor_core::{AudioConfig, CameraOverlay, CaptureTarget, RecordingConfig, Rect};
 use visor_recorder::{Recorder, RecorderOptions, new_project_dir};
 
-use crate::editor::EditorWindow;
+use crate::editor::{EditorWindow, Jobs};
 use crate::platform::{self, Overlay};
 use crate::settings::Settings;
+use crate::shortcuts::{self, Shortcut, Shortcuts};
 use crate::tray::{Action, Tray};
 use crate::util;
 use crate::{
@@ -54,6 +55,14 @@ pub struct App {
     backend: Arc<dyn Backend>,
     pub settings: RefCell<Settings>,
     tray: RefCell<Option<Tray>>,
+    shortcuts: RefCell<Option<Shortcuts>>,
+    /// Shortcuts another app already uses.
+    taken_shortcuts: RefCell<Vec<Shortcut>>,
+    /// Starts a recording once the devices are ready (see
+    /// `record_when_ready`); dropping it cancels.
+    pending_start: RefCell<Option<Timer>>,
+    /// Stops a `--record --stop-after` recording.
+    stop_after: RefCell<Option<Timer>>,
     /// Sparkle, in the packaged macOS app.
     updater: Option<crate::updates::Updater>,
     panel: RefCell<Option<Panel>>,
@@ -135,6 +144,10 @@ impl App {
             backend,
             settings: RefCell::new(Settings::load()),
             tray: RefCell::default(),
+            shortcuts: RefCell::default(),
+            taken_shortcuts: RefCell::default(),
+            pending_start: RefCell::default(),
+            stop_after: RefCell::default(),
             updater: crate::updates::Updater::start(),
             panel: RefCell::default(),
             devices: RefCell::default(),
@@ -187,6 +200,115 @@ impl App {
         }));
     }
 
+    /// Sets up the global shortcuts. Needs the event loop running.
+    pub fn create_shortcuts(&self) {
+        match Shortcuts::new(|shortcut| post(move |app| app.on_shortcut(shortcut))) {
+            Ok(s) => *self.shortcuts.borrow_mut() = Some(s),
+            Err(e) => tracing::warn!("global shortcuts are unavailable: {e}"),
+        }
+        self.apply_shortcuts();
+    }
+
+    /// Turns the shortcuts on or off to match the preferences.
+    fn apply_shortcuts(&self) {
+        let enabled = self.settings.borrow().shortcuts;
+        let taken = match &mut *self.shortcuts.borrow_mut() {
+            Some(s) => s.set_enabled(enabled),
+            None => Vec::new(),
+        };
+        *self.taken_shortcuts.borrow_mut() = taken;
+        self.update_hint();
+        self.sync_preferences();
+    }
+
+    fn on_shortcut(&self, shortcut: Shortcut) {
+        let (idle, recording, starting) = match &*self.session.borrow() {
+            Session::Idle => (true, false, false),
+            Session::Recording { .. } => (false, true, false),
+            Session::Starting { .. } => (false, false, true),
+            Session::Stopping => (false, false, false),
+        };
+        match shortcut {
+            // A second press while waiting for the devices backs out.
+            Shortcut::StartStop if idle && self.cancel_pending_start() => {}
+            Shortcut::StartStop if idle => self.record_when_ready(None),
+            // Stopping during the countdown cancels, as the bar does.
+            Shortcut::StartStop if recording || starting => self.stop_recording(false),
+            Shortcut::TogglePause if recording => self.toggle_pause(),
+            Shortcut::Discard if recording => self.stop_recording(true),
+            _ => {}
+        }
+    }
+
+    /// Starts recording with the panel's choices (the saved ones if the
+    /// panel isn't open) once the chosen camera is open. With `stop_after`,
+    /// stops after that many seconds of recorded time. Closing the panel
+    /// meanwhile cancels; so does a camera that takes too long.
+    pub fn record_when_ready(&self, stop_after: Option<u64>) {
+        if self.pending_start.borrow().is_some() || !matches!(*self.session.borrow(), Session::Idle)
+        {
+            return;
+        }
+        let panel_shown = self
+            .panel
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.ui.window().is_visible());
+        if !panel_shown {
+            self.open_panel();
+        }
+        let started = std::time::Instant::now();
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let app = app();
+            if app.devices_ready() {
+                app.cancel_pending_start();
+                app.start_recording();
+                if let Some(secs) = stop_after {
+                    app.stop_after_recorded(secs);
+                }
+            } else if started.elapsed() > Duration::from_secs(15) {
+                app.cancel_pending_start();
+                app.set_panel_error("The camera didn't start; try again.");
+            }
+        });
+        *self.pending_start.borrow_mut() = Some(timer);
+    }
+
+    /// Cancels a start waiting for the devices. Returns whether one was.
+    fn cancel_pending_start(&self) -> bool {
+        match self.pending_start.borrow().as_ref() {
+            Some(timer) => timer.stop(),
+            None => return false,
+        }
+        // Not dropped here: this may run inside the timer's own callback.
+        let timer = self.pending_start.borrow_mut().take();
+        slint::Timer::single_shot(Duration::ZERO, move || drop(timer));
+        true
+    }
+
+    /// Stops the recording after `secs` seconds of recorded time.
+    fn stop_after_recorded(&self, secs: u64) {
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let app = app();
+            if app
+                .recorded()
+                .is_some_and(|t| t.as_secs_f64() >= secs as f64)
+            {
+                app.stop_recording(false);
+            }
+            let running = matches!(
+                *app.session.borrow(),
+                Session::Starting { .. } | Session::Recording { .. }
+            );
+            if !running && let Some(t) = &*app.stop_after.borrow() {
+                t.stop();
+            }
+        });
+        *self.stop_after.borrow_mut() = Some(timer);
+    }
+
     fn on_tray(&self, action: Action) {
         match action {
             Action::NewRecording => self.open_panel(),
@@ -237,6 +359,25 @@ impl App {
             tray.set_recent(&recent);
             tray.set_recording(recording, paused);
         }
+        let live = matches!(*self.session.borrow(), Session::Recording { .. });
+        let taken = match &mut *self.shortcuts.borrow_mut() {
+            Some(s) => s.set_recording(live),
+            None => return,
+        };
+        // Pause and discard are only tried while recording: remember what
+        // was taken then, so Preferences can say so afterwards too.
+        if live {
+            let changed = {
+                let mut known = self.taken_shortcuts.borrow_mut();
+                let before = known.clone();
+                known.retain(|s| *s == Shortcut::StartStop);
+                known.extend(taken);
+                *known != before
+            };
+            if changed {
+                self.sync_preferences();
+            }
+        }
     }
 
     fn quit(&self) {
@@ -244,6 +385,18 @@ impl App {
             // A recording is being finalized; quit once it's saved.
             self.quit_pending.set(true);
             return;
+        }
+        // Name the folders of recordings still open: once, without
+        // waiting, and only where no export or image save was running.
+        let open: Vec<_> = self.editors.borrow_mut().drain(..).collect();
+        let root = self.settings.borrow().save_dir.clone();
+        for editor in open {
+            let busy = editor.stop_work().running();
+            let dir = editor.dir().to_path_buf();
+            drop(editor);
+            if !busy && let Err(e) = visor_core::project::rename_to_title(&dir, &root) {
+                tracing::info!("not renaming {} at quit: {e}", dir.display());
+            }
         }
         let session = std::mem::take(&mut *self.session.borrow_mut());
         match session {
@@ -437,8 +590,10 @@ impl App {
             }
         });
         ui.window().on_close_requested(|| {
-            // Closing the panel releases the camera and mic.
+            // Closing the panel releases the camera and mic, and backs out of
+            // a start that was waiting for them.
             let app = app();
+            app.cancel_pending_start();
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
             }
@@ -622,13 +777,21 @@ impl App {
 
     fn update_hint(&self) {
         let secs = self.settings.borrow().countdown_secs;
+        let shortcut = self.settings.borrow().shortcuts
+            && self.shortcuts.borrow().is_some()
+            && !self.taken_shortcuts.borrow().contains(&Shortcut::StartStop);
         if let Some(p) = &*self.panel.borrow() {
-            let hint = if secs > 0 {
-                format!("Recording starts after a {secs}-second countdown")
-            } else {
-                String::new()
-            };
-            p.ui.set_hint(hint.into());
+            let mut hint = Vec::new();
+            if secs > 0 {
+                hint.push(format!("Recording starts after a {secs}-second countdown"));
+            }
+            if shortcut {
+                hint.push(format!(
+                    "{} starts and stops from any app",
+                    shortcuts::label(Shortcut::StartStop)
+                ));
+            }
+            p.ui.set_hint(hint.join("\n").into());
         }
     }
 
@@ -1370,7 +1533,7 @@ impl App {
         }
         self.refresh_tray();
         match result {
-            Ok(dir) => self.open_editor(dir),
+            Ok(dir) => self.open_new_recording(dir),
             Err(e) => {
                 tracing::error!("finishing the recording failed: {e:#}");
                 self.open_panel();
@@ -1393,12 +1556,21 @@ impl App {
     // ---- editor & preferences ---------------------------------------------
 
     pub fn open_editor(&self, dir: PathBuf) {
+        self.show_editor(dir, false);
+    }
+
+    /// Opens a recording that was just made, ready to be named.
+    fn open_new_recording(&self, dir: PathBuf) {
+        self.show_editor(dir, true);
+    }
+
+    fn show_editor(&self, dir: PathBuf, name_first: bool) {
         if let Some(existing) = self.editors.borrow().iter().find(|e| e.dir() == dir) {
             existing.show();
             platform::activate();
             return;
         }
-        match EditorWindow::open(dir.clone()) {
+        match EditorWindow::open(dir.clone(), name_first) {
             Ok(editor) => {
                 self.editors.borrow_mut().push(editor);
                 self.update_dock();
@@ -1414,10 +1586,59 @@ impl App {
         }
     }
 
-    pub fn editor_closed(&self, dir: &std::path::Path) {
+    pub fn editor_closed(&self, dir: &std::path::Path, jobs: Jobs) {
         self.editors.borrow_mut().retain(|e| e.dir() != dir);
         self.update_dock();
         self.refresh_tray();
+        // The folder takes the recording's name once nothing has it open:
+        // a cancelled export or a thumbnail being saved may still write to
+        // the old path, and on Windows the player's files stay open for a
+        // moment.
+        let (dir, root) = (dir.to_path_buf(), self.settings.borrow().save_dir.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while jobs.running() {
+                if std::time::Instant::now() > deadline {
+                    return tracing::warn!("not renaming {}: still busy", dir.display());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            for attempt in 1..=10 {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let (d, r) = (dir.clone(), root.clone());
+                // On the UI thread, so it can't race the recording being
+                // opened again.
+                post(move |app| {
+                    let _ = tx.send(app.rename_closed(&d, &r, attempt == 10));
+                });
+                match rx.recv() {
+                    Ok(true) => std::thread::sleep(Duration::from_millis(200)),
+                    _ => break,
+                }
+            }
+        });
+    }
+
+    /// Renames a closed recording's folder after its name, unless it was
+    /// opened again (it's renamed when that editor closes). Returns whether
+    /// to try again shortly.
+    fn rename_closed(&self, dir: &std::path::Path, root: &std::path::Path, last: bool) -> bool {
+        if self.editors.borrow().iter().any(|e| e.dir() == dir) {
+            return false;
+        }
+        match visor_core::project::rename_to_title(dir, root) {
+            Ok(Some(to)) => {
+                tracing::info!("renamed {} to {}", dir.display(), to.display());
+                self.refresh_tray();
+                false
+            }
+            Ok(None) => false,
+            Err(e) if is_transient(&e) && !last => true,
+            Err(e) => {
+                tracing::warn!("could not rename {}: {e}", dir.display());
+                false
+            }
+        }
     }
 
     fn update_dock(&self) {
@@ -1471,6 +1692,28 @@ impl App {
             });
             ui.set_show_cursor(s.show_cursor);
             ui.set_export_format(s.export_format);
+            ui.set_shortcuts(s.shortcuts);
+            ui.set_shortcuts_available(self.shortcuts.borrow().is_some());
+            ui.set_shortcut_list(
+                [
+                    (Shortcut::StartStop, "start or stop"),
+                    (Shortcut::TogglePause, "pause"),
+                    (Shortcut::Discard, "discard"),
+                ]
+                .map(|(s, what)| format!("{} {what}", shortcuts::label(s)))
+                .join("  ·  ")
+                .into(),
+            );
+            let taken = self.taken_shortcuts.borrow();
+            ui.set_shortcuts_note(
+                if taken.is_empty() {
+                    String::new()
+                } else {
+                    let keys: Vec<String> = taken.iter().map(|&s| shortcuts::label(s)).collect();
+                    format!("{} already used by another app", keys.join(", "))
+                }
+                .into(),
+            );
         }
     }
 
@@ -1486,6 +1729,12 @@ impl App {
             s.export_format = ui.get_export_format();
             s.save();
         }
+        let shortcuts = ui.get_shortcuts();
+        if shortcuts != self.settings.borrow().shortcuts {
+            self.settings.borrow_mut().shortcuts = shortcuts;
+            self.settings.borrow().save();
+            self.apply_shortcuts();
+        }
         self.update_hint();
     }
 }
@@ -1494,6 +1743,17 @@ impl App {
 enum Permission {
     Camera,
     Microphone,
+}
+
+/// Whether a failed rename may work if tried again shortly: the folder is
+/// in use (Windows keeps files locked while open) rather than gone, or
+/// misnamed.
+fn is_transient(e: &std::io::Error) -> bool {
+    // ERROR_SHARING_VIOLATION
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ResourceBusy
+    ) || (cfg!(windows) && e.raw_os_error() == Some(32))
 }
 
 /// Discards a recorder without blocking the UI thread on its writer threads.

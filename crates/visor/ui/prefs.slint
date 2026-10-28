@@ -17,7 +17,7 @@ component Field inherits HorizontalLayout {
 export component Preferences inherits Window {
     title: "Visor Preferences";
     width: 520px;
-    height: 400px;
+    height: 470px;
     background: Theme.bg;
     default-font-size: Theme.font;
 
@@ -26,6 +26,10 @@ export component Preferences inherits Window {
     in-out property <int> countdown-index;
     in-out property <bool> show-cursor;
     in-out property <int> export-format;
+    in-out property <bool> shortcuts;
+    in property <bool> shortcuts-available: true;
+    in property <string> shortcut-list;
+    in property <string> shortcuts-note;
     in property <string> version;
     callback choose-folder();
     callback changed();
@@ -71,6 +75,27 @@ export component Preferences inherits Window {
                 text: "Show the cursor in recordings";
                 checked <=> root.show-cursor;
                 toggled => { root.changed(); }
+            }
+        }
+
+        Field {
+            label: "Shortcuts";
+            VerticalLayout {
+                spacing: 4px;
+                Switch {
+                    text: "Control recording from any app";
+                    checked <=> root.shortcuts;
+                    enabled: root.shortcuts-available;
+                    toggled => { root.changed(); }
+                }
+                Text {
+                    text: !root.shortcuts-available
+                        ? "Not available on this system"
+                        : root.shortcuts-note != "" && root.shortcuts ? root.shortcuts-note : root.shortcut-list;
+                    color: root.shortcuts-note != "" && root.shortcuts ? Theme.warning : Theme.faint;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
             }
         }
 

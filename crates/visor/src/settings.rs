@@ -11,6 +11,8 @@ pub struct Settings {
     pub fps: u32,
     pub countdown_secs: u32,
     pub show_cursor: bool,
+    /// Global shortcuts for recording (see `shortcuts`).
+    pub shortcuts: bool,
     /// Index into the editor's export format list (0 MP4, 1 VP9, 2 AV1, 3 GIF).
     /// The editor starts with the last one exported.
     pub export_format: i32,
@@ -18,10 +20,14 @@ pub struct Settings {
     /// likewise remembered. 1080p by default: full Retina size costs ~4x the
     /// encoding for little visible gain when shared.
     pub export_resolution: i32,
+    /// Export audio cleanup, likewise remembered.
+    pub export_denoise: bool,
+    pub export_normalize: bool,
     pub last_camera: Option<String>,
     pub last_mic: Option<String>,
     pub system_audio: bool,
-    /// Editor sidebar sections the user folded ("edit", "camera", "speed").
+    /// Editor sidebar sections the user folded ("edit", "camera", "speed",
+    /// "thumbnail").
     pub folded_sections: Vec<String>,
 }
 
@@ -35,8 +41,11 @@ impl Default for Settings {
             fps: 30,
             countdown_secs: 3,
             show_cursor: true,
+            shortcuts: true,
             export_format: 0,
             export_resolution: 1,
+            export_denoise: false,
+            export_normalize: false,
             last_camera: None,
             last_mic: None,
             system_audio: false,
@@ -86,6 +95,8 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"fps": 60}"#).unwrap();
         assert_eq!(s.fps, 60);
         assert_eq!(s.countdown_secs, 3);
+        assert!(s.shortcuts);
+        assert!(!s.export_denoise);
         assert!(s.save_dir.ends_with("Visor"));
     }
 }
