@@ -24,7 +24,13 @@ on the recorded screen: record a single window or app to keep it out. \
 The user must turn on agent control in Visor's Preferences first; if a tool says it \
 is off, ask them to.";
 
-fn tools() -> Value {
+/// The tools, built once.
+fn tools() -> &'static Value {
+    static TOOLS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(tool_list);
+    &TOOLS
+}
+
+fn tool_list() -> Value {
     let device = |what: &str| {
         json!({
             "type": ["string", "integer", "boolean"],

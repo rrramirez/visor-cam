@@ -12,6 +12,7 @@ use std::hash::{BuildHasher, Hasher, RandomState};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -44,6 +45,8 @@ pub struct Primary {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections at a time whose request hasn't been read yet.
+const MAX_UNREAD: usize = 16;
 /// How long a launch waits for a Visor that holds the lock to listen.
 const STARTUP_GRACE: Duration = Duration::from_secs(3);
 /// How long an agent command may take before its reply is given up on.
@@ -95,12 +98,17 @@ fn try_claim(dir: &Path, request: &Request) -> std::io::Result<Instance> {
         }
         Err(TryLockError::WouldBlock) => {
             // A Visor that has only just started may not be listening yet.
+            // Only a request it never took is sent again.
             let deadline = std::time::Instant::now() + STARTUP_GRACE;
             let error = loop {
                 match hand_over(dir, request) {
-                    Ok(()) => return Ok(Instance::HandedOver),
-                    Err(e) if std::time::Instant::now() > deadline => break e,
-                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                    Ok(()) | Err(SendError::Failed(_)) => return Ok(Instance::HandedOver),
+                    Err(SendError::NotListening(e)) if std::time::Instant::now() > deadline => {
+                        break e;
+                    }
+                    Err(SendError::NotListening(_)) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                 }
             };
             tracing::warn!("another Visor is running but didn't answer: {error}");
@@ -129,14 +137,23 @@ impl Primary {
                 // The lock is held for as long as this process runs.
                 let _lock = _lock;
                 let handle = std::sync::Arc::new(handle);
+                // Connections whose request hasn't been read yet; capped so
+                // connections that send nothing can't pile up threads.
+                let unread = std::sync::Arc::new(AtomicUsize::new(0));
                 for stream in listener.incoming().flatten() {
+                    if unread.fetch_add(1, Ordering::SeqCst) >= MAX_UNREAD {
+                        unread.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
                     // Agent commands can take a while; answer each
                     // connection on its own thread.
-                    let (handle, token) = (handle.clone(), token.clone());
+                    let (handle, token, unread) = (handle.clone(), token.clone(), unread.clone());
                     let spawned = std::thread::Builder::new()
                         .name("visor-request".into())
                         .spawn(move || {
-                            if let Err(e) = answer(stream, &token, &*handle) {
+                            let request = read_request(&stream, &token);
+                            unread.fetch_sub(1, Ordering::SeqCst);
+                            if let Err(e) = request.and_then(|r| answer(stream, r, &*handle)) {
                                 tracing::warn!("ignored a request: {e}");
                             }
                         });
@@ -151,14 +168,12 @@ impl Primary {
     }
 }
 
-/// Reads one request, hands it to `handle` and writes the reply: `ok` for
-/// launches, a line of JSON for agent commands.
-fn answer(mut stream: TcpStream, token: &str, handle: &dyn Fn(Request)) -> std::io::Result<()> {
-    match read_request(&stream, token)? {
-        Parsed::Launch(request) => {
-            stream.write_all(b"ok\n")?;
-            handle(request);
-        }
+/// Hands a request to `handle` and writes the reply: `ok` at once, so the
+/// sender knows Visor took it, then for agent commands a line of JSON.
+fn answer(mut stream: TcpStream, request: Parsed, handle: &dyn Fn(Request)) -> std::io::Result<()> {
+    stream.write_all(b"ok\n")?;
+    match request {
+        Parsed::Launch(request) => handle(request),
         Parsed::Control(command) => {
             let (tx, rx) = crossbeam_channel::bounded(1);
             handle(Request::Control(command, tx));
@@ -227,39 +242,74 @@ fn control_in(dir: &Path, command: &Value) -> Result<Value, ControlError> {
     let message = format!("control\n{command}\n");
     let reply = match send(dir, &message, CONTROL_TIMEOUT + TIMEOUT) {
         Ok(reply) => reply,
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Err(ControlError::NotRunning);
-        }
-        Err(e) => return Err(ControlError::Io(e)),
+        Err(SendError::NotListening(_)) => return Err(ControlError::NotRunning),
+        Err(SendError::Failed(e)) => return Err(ControlError::Io(e)),
     };
     serde_json::from_str(&reply).map_err(|e| ControlError::Io(std::io::Error::other(e)))
 }
 
-fn hand_over(dir: &Path, request: &Request) -> std::io::Result<()> {
+fn hand_over(dir: &Path, request: &Request) -> Result<(), SendError> {
     let message = match request {
         Request::ShowPanel => "show\n".to_string(),
         Request::Background => "background\n".to_string(),
         Request::Edit(path) => {
             // The running Visor has its own working directory.
-            let path = std::path::absolute(path)?;
+            let path = std::path::absolute(path).map_err(SendError::NotListening)?;
             format!("edit\n{}\n", path.display())
         }
-        Request::Control(..) => return Err(std::io::Error::other("not a launch request")),
+        Request::Control(..) => {
+            return Err(SendError::NotListening(std::io::Error::other(
+                "not a launch request",
+            )));
+        }
     };
-    if send(dir, &message, TIMEOUT)?.trim() == "ok" {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("no acknowledgement"))
+    send(dir, &message, TIMEOUT).map(drop)
+}
+
+/// Why a message to the running Visor failed.
+enum SendError {
+    /// No Visor took it: there is no instance file, nothing accepted the
+    /// connection (refused, or timed out, as on Windows), or what did never
+    /// acknowledged it (another program now on Visor's old port).
+    NotListening(std::io::Error),
+    /// Visor took it, but its reply didn't arrive.
+    Failed(std::io::Error),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotListening(e) | Self::Failed(e) => e.fmt(f),
+        }
     }
 }
 
-/// Sends `message` after the token and returns the first line of the reply.
-fn send(dir: &Path, message: &str, timeout: Duration) -> std::io::Result<String> {
+/// Sends `message` after the token. Visor acknowledges it at once; returns
+/// the reply that follows (empty for launches), waiting up to `timeout`.
+fn send(dir: &Path, message: &str, timeout: Duration) -> Result<String, SendError> {
+    let mut stream = connect_and_send(dir, message).map_err(SendError::NotListening)?;
+    let mut reader = BufReader::new(&mut stream);
+    let mut ack = String::new();
+    match reader.read_line(&mut ack) {
+        Ok(_) if ack.trim() == "ok" => {}
+        Ok(_) => {
+            return Err(SendError::NotListening(std::io::Error::other(
+                "no acknowledgement",
+            )));
+        }
+        Err(e) => return Err(SendError::NotListening(e)),
+    }
+    // From here Visor has the request: never send it again.
+    reader
+        .get_ref()
+        .set_read_timeout(Some(timeout))
+        .map_err(SendError::Failed)?;
+    let mut reply = String::new();
+    reader.read_line(&mut reply).map_err(SendError::Failed)?;
+    Ok(reply)
+}
+
+fn connect_and_send(dir: &Path, message: &str) -> std::io::Result<TcpStream> {
     let info = fs::read_to_string(dir.join("instance"))?;
     let (port, token) = info
         .trim()
@@ -267,12 +317,10 @@ fn send(dir: &Path, message: &str, timeout: Duration) -> std::io::Result<String>
         .ok_or_else(|| std::io::Error::other("malformed instance file"))?;
     let port: u16 = port.parse().map_err(std::io::Error::other)?;
     let mut stream = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), TIMEOUT)?;
-    stream.set_read_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
     stream.write_all(format!("{token}\n{message}").as_bytes())?;
     stream.shutdown(Shutdown::Write)?;
-    let mut reply = String::new();
-    BufReader::new(&stream).read_line(&mut reply)?;
-    Ok(reply)
+    Ok(stream)
 }
 
 /// 128 bits from the standard library's randomly seeded hasher keys.
@@ -351,6 +399,24 @@ mod tests {
         });
         let reply = control_in(&dir, &serde_json::json!({"command": "status"})).unwrap();
         assert_eq!(reply, serde_json::json!({"ok": true, "echo": "status"}));
+    }
+
+    #[test]
+    fn a_silent_program_on_the_old_port_is_not_visor() {
+        let dir = std::env::temp_dir().join(format!("visor-stale-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // Accepts connections (the OS does) but never answers.
+        let squatter = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        write_private(&dir.join("instance"), &format!("{port} token\n")).unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            control_in(&dir, &serde_json::json!({"command": "status"})),
+            Err(ControlError::NotRunning)
+        ));
+        assert!(started.elapsed() < TIMEOUT * 2);
+        drop(squatter);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

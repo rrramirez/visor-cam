@@ -184,10 +184,14 @@ fn launch() -> std::io::Result<()> {
         .ancestors()
         .find(|p| p.extension().is_some_and(|e| e == "app"))
     {
+        // Its output would land in the MCP server's JSON stream.
         let status = std::process::Command::new("open")
             .args(["-g", "-a"])
             .arg(bundle)
             .args(["--args", "--background"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()?;
         return if status.success() {
             Ok(())

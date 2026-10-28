@@ -41,7 +41,7 @@ impl Backend for MacBackend {
         let content = SCShareableContent::get().map_err(sc_err)?;
         let own_pid = std::process::id() as i32;
         let names = display_names();
-        let displays = content
+        let mut displays: Vec<DisplayInfo> = content
             .displays()
             .iter()
             .enumerate()
@@ -68,6 +68,9 @@ impl Backend for MacBackend {
                 }
             })
             .collect();
+        // The main display (the one with the menu bar) first, as on the
+        // other platforms: it sits at the origin of global coordinates.
+        displays.sort_by_key(|d| d.frame.x != 0.0 || d.frame.y != 0.0);
         let windows = content
             .windows()
             .iter()

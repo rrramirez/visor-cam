@@ -133,6 +133,8 @@ enum Session {
         captured: Option<Rect>,
         /// Started by an agent.
         agent: Option<agent::AgentRun>,
+        /// The recording's folder, created when the start began.
+        dir: PathBuf,
     },
     Recording {
         recorder: Recorder,
@@ -429,6 +431,10 @@ impl App {
                 ..
             } => {
                 let _ = recorder.discard();
+            }
+            // Still starting: don't leave its folder behind.
+            Session::Starting { dir, .. } => {
+                let _ = std::fs::remove_dir_all(dir);
             }
             _ => {}
         }
@@ -837,7 +843,13 @@ impl App {
         {
             return;
         }
-        if !self.ensure_permission(Permission::Microphone, move |app| app.choose_mic(index)) {
+        // Once allowed, only if this mic is still the one chosen.
+        let retry = move |app: &App| {
+            if app.panel_index(Permission::Microphone) == Some(index) {
+                app.choose_mic(index);
+            }
+        };
+        if !self.ensure_permission(Permission::Microphone, retry) {
             return;
         }
         match MicStream::open(Some(&id)) {
@@ -877,7 +889,13 @@ impl App {
         {
             return;
         }
-        if !self.ensure_permission(Permission::Camera, move |app| app.choose_camera(index)) {
+        // Once allowed, only if this camera is still the one chosen.
+        let retry = move |app: &App| {
+            if app.panel_index(Permission::Camera) == Some(index) {
+                app.choose_camera(index);
+            }
+        };
+        if !self.ensure_permission(Permission::Camera, retry) {
             return;
         }
         self.devices.borrow_mut().camera_pending = Some(id.clone());
@@ -1066,6 +1084,17 @@ impl App {
         }
     }
 
+    /// The panel's camera or mic choice (0 is none).
+    fn panel_index(&self, which: Permission) -> Option<usize> {
+        let panel = self.panel.borrow();
+        let ui = &panel.as_ref()?.ui;
+        let index = match which {
+            Permission::Camera => ui.get_camera_index(),
+            Permission::Microphone => ui.get_mic_index(),
+        };
+        usize::try_from(index).ok()
+    }
+
     fn main_display(&self) -> Option<DisplayInfo> {
         let from_panel = self
             .panel
@@ -1170,6 +1199,20 @@ impl App {
         let save_dir = self.settings.borrow().save_dir.clone();
         // An agent may have started it, and named it (see `agent`).
         let run = self.agent.borrow_mut().start_request.take();
+        // An agent is told if a camera or mic the panel chose didn't open,
+        // rather than getting a recording without it.
+        if run.is_some()
+            && let Some(what) = self.missing_device()
+        {
+            let shown = self
+                .panel
+                .borrow()
+                .as_ref()
+                .map(|p| p.ui.get_error().to_string())
+                .filter(|e| !e.is_empty());
+            return self
+                .start_failed(&shown.unwrap_or_else(|| format!("The {what} couldn't be opened.")));
+        }
         // The folder is created now, which claims its name.
         let name = run.as_ref().and_then(|r| r.name.clone());
         let created = match &name {
@@ -1206,7 +1249,7 @@ impl App {
         let backend = self.backend.clone();
         let options = RecorderOptions {
             config,
-            dir,
+            dir: dir.clone(),
             title,
             mic,
             camera,
@@ -1237,8 +1280,25 @@ impl App {
             display,
             captured,
             agent: run,
+            dir,
         };
         self.refresh_tray();
+    }
+
+    /// A camera or mic chosen in the panel that isn't open.
+    fn missing_device(&self) -> Option<&'static str> {
+        let devices = self.devices.borrow();
+        if self.panel_index(Permission::Camera).is_some_and(|i| i > 0) && devices.camera.is_none() {
+            Some("camera")
+        } else if self
+            .panel_index(Permission::Microphone)
+            .is_some_and(|i| i > 0)
+            && devices.mic.is_none()
+        {
+            Some("microphone")
+        } else {
+            None
+        }
     }
 
     /// A start that couldn't begin: says why in the panel, and to an agent

@@ -286,18 +286,9 @@ pub fn named_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
 /// Creates a folder under `root` named after the local time and title,
 /// e.g. `2026-10-20 14.03.27 Recording`.
 pub fn new_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
-    let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
-    let safe: String = title
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | '\\' | ':') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    visor_core::project::create_unique_dir(root, &format!("{stamp} {}", safe.trim()))
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S").to_string();
+    let name = visor_core::project::folder_name(&format!("{stamp} {title}")).unwrap_or(stamp);
+    visor_core::project::create_unique_dir(root, &name)
 }
 
 fn spawn_video<F: Borrow<VideoFrame> + Send + 'static>(
