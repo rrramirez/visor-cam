@@ -178,14 +178,18 @@ impl Player {
     }
 
     pub fn play(&mut self) {
-        // Restart from the beginning when at the end.
+        // From the next kept time if a preview left it in a cut; from the
+        // beginning when at the end.
         let pos = self.position();
+        let from = snap_to_kept(&self.edit, pos);
         if self
             .edit
-            .to_output(pos)
+            .to_output(from)
             .is_none_or(|o| o + 50_000 >= self.edit.duration())
         {
             self.seek(self.edit.ranges().first().map_or(0, |r| r.0));
+        } else if from != pos {
+            self.seek(from);
         }
         self.send(Cmd::Play);
         self.shared.playing.store(true, Ordering::Relaxed);
@@ -217,9 +221,12 @@ impl Player {
     }
 
     /// Shows the frame at source time `t` even if it was cut, e.g. while a
-    /// cut's edge is dragged. Playing from there starts at the next kept
-    /// time.
+    /// cut's edge is dragged, pausing playback. Playing from there starts
+    /// at the next kept time.
     pub fn preview(&mut self, t: Micros) {
+        if self.is_playing() {
+            self.pause();
+        }
         let t = t.min(self.duration.saturating_sub(1));
         self.shared.position.store(t, Ordering::Relaxed);
         self.seeks_sent += 1;
@@ -388,8 +395,7 @@ fn video_loop(
         if let Some(cmd) = cmd {
             match cmd {
                 Cmd::Play => {
-                    // A preview may have left the position inside a cut.
-                    let src = snap_to_kept(&edit, shared.position.load(Ordering::Relaxed));
+                    let src = shared.position.load(Ordering::Relaxed);
                     let out = edit.to_output(src).unwrap_or(0);
                     let mut c = clock.lock().unwrap();
                     *c = Clock::running(out, c.speed);

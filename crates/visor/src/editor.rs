@@ -242,15 +242,17 @@ impl EditorWindow {
             e.move_cut_edge(index as usize, end, t);
         });
         on!(on_nudge_edge, |e, frames| {
-            let Ok(edge) = usize::try_from(e.ui.get_active_edge()) else {
+            let Some((index, end, at)) = e.picked_edge() else {
                 return;
             };
-            let (index, end) = (edge / 2, edge % 2 == 1);
-            let Some(&cut) = e.cuts().get(index) else {
-                return;
+            // From frame to frame, even from an edge between frames.
+            let frame = e.frame_us();
+            let from = if frames > 0 {
+                at / frame
+            } else {
+                at.div_ceil(frame)
             };
-            let at = if end { cut.1 } else { cut.0 } as i64;
-            let to = (at + i64::from(frames) * e.frame_us() as i64).max(0) as Micros;
+            let to = (from as i64 + i64::from(frames)).max(0) as Micros * frame;
             e.move_cut_edge(index, end, to);
         });
         on!(on_bubble_changed, |e| {
@@ -423,8 +425,10 @@ impl EditorWindow {
     fn move_cut_edge(&self, index: usize, end: bool, t: Micros) {
         let d = self.duration();
         let frame = self.frame_us();
-        // On a frame, except the very end of the recording.
-        let t = ((t + frame / 2) / frame * frame).min(d);
+        // On a frame, or the very end of the recording rather than less
+        // than a frame before it.
+        let t = (t + frame / 2) / frame * frame;
+        let t = if t + frame > d { d } else { t };
         let moved = self
             .project
             .borrow()
@@ -432,8 +436,32 @@ impl EditorWindow {
             .with_cut_edge_moved(d, index, end, t);
         let Some(edit) = moved else { return };
         self.apply(|e| *e = edit);
+        // Still picked where it now is, unless it went away or joined
+        // another cut.
+        self.pick_edge(Some((end, t)));
         let shown = if end { t } else { t.saturating_sub(frame) };
         self.control().seek(shown);
+    }
+
+    /// The cut edge picked for nudging: its cut's index, whether it's the
+    /// end, and where it is.
+    fn picked_edge(&self) -> Option<(usize, bool, Micros)> {
+        let edge = usize::try_from(self.ui.get_active_edge()).ok()?;
+        let (index, end) = (edge / 2, edge % 2 == 1);
+        let cut = *self.cuts().get(index)?;
+        Some((index, end, if end { cut.1 } else { cut.0 }))
+    }
+
+    /// Picks the cut edge at `t` (an end, or a start), if there is one.
+    fn pick_edge(&self, edge: Option<(bool, Micros)>) {
+        let index = edge.and_then(|(end, t)| {
+            let i = self
+                .cuts()
+                .iter()
+                .position(|c| if end { c.1 == t } else { c.0 == t })?;
+            i32::try_from(i * 2 + usize::from(end)).ok()
+        });
+        self.ui.set_active_edge(index.unwrap_or(-1));
     }
 
     /// The project as edited here.
@@ -446,8 +474,6 @@ impl EditorWindow {
     pub fn apply_agent_edit(&self, edit: EditList) -> Result<Project, String> {
         self.save_error.borrow_mut().take();
         self.apply(|e| *e = edit);
-        // Its cuts may be numbered differently: no edge stays picked.
-        self.ui.set_active_edge(-1);
         match self.save_error.borrow_mut().take() {
             Some(e) => Err(format!(
                 "The change shows in the editor but couldn't be saved: {e}"
@@ -489,12 +515,12 @@ impl EditorWindow {
     }
 
     fn set_edit(&self, edit: EditList) {
-        let cuts = self.cuts().len();
+        // The cuts may be renumbered: keep the picked edge by where it is,
+        // and end a drag, whose cut may now be another.
+        let picked = self.picked_edge().map(|(_, end, t)| (end, t));
         self.project.borrow_mut().edit = edit.clone();
-        // The cuts were renumbered: the picked edge would be another's.
-        if self.cuts().len() != cuts {
-            self.ui.set_active_edge(-1);
-        }
+        self.pick_edge(picked);
+        self.ui.set_drag_cut(-1);
         self.control().set_edit(edit);
         self.save();
         self.refresh_edit_ui();
