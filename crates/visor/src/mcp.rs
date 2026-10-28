@@ -19,6 +19,8 @@ name for the video, then do the demo, calling add_marker at each step, and final
 stop_recording. Keep the video free of dead time: call pause_recording before \
 setting up something that shouldn't be seen, and as soon as a step fails or you \
 need to retry or think, then resume_recording once the next step is ready to show. \
+After stopping, cut_recording removes stretches that are still dull or went wrong \
+(marker times help find them), and open_recording hands the result to the user. \
 Visor's own windows are never recorded, but your terminal or chat window is if it's \
 on the recorded screen: record a single window or app to keep it out. \
 The user must turn on agent control in Visor's Preferences first; if a tool says it \
@@ -135,12 +137,51 @@ fn tool_list() -> Value {
             },
         },
         {
+            "name": "cut_recording",
+            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Returns what is kept.",
+            "inputSchema": edit_schema(),
+        },
+        {
+            "name": "trim_recording",
+            "description": "Keeps only the part of a recording between start_seconds and end_seconds (recorded seconds, like cut_recording), dropping the rest.",
+            "inputSchema": edit_schema(),
+        },
+        {
+            "name": "restore_recording",
+            "description": "Undoes all cuts and trims of a recording.",
+            "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
+        },
+        {
+            "name": "open_recording",
+            "description": "Opens a recording in Visor's editor, for the user to review, trim and export it.",
+            "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
+        },
+        {
             "name": "discard_recording",
             "description": "Stops the recording and deletes it.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"destructiveHint": true},
         },
     ])
+}
+
+fn folder_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "The recording's folder, as stop_recording returned it: an absolute path (or starting with ~/). Left out: the recording last stopped.",
+    })
+}
+
+fn edit_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "start_seconds": {"type": "number"},
+            "end_seconds": {"type": "number"},
+            "folder": folder_schema(),
+        },
+        "required": ["start_seconds", "end_seconds"],
+    })
 }
 
 /// Serves requests from stdin until it closes. Returns the exit code.

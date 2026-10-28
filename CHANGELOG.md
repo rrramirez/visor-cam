@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Agents can cut their recordings:** after stopping, an agent can remove stretches that went wrong or trim the ends, then open the result in the editor for you. If the recording is already open, its cuts show there and you can undo them.
+
 ## 0.3.0
 
 ### New
