@@ -702,10 +702,7 @@ impl App {
         let mut edit = current.edit.clone();
         match (kind, range) {
             (EditKind::Cut, Some((a, b))) => edit.cut_joining(a, b, SLIVER),
-            (EditKind::Trim, Some((a, b))) => {
-                edit.cut_joining(0, a, SLIVER);
-                edit.cut_joining(b, Micros::MAX, SLIVER);
-            }
+            (EditKind::Trim, Some((a, b))) => edit.trim_joining(a, b, SLIVER),
             _ => edit = EditList::full(duration),
         }
         if edit.duration() == 0 {

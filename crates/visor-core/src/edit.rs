@@ -151,6 +151,27 @@ impl EditList {
         self.cut(end, Micros::MAX);
     }
 
+    /// Like [`trim`], and also drops the first or last piece it keeps if
+    /// shorter than `min` and the trim removed something before or after
+    /// it, as [`cut_joining`] does. The last kept piece always stays.
+    ///
+    /// [`trim`]: Self::trim
+    /// [`cut_joining`]: Self::cut_joining
+    pub fn trim_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        let (first, last) = match (self.keep.first(), self.keep.last()) {
+            (Some(first), Some(last)) => (first.0, last.1),
+            _ => return,
+        };
+        self.trim(start, end);
+        let short = |r: Option<&Range>| r.is_some_and(|r| r.len() < min);
+        if last > end && self.keep.len() > 1 && short(self.keep.last()) {
+            self.keep.pop();
+        }
+        if first < start && self.keep.len() > 1 && short(self.keep.first()) {
+            self.keep.remove(0);
+        }
+    }
+
     /// Map an output (timeline) time to source time.
     pub fn to_source(&self, output: Micros) -> Option<Micros> {
         let mut acc = 0;
@@ -254,6 +275,32 @@ mod tests {
         e.cut(2, 50);
         e.cut_joining(50, 100, 5);
         assert_eq!(e.ranges(), [Range(0, 2)]);
+    }
+
+    #[test]
+    fn trims_drop_short_ends_but_never_everything() {
+        let mut e = EditList::full(100);
+        e.cut(20, 22);
+        e.cut(24, 30);
+        // Short pieces at either end of the trim go.
+        let mut t = e.clone();
+        t.trim_joining(18, 50, 5);
+        assert_eq!(t.ranges(), [Range(22, 24), Range(30, 50)]);
+        let mut t = e.clone();
+        t.trim_joining(10, 31, 5);
+        assert_eq!(t.ranges(), [Range(10, 20), Range(22, 24)]);
+        // Unless that is all the trim keeps.
+        let mut t = e.clone();
+        t.trim_joining(21, 25, 5);
+        assert_eq!(t.ranges(), [Range(22, 24)]);
+        let mut t = EditList::full(100);
+        t.trim_joining(10, 12, 5);
+        assert_eq!(t.ranges(), [Range(10, 12)]);
+        // Nothing removed on a side: its piece stays, however short.
+        let mut t = e.clone();
+        t.cut(2, 20);
+        t.trim_joining(0, 50, 5);
+        assert_eq!(t.ranges(), [Range(0, 2), Range(22, 24), Range(30, 50)]);
     }
 
     #[test]
