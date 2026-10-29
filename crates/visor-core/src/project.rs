@@ -114,9 +114,10 @@ pub struct Chapter {
     pub title: String,
 }
 
-/// A first marker this close to the start starts the video, rather than a
-/// moment-long chapter before it.
-const CHAPTER_START: Micros = 1_000_000;
+/// The shortest chapter: a marker this close after the last chapter's
+/// start (just before a cut, or near the start) takes its place, and one
+/// this close to the end starts none.
+const MIN_CHAPTER: Micros = 1_000_000;
 
 fn speed_default() -> f64 {
     1.0
@@ -159,32 +160,35 @@ impl Project {
         (self.edit.duration() as f64 / self.speed.max(0.01)).round() as Micros
     }
 
-    /// The exported video's chapters: one from each marker, in output time
-    /// (after cuts and speed), and before the first one a chapter named
-    /// after the recording. A marker in a cut starts its chapter where the
-    /// video goes on. None without markers.
+    /// Where source time `source` is in the export, after cuts and speed;
+    /// inside a cut, where the video goes on.
+    pub fn output_time(&self, source: Micros) -> Micros {
+        (self.edit.kept_before(source) as f64 / self.speed.max(0.01)).round() as Micros
+    }
+
+    /// The exported video's chapters: one from each marker, in output time,
+    /// and before the first one a chapter named after the recording. None
+    /// without markers.
     pub fn chapters(&self) -> Vec<Chapter> {
         let end = self.output_duration();
-        let speed = self.speed.max(0.01);
         let mut markers: Vec<&Marker> = self.markers.iter().collect();
         markers.sort_by_key(|m| m.at_us);
-        let mut starts: Vec<(Micros, &str)> = Vec::new();
+        let mut starts = vec![(0, self.title.trim())];
         for m in markers {
-            let at = (self.edit.kept_before(m.at_us) as f64 / speed).round() as Micros;
-            if at >= end {
+            let at = self.output_time(m.at_us);
+            if at + MIN_CHAPTER > end {
                 break;
             }
-            // Markers at the same moment (in one cut): the last one, about
-            // what follows, names it.
-            if starts.last().is_some_and(|&(t, _)| t == at) {
+            let mut start = at;
+            if let Some(&(last, _)) = starts.last().filter(|&&(t, _)| at - t < MIN_CHAPTER) {
+                // The later marker, about what follows, names it.
                 starts.pop();
+                start = last;
             }
-            starts.push((at, m.text.trim()));
+            starts.push((start, m.text.trim()));
         }
-        match starts.first_mut() {
-            None => return Vec::new(),
-            Some((t, _)) if *t < CHAPTER_START => *t = 0,
-            Some(_) => starts.insert(0, (0, self.title.trim())),
+        if starts.len() < 2 {
+            return Vec::new();
         }
         let ends: Vec<Micros> = starts
             .iter()
@@ -400,10 +404,13 @@ mod tests {
         p.markers = vec![
             marker(30 * S, "Settings"),
             marker(10 * S, "Open Safari"),
-            // Both in the cut below: the second names the chapter.
+            // Just before the cut below, and both in it: the last one
+            // names the chapter.
+            marker(39 * S + S * 8 / 10, "Mistake"),
             marker(41 * S, "Oops"),
             marker(42 * S, " "),
-            // Past the end of what's kept.
+            // Less than a second before the end, and past it.
+            marker(54 * S + S / 2, "Too late"),
             marker(58 * S, "Gone"),
         ];
         p.edit.cut(40 * S, 45 * S);
@@ -419,8 +426,8 @@ mod tests {
             [
                 chapter(0.0, 5.0, "Safari tour"),
                 chapter(5.0, 15.0, "Open Safari"),
-                chapter(15.0, 20.0, "Settings"),
-                chapter(20.0, 25.0, "Chapter 4"),
+                chapter(15.0, 19.9, "Settings"),
+                chapter(19.9, 25.0, "Chapter 4"),
             ]
         );
         // A first marker right at the start starts the video.

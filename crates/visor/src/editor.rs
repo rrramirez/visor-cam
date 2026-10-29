@@ -105,20 +105,6 @@ impl EditorWindow {
         ui.set_bubble_size(o.size as f32);
         ui.set_bubble_mirror(o.mirror);
         ui.set_speed(project.speed as f32);
-        let d = project.duration_us.max(1) as f64;
-        let markers: Vec<MarkerMark> = project
-            .markers
-            .iter()
-            .map(|m| MarkerMark {
-                pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
-                label: match m.text.as_str() {
-                    "" => util::clock(m.at_us),
-                    text => format!("{}  {text}", util::clock(m.at_us)),
-                }
-                .into(),
-            })
-            .collect();
-        ui.set_markers(ModelRc::new(VecModel::from(markers)));
         {
             let folded = app().settings.borrow().folded_sections.clone();
             let open = |name: &str| !folded.iter().any(|s| s == name);
@@ -660,6 +646,23 @@ impl EditorWindow {
             })
             .collect();
         self.ui.set_cuts(ModelRc::new(VecModel::from(cuts)));
+        // Marked where they were recorded, at the time the clock shows there.
+        let markers: Vec<MarkerMark> = project
+            .markers
+            .iter()
+            .map(|m| {
+                let at = util::clock(project.output_time(m.at_us));
+                MarkerMark {
+                    pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
+                    label: match m.text.as_str() {
+                        "" => at,
+                        text => format!("{at}  {text}"),
+                    }
+                    .into(),
+                }
+            })
+            .collect();
+        self.ui.set_markers(ModelRc::new(VecModel::from(markers)));
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
         self.ui
