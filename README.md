@@ -40,6 +40,9 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
+   - Drag either edge of a cut to adjust it; the preview shows the frame
+     under the edge. Click an edge, then **← →** move it a frame at a time
+     (**⇧** for 10). Dragging an edge onto the cut's other edge removes it.
    - **Speed** (0.5×–2×) speeds up or slows down the whole video; speech
      keeps its pitch. The preview plays at that speed.
    - Drag, resize, reshape, mirror or hide the camera bubble. It starts where

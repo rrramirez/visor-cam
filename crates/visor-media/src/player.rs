@@ -178,14 +178,18 @@ impl Player {
     }
 
     pub fn play(&mut self) {
-        // Restart from the beginning when at the end.
+        // From the next kept time if a preview left it in a cut; from the
+        // beginning when at the end.
         let pos = self.position();
+        let from = snap_to_kept(&self.edit, pos);
         if self
             .edit
-            .to_output(pos)
+            .to_output(from)
             .is_none_or(|o| o + 50_000 >= self.edit.duration())
         {
             self.seek(self.edit.ranges().first().map_or(0, |r| r.0));
+        } else if from != pos {
+            self.seek(from);
         }
         self.send(Cmd::Play);
         self.shared.playing.store(true, Ordering::Relaxed);
@@ -211,6 +215,19 @@ impl Player {
     /// Jumps to source time `t`. Inside a cut, lands on the next kept frame.
     pub fn seek(&mut self, t: Micros) {
         let t = snap_to_kept(&self.edit, t.min(self.duration));
+        self.shared.position.store(t, Ordering::Relaxed);
+        self.seeks_sent += 1;
+        self.send(Cmd::Seek(t, self.seeks_sent));
+    }
+
+    /// Shows the frame at source time `t` even if it was cut, e.g. while a
+    /// cut's edge is dragged, pausing playback. Playing from there starts
+    /// at the next kept time.
+    pub fn preview(&mut self, t: Micros) {
+        if self.is_playing() {
+            self.pause();
+        }
+        let t = t.min(self.duration.saturating_sub(1));
         self.shared.position.store(t, Ordering::Relaxed);
         self.seeks_sent += 1;
         self.send(Cmd::Seek(t, self.seeks_sent));
@@ -379,7 +396,7 @@ fn video_loop(
             match cmd {
                 Cmd::Play => {
                     let src = shared.position.load(Ordering::Relaxed);
-                    let out = edit.to_output(src).unwrap_or(0);
+                    let out = edit.kept_before(src);
                     let mut c = clock.lock().unwrap();
                     *c = Clock::running(out, c.speed);
                     playing = true;
@@ -390,7 +407,7 @@ fn video_loop(
                     *c = Clock::paused(c.now(), c.speed);
                 }
                 Cmd::Seek(t, seq) => {
-                    let out = edit.to_output(t).unwrap_or(0);
+                    let out = edit.kept_before(t);
                     let mut c = clock.lock().unwrap();
                     *c = c.rebased(out, c.speed);
                     pending_render = Some(t);
@@ -527,7 +544,7 @@ fn audio_loop(
             }
             Some(Cmd::Seek(t, _)) => {
                 ring.lock().unwrap().clear();
-                cursor = micros_to_samples(edit.to_output(t).unwrap_or(0));
+                cursor = micros_to_samples(edit.kept_before(t));
                 tempo = Tempo::new(clock.lock().unwrap().speed)?;
             }
             Some(Cmd::SetSpeed(speed)) => {

@@ -60,6 +60,57 @@ component SideButton inherits Rectangle {
     }
 }
 
+// One edge of a cut on the timeline: drag it to move it, or click it to
+// pick it for nudging. Its grip lies mostly outside the cut, so a narrow
+// cut's two edges don't cover each other.
+component CutEdge inherits Rectangle {
+    // Where the edge is, as a fraction of `track-width`.
+    in property <float> pos;
+    in property <length> track-width;
+    in property <bool> end;
+    in property <bool> active;
+    callback grab();
+    // The fraction under the pointer, keeping where it was grabbed.
+    callback drag(float);
+    // Whether it was dragged, and whether it ended up moved.
+    callback release(bool, bool);
+    callback cancel();
+    property <length> edge: end ? 2px : 8px;
+    x: pos * track-width - edge;
+    width: 10px;
+    Rectangle {
+        x: parent.edge - self.width / 2;
+        width: active ? 4px : 2px;
+        border-radius: 1px;
+        background: active ? Theme.accent : Theme.record;
+    }
+    TouchArea {
+        property <bool> dragged;
+        // Where it was pressed, on the track (this moves with the edge).
+        property <length> pressed-at;
+        mouse-cursor: ew-resize;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                self.dragged = false;
+                self.pressed-at = root.x + self.mouse-x;
+                root.grab();
+            }
+            // Brought back to where it was grabbed: not moved after all.
+            if (event.kind == PointerEventKind.up) {
+                root.release(self.dragged, self.dragged && abs(root.x + self.mouse-x - self.pressed-at) >= 1px);
+            }
+            if (event.kind == PointerEventKind.cancel) { root.cancel(); }
+        }
+        moved => {
+            // A click that wobbles isn't a drag, as on the timeline.
+            if (abs(self.mouse-x - self.pressed-x) > 4px) { self.dragged = true; }
+            if (self.dragged) {
+                root.drag((root.x + root.edge + self.mouse-x - self.pressed-x) / root.track-width);
+            }
+        }
+    }
+}
+
 export component Editor inherits Window {
     title: "Visor — " + root.project-title;
     preferred-width: 1180px;
@@ -102,6 +153,40 @@ export component Editor inherits Window {
     in property <float> position;
     in property <string> time-label;
     in property <[Region]> cuts;
+    // The cut edge picked for nudging with ← →: cut index * 2, + 1 for its
+    // end; -1 for none.
+    in-out property <int> active-edge: -1;
+    // A cut edge being dragged (cut index, which end) and where it is.
+    // Set to -1 when the cuts change, which ends the drag.
+    in-out property <int> drag-cut: -1;
+    property <bool> drag-end;
+    property <float> drag-pos;
+
+    function grab-edge(cut: int, end: bool, pos: float) {
+        root.drag-cut = cut;
+        root.drag-end = end;
+        root.drag-pos = pos;
+    }
+    function drag-edge(pos: float) {
+        root.drag-pos = pos;
+        root.preview(root.drag-cut, pos, root.drag-end);
+    }
+    // Picks the edge, and moves it there if it was dragged.
+    function release-edge(cut: int, end: bool, dragged: bool, moved: bool) {
+        if (root.drag-cut != cut) { return; }
+        root.drag-cut = -1;
+        root.active-edge = end ? cut * 2 + 1 : cut * 2;
+        if (moved) {
+            root.cut-edge-moved(cut, end, root.drag-pos);
+        } else if (dragged) {
+            root.drag-ended();
+        }
+        keys.focus();
+    }
+    function cancel-edge() {
+        root.drag-cut = -1;
+        root.drag-ended();
+    }
     in property <[MarkerMark]> markers;
     in-out property <float> sel-start: -1;
     in-out property <float> sel-end: -1;
@@ -132,6 +217,11 @@ export component Editor inherits Window {
 
     callback toggle-play();
     callback seek(float);
+    // Shows a frame even inside a cut.
+    callback preview(int, float, bool);
+    callback drag-ended();
+    callback cut-edge-moved(int, bool, float);
+    callback nudge-edge(int, bool);
     callback selection-changed(float, float);
     callback set-in();
     callback set-out();
@@ -170,6 +260,8 @@ export component Editor inherits Window {
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
+            if (event.text == Key.LeftArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
+            if (event.text == Key.RightArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
             if (event.text == Key.LeftArrow) { root.step(event.modifiers.shift ? -10 : -1); return accept; }
             if (event.text == Key.RightArrow) { root.step(event.modifiers.shift ? 10 : 1); return accept; }
             if (event.text == Key.Escape && root.export-card) {
@@ -177,6 +269,10 @@ export component Editor inherits Window {
                 return accept;
             }
             if (root.export-card) { return reject; }
+            if (event.text == Key.Escape && root.active-edge >= 0) {
+                root.active-edge = -1;
+                return accept;
+            }
             if (event.text == Key.Escape) {
                 root.sel-start = -1;
                 root.sel-end = -1;
@@ -581,7 +677,9 @@ export component Editor inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Text {
-                    text: "Drag on the timeline to select · I / O set points · ← → step";
+                    text: root.active-edge >= 0
+                        ? "← → move this edge a frame (⇧ for 10) · Esc to stop"
+                        : "Drag on the timeline to select · Drag a cut's edge to adjust it · ← → step";
                     color: Theme.faint;
                     font-size: Theme.font-small;
                     vertical-alignment: center;
@@ -626,9 +724,11 @@ export component Editor inherits Window {
                     stroke: transparent;
                 }
 
-                for c in root.cuts: Rectangle {
-                    x: c.start * track.width;
-                    width: max(2px, (c.end - c.start) * track.width);
+                for c[i] in root.cuts: Rectangle {
+                    property <float> start: root.drag-cut == i && !root.drag-end ? root.drag-pos : c.start;
+                    property <float> end: root.drag-cut == i && root.drag-end ? root.drag-pos : c.end;
+                    x: self.start * track.width;
+                    width: max(2px, (self.end - self.start) * track.width);
                     height: track.height;
                     background: #0b0c0ed9;
                     Rectangle {
@@ -661,6 +761,7 @@ export component Editor inherits Window {
                         if (event.kind == PointerEventKind.down) {
                             self.dragging = false;
                             self.anchor = max(0, min(1, self.mouse-x / track.width));
+                            root.active-edge = -1;
                         }
                         if (event.kind == PointerEventKind.up && !self.dragging) {
                             root.sel-start = -1;
@@ -713,6 +814,30 @@ export component Editor inherits Window {
                             if (event.kind == PointerEventKind.up) { root.selection-changed(root.sel-start, root.sel-end); }
                         }
                     }
+                }
+
+                // Cut edges: drag one to move it, showing the frame under it;
+                // or click one and nudge it a frame at a time with ← →.
+                for c[i] in root.cuts: CutEdge {
+                    visible: c.start > 0;
+                    pos: root.drag-cut == i && !root.drag-end ? root.drag-pos : c.start;
+                    track-width: track.width;
+                    active: root.active-edge == i * 2;
+                    grab => { root.grab-edge(i, false, c.start); }
+                    drag(f) => { root.drag-edge(max(0, min(c.end, f))); }
+                    release(dragged, moved) => { root.release-edge(i, false, dragged, moved); }
+                    cancel => { root.cancel-edge(); }
+                }
+                for c[i] in root.cuts: CutEdge {
+                    visible: c.end < 1;
+                    end: true;
+                    pos: root.drag-cut == i && root.drag-end ? root.drag-pos : c.end;
+                    track-width: track.width;
+                    active: root.active-edge == i * 2 + 1;
+                    grab => { root.grab-edge(i, true, c.end); }
+                    drag(f) => { root.drag-edge(max(c.start, min(1, f))); }
+                    release(dragged, moved) => { root.release-edge(i, true, dragged, moved); }
+                    cancel => { root.cancel-edge(); }
                 }
 
                 // Markers: a line with a flag; hover shows the note, click seeks.

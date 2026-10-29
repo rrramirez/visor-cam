@@ -39,6 +39,9 @@ pub struct EditorWindow {
     idle_ticks: Cell<u32>,
     /// Why the last save failed, for an agent's edit to report.
     save_error: RefCell<Option<String>>,
+    /// The edit after the last nudge of a cut's edge, and that edge, so
+    /// the nudges that follow join its step to undo.
+    nudged: RefCell<Option<(EditList, bool, Micros)>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -153,6 +156,7 @@ impl EditorWindow {
                 timer,
                 idle_ticks: Cell::new(0),
                 save_error: RefCell::default(),
+                nudged: RefCell::default(),
                 jobs: Jobs::default(),
             }
         });
@@ -229,9 +233,46 @@ impl EditorWindow {
         on!(on_undo, |e| e.undo_redo(true));
         on!(on_redo, |e| e.undo_redo(false));
         on!(on_step, |e, frames| {
-            let pos = e.player.borrow().position() as i64;
-            let to = (pos + i64::from(frames) * 33_333).max(0) as Micros;
+            let pos = e.player.borrow().position();
+            let to = e.frames_from(pos, frames);
             e.control().seek(to);
+        });
+        on!(on_preview, |e, index, f, end| {
+            // The frame it will show once let go.
+            let t = e.nearest_frame(f);
+            if let Some((_, _, shown)) = e.cut_edge_moved(index as usize, end, t) {
+                e.control().preview(shown);
+            }
+        });
+        // Back from a preview, which may be inside a cut, to a kept frame.
+        on!(on_drag_ended, |e| {
+            let pos = e.player.borrow().position();
+            e.control().seek(pos);
+        });
+        on!(on_cut_edge_moved, |e, index, end, f| {
+            let t = e.nearest_frame(f);
+            e.move_cut_edge(index as usize, end, t, false);
+        });
+        on!(on_nudge_edge, |e, frames, repeat| {
+            let Some((index, end, at)) = e.picked_edge() else {
+                return;
+            };
+            let Some(&cut) = e.cuts().get(index) else {
+                return;
+            };
+            let to = e.frames_from(at, frames);
+            // Nudging shrinks a cut to a frame at least, never away.
+            if (end && to <= cut.0) || (!end && to >= cut.1) {
+                return;
+            }
+            // Held down, the nudges of one edge are one step to undo.
+            let edit = e.project.borrow().edit.clone();
+            let again = repeat && e.nudged.borrow().as_ref() == Some(&(edit, end, at));
+            e.move_cut_edge(index, end, to, again);
+            let nudged = e
+                .picked_edge()
+                .map(|(_, end, t)| (e.project.borrow().edit.clone(), end, t));
+            *e.nudged.borrow_mut() = nudged;
         });
         on!(on_bubble_changed, |e| {
             {
@@ -377,6 +418,150 @@ impl EditorWindow {
         })
     }
 
+    /// The screen recording's frame rate.
+    fn fps(&self) -> f64 {
+        let fps = self
+            .project
+            .borrow()
+            .tracks
+            .screen
+            .as_ref()
+            .and_then(|t| t.fps);
+        f64::from(fps.unwrap_or(30).max(1))
+    }
+
+    /// How many frames into the recording `t` is.
+    fn frames_at(&self, t: f64) -> f64 {
+        t * self.fps() / 1_000_000.0
+    }
+
+    /// When frame `n` starts, on the exact grid so it doesn't drift.
+    fn frame_time(&self, n: f64) -> Micros {
+        (n.max(0.0) * 1_000_000.0 / self.fps()).round() as Micros
+    }
+
+    /// The frame nearest timeline position `f` (0..1).
+    fn nearest_frame(&self, f: f32) -> Micros {
+        let t = f64::from(f) * self.duration() as f64;
+        self.frame_time(self.frames_at(t).round())
+    }
+
+    /// `frames` frames on from `t`, from frame to frame even when `t` is
+    /// between frames.
+    fn frames_from(&self, t: Micros, frames: i32) -> Micros {
+        let at = self.frames_at(t as f64);
+        let from = if frames > 0 {
+            (at + 0.01).floor()
+        } else {
+            (at - 0.01).ceil()
+        };
+        self.frame_time(from + f64::from(frames))
+    }
+
+    /// The cut stretches, as the timeline shows them.
+    fn cuts(&self) -> Vec<visor_core::Range> {
+        let project = self.project.borrow();
+        project.edit.cuts(project.duration_us)
+    }
+
+    /// The edit with one edge of a cut moved to `t` (see
+    /// `EditList::with_cut_edge_moved`), where the edge then is, and the
+    /// frame to show for it: the first kept after the cut, or the last kept
+    /// before it.
+    fn cut_edge_moved(
+        &self,
+        index: usize,
+        end: bool,
+        t: Micros,
+    ) -> Option<(EditList, Micros, Micros)> {
+        let d = self.duration();
+        let cuts = self.cuts();
+        // Less than a frame from the cut it comes to (or either end of the
+        // recording) would leave a flash frame: take it all.
+        let mut t = t.min(d);
+        if end {
+            let next = cuts.iter().map(|c| c.0).filter(|&s| s >= t).min();
+            let next = next.unwrap_or(d);
+            if self.frames_at((next - t) as f64) < 1.0 {
+                t = next;
+            }
+        } else {
+            let prev = cuts.iter().map(|c| c.1).filter(|&e| e <= t).max();
+            let prev = prev.unwrap_or(0);
+            if self.frames_at((t - prev) as f64) < 1.0 {
+                t = prev;
+            }
+        }
+        let edit = self
+            .project
+            .borrow()
+            .edit
+            .with_cut_edge_moved(d, index, end, t)?;
+        let ranges = edit.ranges();
+        let shown = if end {
+            ranges.iter().find(|r| r.1 > t).map(|r| r.0.max(t))
+        } else {
+            ranges
+                .iter()
+                .rev()
+                .find(|r| r.0 < t)
+                .map(|r| self.frames_from(r.1.min(t), -1).max(r.0))
+        };
+        // Nothing kept on that side: the frame by the edge on the other.
+        let shown = shown.unwrap_or_else(|| ranges.first().map_or(0, |r| r.0));
+        Some((edit, t, shown))
+    }
+
+    /// Moves one edge of a cut to `t` and shows the frame by it (see
+    /// `cut_edge_moved`). `merge` makes it part of the last step to undo.
+    fn move_cut_edge(&self, index: usize, end: bool, t: Micros, merge: bool) {
+        let steps = self.undo.borrow().len();
+        let moved = self.cut_edge_moved(index, end, t);
+        if let Some((edit, _, _)) = &moved {
+            self.apply(|e| *e = edit.clone());
+        }
+        // Not moved, or refused (it would remove everything): back from
+        // the drag's preview to a kept frame, leaving the rest as it was.
+        let Some((_, t, shown)) = moved.filter(|(edit, ..)| self.project.borrow().edit == *edit)
+        else {
+            let pos = self.player.borrow().position();
+            self.control().seek(pos);
+            return;
+        };
+        if merge && self.undo.borrow().len() > steps {
+            self.undo.borrow_mut().pop();
+        }
+        // Still picked where it now is, unless it went away or joined
+        // another cut.
+        self.pick_edge(Some((end, t)));
+        self.control().seek(shown);
+    }
+
+    /// The cut edge picked for nudging: its cut's index, whether it's the
+    /// end, and where it is.
+    fn picked_edge(&self) -> Option<(usize, bool, Micros)> {
+        let edge = usize::try_from(self.ui.get_active_edge()).ok()?;
+        let (index, end) = (edge / 2, edge % 2 == 1);
+        let cut = *self.cuts().get(index)?;
+        Some((index, end, if end { cut.1 } else { cut.0 }))
+    }
+
+    /// Picks the cut edge at `t` (an end, or a start), if there is one the
+    /// timeline shows: not at either end of the recording.
+    fn pick_edge(&self, edge: Option<(bool, Micros)>) {
+        let d = self.duration();
+        let index = edge
+            .filter(|&(end, t)| if end { t < d } else { t > 0 })
+            .and_then(|(end, t)| {
+                let i = self
+                    .cuts()
+                    .iter()
+                    .position(|c| if end { c.1 == t } else { c.0 == t })?;
+                i32::try_from(i * 2 + usize::from(end)).ok()
+            });
+        self.ui.set_active_edge(index.unwrap_or(-1));
+    }
+
     /// The project as edited here.
     pub fn project(&self) -> Project {
         self.project.borrow().clone()
@@ -428,7 +613,12 @@ impl EditorWindow {
     }
 
     fn set_edit(&self, edit: EditList) {
+        // The cuts may be renumbered: keep the picked edge by where it is,
+        // and end a drag, whose cut may now be another.
+        let picked = self.picked_edge().map(|(_, end, t)| (end, t));
         self.project.borrow_mut().edit = edit.clone();
+        self.pick_edge(picked);
+        self.ui.set_drag_cut(-1);
         self.control().set_edit(edit);
         self.save();
         self.refresh_edit_ui();
@@ -444,23 +634,15 @@ impl EditorWindow {
     fn refresh_edit_ui(&self) {
         let project = self.project.borrow();
         let d = project.duration_us.max(1) as f64;
-        let mut cuts = Vec::new();
-        let mut last = 0;
-        for r in project.edit.ranges() {
-            if r.0 > last {
-                cuts.push(Region {
-                    start: (last as f64 / d) as f32,
-                    end: (r.0 as f64 / d) as f32,
-                });
-            }
-            last = r.1;
-        }
-        if last < project.duration_us {
-            cuts.push(Region {
-                start: (last as f64 / d) as f32,
-                end: 1.0,
-            });
-        }
+        let cuts: Vec<Region> = project
+            .edit
+            .cuts(project.duration_us)
+            .iter()
+            .map(|c| Region {
+                start: (c.0 as f64 / d) as f32,
+                end: (c.1 as f64 / d) as f32,
+            })
+            .collect();
         self.ui.set_cuts(ModelRc::new(VecModel::from(cuts)));
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
@@ -484,7 +666,7 @@ impl EditorWindow {
         } else {
             -1.0
         });
-        let at = project.edit.to_output(thumbnail).unwrap_or(0);
+        let at = project.edit.kept_before(thumbnail);
         self.ui.set_thumbnail_label(
             if chosen {
                 format!(
@@ -540,7 +722,7 @@ impl EditorWindow {
             (p.edit.clone(), p.speed)
         };
         // Times as they will be in the export, after cuts and speed.
-        let out = edit.to_output(pos).unwrap_or_else(|| edit.duration());
+        let out = edit.kept_before(pos);
         let sped = |t: Micros| (t as f64 / speed) as Micros;
         self.ui.set_time_label(
             format!(

@@ -7,6 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
+- **Adjust cuts:** drag either edge of a cut on the timeline to make it longer or shorter, watching the frame under it, or click an edge and move it a frame at a time with the arrow keys. Works for your cuts and an agent's alike.
 - **Agents can cut their recordings:** after stopping, an agent can remove stretches that went wrong or trim the ends, then open the result in the editor for you. If the recording is already open, its cuts show there and you can undo them.
 
 ## 0.3.0

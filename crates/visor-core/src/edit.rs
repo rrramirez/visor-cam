@@ -79,6 +79,50 @@ impl EditList {
         self.keep = out;
     }
 
+    /// The stretches removed from a recording of `duration`, in order: the
+    /// gaps between kept ranges, including any trimmed at either end.
+    pub fn cuts(&self, duration: Micros) -> Vec<Range> {
+        let mut cuts = Vec::new();
+        let mut last = 0;
+        for r in &self.keep {
+            if r.0 > last {
+                cuts.push(Range(last, r.0));
+            }
+            last = r.1;
+        }
+        if last < duration {
+            cuts.push(Range(last, duration));
+        }
+        cuts
+    }
+
+    /// This edit with the start (or `end`) of cut `index` (see [`cuts`])
+    /// moved to `t`. A cut moved onto its other edge goes away; one moved
+    /// over a neighbour joins it. `None` if there's no such cut.
+    ///
+    /// [`cuts`]: Self::cuts
+    pub fn with_cut_edge_moved(
+        &self,
+        duration: Micros,
+        index: usize,
+        end: bool,
+        t: Micros,
+    ) -> Option<Self> {
+        let mut cuts = self.cuts(duration);
+        let cut = cuts.get_mut(index)?;
+        let t = t.min(duration);
+        if end {
+            cut.1 = t;
+        } else {
+            cut.0 = t;
+        }
+        let mut edit = Self::full(duration);
+        for c in cuts {
+            edit.cut(c.0, c.1);
+        }
+        Some(edit)
+    }
+
     /// Keep only `[start, end)` (source time), dropping everything outside it.
     pub fn trim(&mut self, start: Micros, end: Micros) {
         self.cut(0, start);
@@ -95,6 +139,12 @@ impl EditList {
             acc += r.len();
         }
         None
+    }
+
+    /// How much is kept before source time `source`: its output time, and
+    /// inside a cut, that of the kept time after it.
+    pub fn kept_before(&self, source: Micros) -> Micros {
+        self.keep.iter().map(|r| source.clamp(r.0, r.1) - r.0).sum()
     }
 
     /// Map a source time to output time, or `None` if it was cut.
@@ -116,6 +166,49 @@ impl EditList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_edges_move_shrink_and_join() {
+        let mut e = EditList::full(100);
+        e.cut(20, 30);
+        e.cut(50, 60);
+        e.cut(90, 100);
+        assert_eq!(e.cuts(100), [Range(20, 30), Range(50, 60), Range(90, 100)]);
+        // Shrink the first cut from its end, grow the second from its start.
+        let moved = e.with_cut_edge_moved(100, 0, true, 25).unwrap();
+        assert_eq!(
+            moved.cuts(100),
+            [Range(20, 25), Range(50, 60), Range(90, 100)]
+        );
+        let moved = e.with_cut_edge_moved(100, 1, false, 45).unwrap();
+        assert_eq!(
+            moved.cuts(100),
+            [Range(20, 30), Range(45, 60), Range(90, 100)]
+        );
+        // Onto its other edge: gone. Over its neighbour: joined.
+        let gone = e.with_cut_edge_moved(100, 0, true, 20).unwrap();
+        assert_eq!(gone.cuts(100), [Range(50, 60), Range(90, 100)]);
+        let joined = e.with_cut_edge_moved(100, 0, true, 55).unwrap();
+        assert_eq!(joined.cuts(100), [Range(20, 60), Range(90, 100)]);
+        // The trimmed end, moved back, keeps more.
+        let kept = e.with_cut_edge_moved(100, 2, false, 95).unwrap();
+        assert_eq!(
+            kept.cuts(100),
+            [Range(20, 30), Range(50, 60), Range(95, 100)]
+        );
+        assert!(e.with_cut_edge_moved(100, 3, false, 10).is_none());
+    }
+
+    #[test]
+    fn kept_before_counts_kept_time_even_in_cuts() {
+        let mut e = EditList::full(100);
+        e.cut(20, 30);
+        assert_eq!(e.kept_before(10), 10);
+        assert_eq!(e.kept_before(25), 20);
+        assert_eq!(e.kept_before(40), 30);
+        assert_eq!(e.kept_before(100), 90);
+        assert_eq!(e.to_output(40), Some(e.kept_before(40)));
+    }
 
     #[test]
     fn cut_middle_splits_range() {
