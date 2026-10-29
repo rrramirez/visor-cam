@@ -74,6 +74,56 @@ fn send(reply: Reply, result: Result<Value, String>) {
     let _ = reply.send(value);
 }
 
+/// How tall frames shown to agents are at most: enough to read text.
+const FRAME_HEIGHT: u32 = 720;
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Renders frames for agents one at a time, on one thread, so an agent
+/// asking for many at once can't swamp the computer, or a recording going
+/// on.
+fn render(job: Job) {
+    static QUEUE: std::sync::OnceLock<crossbeam_channel::Sender<Job>> = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
+        let spawned = std::thread::Builder::new()
+            .name("visor-frames".into())
+            .spawn(move || {
+                // A crash in one frame (logged by the panic hook) mustn't
+                // stop the rest from rendering.
+                for job in rx {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                        tracing::warn!("rendering a frame crashed");
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("could not start rendering frames: {e}");
+        }
+        tx
+    });
+    // No thread to take it (it couldn't start): render it here.
+    if let Err(crossbeam_channel::SendError(job)) = queue.send(job) {
+        job();
+    }
+}
+
+/// A time argument, in seconds.
+fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
+    arg(args, name)
+        .and_then(Value::as_f64)
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .map(|t| (t * 1e6) as Micros)
+        .ok_or_else(|| format!("{name} is a number of seconds."))
+}
+
+fn past_the_end(what: &str, duration: Micros) -> String {
+    format!(
+        "{what} is past the end: the recording is {} seconds long.",
+        seconds(duration)
+    )
+}
+
 fn seconds(us: visor_core::Micros) -> f64 {
     (us as f64 / 100_000.0).round() / 10.0
 }
@@ -176,6 +226,7 @@ impl App {
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
+            "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
         };
@@ -587,7 +638,7 @@ impl App {
         }
         let root = self.settings.borrow().save_dir.canonicalize().ok();
         if dir.parent() != root.as_deref() {
-            return Err("Only recordings in Visor's recordings folder can be edited.".into());
+            return Err("Only recordings in Visor's recordings folder can be used.".into());
         }
         match &*self.session.borrow() {
             Session::Recording { recorder, .. }
@@ -626,36 +677,22 @@ impl App {
         let range = match kind {
             EditKind::Restore => None,
             EditKind::Cut | EditKind::Trim => {
-                let time = |k: &str| {
-                    arg(args, k)
-                        .and_then(Value::as_f64)
-                        .filter(|t| t.is_finite() && *t >= 0.0)
-                        .ok_or_else(|| format!("{k} is a number of seconds."))
-                };
-                let (start, end) = (time("start_seconds")?, time("end_seconds")?);
+                let (start, end) = (
+                    time_arg(args, "start_seconds")?,
+                    time_arg(args, "end_seconds")?,
+                );
                 if end <= start {
                     return Err("end_seconds must be after start_seconds.".into());
                 }
-                Some(((start * 1e6) as Micros, (end * 1e6) as Micros))
+                Some((start, end))
             }
         };
-        // Built once from what the open editor has, else what's on disk.
-        let editor = self.editor_for(&dir);
-        let current = match &editor {
-            Some(editor) => editor.project(),
-            None => visor_core::Project::load(&dir).map_err(|e| e.to_string())?,
-        };
+        let (editor, current) = self.agent_project(&dir)?;
         let duration = current.duration_us;
-        if duration == 0 {
-            return Err("That recording wasn't saved properly, so it can't be edited.".into());
-        }
         if let Some((start, _)) = range
             && start >= duration
         {
-            return Err(format!(
-                "start_seconds is past the end: the recording is {} seconds long.",
-                seconds(duration)
-            ));
+            return Err(past_the_end("start_seconds", duration));
         }
         let mut edit = current.edit.clone();
         match (kind, range) {
@@ -685,6 +722,55 @@ impl App {
         }))
     }
 
+    /// The recording in `dir` as its open editor has it, else as saved, and
+    /// that editor.
+    fn agent_project(
+        &self,
+        dir: &Path,
+    ) -> Result<(Option<Rc<EditorWindow>>, visor_core::Project), String> {
+        let editor = self.editor_for(dir);
+        let project = match &editor {
+            Some(editor) => editor.project(),
+            None => visor_core::Project::load(dir).map_err(|e| e.to_string())?,
+        };
+        if project.duration_us == 0 {
+            return Err("That recording wasn't saved properly, so it can't be used.".into());
+        }
+        Ok((editor, project))
+    }
+
+    /// Shows an agent the frame recorded at `seconds`, cut or not, as the
+    /// export would show it. Rendered off the UI thread.
+    fn agent_frame(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let t = time_arg(args, "seconds")?;
+            let (_, project) = self.agent_project(&dir)?;
+            if t >= project.duration_us {
+                return Err(past_the_end("seconds", project.duration_us));
+            }
+            Ok((dir, project, t))
+        });
+        let (dir, project, t) = match request {
+            Ok(request) => request,
+            Err(e) => return send(reply, Err(e)),
+        };
+        render(Box::new(move || {
+            use base64::prelude::*;
+            let result = visor_media::export::frame_jpeg(&dir, &project, t, FRAME_HEIGHT)
+                .map(|jpeg| {
+                    let mut reply = json!({
+                        "folder": dir.display().to_string(),
+                        "seconds": seconds(t),
+                        "cut": project.edit.to_output(t).is_none(),
+                    });
+                    reply[crate::cli::IMAGE] = BASE64_STANDARD.encode(jpeg).into();
+                    reply
+                })
+                .map_err(|e| format!("Couldn't show that frame: {e:#}"));
+            send(reply, result);
+        }));
+    }
+
     /// Lists a recording's dead time, still and silent, for an agent to cut.
     /// Found off the UI thread: the whole recording is decoded.
     fn agent_dead_time(&self, args: &Value, reply: Reply) {
@@ -699,10 +785,7 @@ impl App {
                     (min * 1e6) as Micros
                 }
             };
-            let project = match self.editor_for(&dir) {
-                Some(editor) => editor.project(),
-                None => visor_core::Project::load(&dir).map_err(|e| e.to_string())?,
-            };
+            let (_, project) = self.agent_project(&dir)?;
             Ok((dir, project, min))
         });
         let (dir, project, min) = match request {

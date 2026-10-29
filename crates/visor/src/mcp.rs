@@ -21,7 +21,8 @@ setting up something that shouldn't be seen, and as soon as a step fails or you 
 need to retry or think, then resume_recording once the next step is ready to show. \
 After stopping, find_dead_time lists stretches where nothing happens, and \
 cut_recording removes those and others that went wrong (marker times help find \
-them); then open_recording hands the result to the user. \
+them; view_frame shows what was on screen at a moment, to check before cutting); \
+then open_recording hands the result to the user. \
 Visor's own windows are never recorded, but your terminal or chat window is if it's \
 on the recorded screen: record a single window or app to keep it out. \
 The user must turn on agent control in Visor's Preferences first; if a tool says it \
@@ -153,6 +154,22 @@ fn tool_list() -> Value {
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
         },
         {
+            "name": "view_frame",
+            "description": "Shows the frame of a recording at a moment, as the exported video would (camera bubble included), even if that moment was cut. Use it to see what happened around a marker, or to check a stretch before cutting it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "number",
+                        "description": "When, in recorded seconds, as add_marker and cut_recording use them.",
+                    },
+                    "folder": folder_schema(),
+                },
+                "required": ["seconds"],
+            },
+            "annotations": {"readOnlyHint": true},
+        },
+        {
             "name": "find_dead_time",
             "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for cut_recording. Each leaves a moment on either side of what happens. Takes a few seconds per minute of recording.",
             "inputSchema": {
@@ -282,11 +299,18 @@ fn call_tool(params: &Value) -> Result<Value, (i64, &'static str)> {
         _ => json!({}),
     };
     command["command"] = name.into();
-    let (text, is_error) = match crate::cli::reply_text(crate::cli::call(&command)) {
+    let mut reply = crate::cli::call(&command);
+    // A frame goes to the agent as an image, with the rest as text.
+    let image = crate::cli::take_image(&mut reply);
+    let (text, is_error) = match crate::cli::reply_text(reply) {
         Ok(text) => (text, false),
         Err(error) => (error, true),
     };
-    Ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}))
+    let mut content = vec![json!({"type": "text", "text": text})];
+    if let Some(data) = image.filter(|_| !is_error) {
+        content.push(json!({"type": "image", "data": data, "mimeType": "image/jpeg"}));
+    }
+    Ok(json!({"content": content, "isError": is_error}))
 }
 
 #[cfg(test)]
