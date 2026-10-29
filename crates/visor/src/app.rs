@@ -271,6 +271,7 @@ impl App {
             // Stopping during the countdown cancels, as the bar does.
             Shortcut::StartStop if recording || starting => self.stop_recording(false),
             Shortcut::TogglePause if recording => self.toggle_pause(),
+            Shortcut::Mark if recording => self.mark(),
             Shortcut::Discard if recording => self.stop_recording(true),
             _ => {}
         }
@@ -410,9 +411,18 @@ impl App {
             Some(s) => s.set_recording(live),
             None => return,
         };
-        // Pause and discard are only tried while recording: remember what
-        // was taken then, so Preferences can say so afterwards too.
+        // Pause, mark and discard are only tried while recording: remember
+        // what was taken then, so Preferences can say so afterwards too.
         if live {
+            if let Session::Recording { bar, .. } = &*self.session.borrow() {
+                let works = self.settings.borrow().shortcuts && !taken.contains(&Shortcut::Mark);
+                let label = if works {
+                    shortcuts::label(Shortcut::Mark)
+                } else {
+                    String::new()
+                };
+                bar.set_mark_shortcut(label.into());
+            }
             let changed = {
                 let mut known = self.taken_shortcuts.borrow_mut();
                 let before = known.clone();
@@ -1567,6 +1577,7 @@ impl App {
             (display.frame.y + display.frame.height - 110.0) as f32,
         ));
         bar.on_toggle_pause(|| app().toggle_pause());
+        bar.on_mark(|| app().mark());
         bar.on_stop(|| app().stop_recording(false));
         bar.on_discard(|| app().stop_recording(true));
         bar.on_drag_by(|dx, dy| {
@@ -1603,6 +1614,22 @@ impl App {
         }
         self.refresh_tray();
         self.agent_start_finished(Ok(()));
+    }
+
+    /// Adds a marker where the recording is, to name in the editor; the
+    /// control bar says so for a moment.
+    fn mark(&self) {
+        let Session::Recording { recorder, bar, .. } = &mut *self.session.borrow_mut() else {
+            return;
+        };
+        let at = recorder.mark(String::new());
+        bar.set_note(format!("Marked {}", util::clock(at)).into());
+        let weak = bar.as_weak();
+        Timer::single_shot(Duration::from_millis(1500), move || {
+            if let Some(bar) = weak.upgrade() {
+                bar.set_note("".into());
+            }
+        });
     }
 
     fn toggle_pause(&self) {
@@ -1891,6 +1918,7 @@ impl App {
                 [
                     (Shortcut::StartStop, "start or stop"),
                     (Shortcut::TogglePause, "pause"),
+                    (Shortcut::Mark, "mark"),
                     (Shortcut::Discard, "discard"),
                 ]
                 .map(|(s, what)| format!("{} {what}", shortcuts::label(s)))

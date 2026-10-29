@@ -162,12 +162,17 @@ export component ControlBar inherits Window {
     title: "Visor recording";
     // An AI agent started this recording (see app::agent).
     in property <bool> agent;
-    out property <length> bar-width: root.agent ? 300px : 236px;
+    out property <length> bar-width: root.agent ? 344px : 280px;
     width: root.bar-width;
     height: 52px;
     in property <string> elapsed: "0:00";
     in property <bool> paused;
+    // Shown for a moment in place of the time, e.g. "Marked 0:12".
+    in property <string> note;
+    // How the shortcut to add a marker is written, if it's on.
+    in property <string> mark-shortcut;
     callback toggle-pause();
+    callback mark();
     callback stop();
     callback discard();
     callback drag-by(length, length);
@@ -204,7 +209,7 @@ export component ControlBar inherits Window {
                 }
             }
             Text {
-                text: root.paused ? "Paused " + root.elapsed : root.elapsed;
+                text: root.note != "" ? root.note : root.paused ? "Paused " + root.elapsed : root.elapsed;
                 color: Theme.text;
                 font-size: Theme.font-large;
                 font-weight: 600;
@@ -233,6 +238,12 @@ export component ControlBar inherits Window {
                 filled: true;
                 tooltip: root.paused ? "Resume" : "Pause";
                 clicked => { root.toggle-pause(); }
+            }
+            IconButton {
+                size: 36px;
+                icon: Icons.marker;
+                tooltip: root.mark-shortcut != "" ? "Add marker (" + root.mark-shortcut + ")" : "Add marker";
+                clicked => { root.mark(); }
             }
             IconButton {
                 size: 36px;

@@ -9,12 +9,15 @@ pub enum Shortcut {
     /// Start a recording with the last settings, or stop the current one.
     StartStop,
     TogglePause,
+    /// Add a marker where the recording is.
+    Mark,
     Discard,
 }
 
-const ALL: [(Shortcut, Code); 3] = [
+const ALL: [(Shortcut, Code); 4] = [
     (Shortcut::StartStop, Code::KeyR),
     (Shortcut::TogglePause, Code::KeyP),
+    (Shortcut::Mark, Code::KeyM),
     (Shortcut::Discard, Code::Backspace),
 ];
 
@@ -31,6 +34,7 @@ pub fn label(shortcut: Shortcut) -> String {
         Code::Backspace if cfg!(target_os = "macos") => "⌫",
         Code::Backspace => "Backspace",
         Code::KeyR => "R",
+        Code::KeyM => "M",
         _ => "P",
     };
     if cfg!(target_os = "macos") {
@@ -42,7 +46,7 @@ pub fn label(shortcut: Shortcut) -> String {
 
 /// Held only while recording, so the keys type as usual otherwise (⌥⇧P
 /// is "∏" on a US Mac keyboard).
-const RECORDING_ONLY: [Shortcut; 2] = [Shortcut::TogglePause, Shortcut::Discard];
+const RECORDING_ONLY: [Shortcut; 3] = [Shortcut::TogglePause, Shortcut::Mark, Shortcut::Discard];
 
 pub struct Shortcuts {
     manager: GlobalHotKeyManager,

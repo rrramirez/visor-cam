@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
 use visor_core::{EditList, Micros, Project};
 use visor_media::dead_time;
@@ -112,6 +112,7 @@ impl EditorWindow {
             ui.set_camera_open(open("camera"));
             ui.set_speed_open(open("speed"));
             ui.set_thumbnail_open(open("thumbnail"));
+            ui.set_markers_open(open("markers"));
         }
         {
             let app = app();
@@ -288,6 +289,7 @@ impl EditorWindow {
                 ("camera", e.ui.get_camera_open()),
                 ("speed", e.ui.get_speed_open()),
                 ("thumbnail", e.ui.get_thumbnail_open()),
+                ("markers", e.ui.get_markers_open()),
             ]
             .into_iter()
             .filter(|(_, open)| !open)
@@ -307,6 +309,18 @@ impl EditorWindow {
             e.control().set_speed(speed);
             e.save();
             e.refresh_edit_ui();
+        });
+        on!(on_add_marker, |e| e.add_marker());
+        on!(on_rename_marker, |e, i, text| e
+            .rename_marker(i as usize, &text));
+        on!(on_delete_marker, |e, i| {
+            let mut project = e.project.borrow_mut();
+            if (i as usize) < project.markers.len() {
+                project.markers.remove(i as usize);
+                drop(project);
+                e.save();
+                e.refresh_edit_ui();
+            }
         });
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
@@ -406,6 +420,43 @@ impl EditorWindow {
 
     pub fn duration(&self) -> Micros {
         self.project.borrow().duration_us.max(1)
+    }
+
+    /// Adds a marker at the playhead, in time order, ready to be named.
+    fn add_marker(&self) {
+        let at = self.player.borrow().position();
+        let index = {
+            let mut project = self.project.borrow_mut();
+            let index = project.markers.partition_point(|m| m.at_us <= at);
+            let marker = visor_core::Marker {
+                at_us: at,
+                text: String::new(),
+            };
+            project.markers.insert(index, marker);
+            index
+        };
+        self.save();
+        self.ui.set_markers_open(true);
+        self.ui.set_focus_marker(index as i32);
+        self.refresh_edit_ui();
+    }
+
+    /// Names a marker as it's typed, without rebuilding the list (which
+    /// would take the keyboard away).
+    fn rename_marker(&self, index: usize, text: &str) {
+        let text: String = text.chars().take(200).collect();
+        if let Some(m) = self.project.borrow_mut().markers.get_mut(index) {
+            m.text = text.clone();
+        } else {
+            return;
+        }
+        self.save();
+        let rows = self.ui.get_markers();
+        if let Some(mut row) = rows.row_data(index) {
+            row.label = marker_label(&row.time, &text).into();
+            row.text = text.into();
+            rows.set_row_data(index, row);
+        }
     }
 
     fn position_fraction(&self) -> f32 {
@@ -654,14 +705,12 @@ impl EditorWindow {
             .markers
             .iter()
             .map(|m| {
-                let at = util::clock(project.output_time(m.at_us));
+                let time = util::clock(project.output_time(m.at_us));
                 MarkerMark {
                     pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
-                    label: match m.text.as_str() {
-                        "" => at,
-                        text => format!("{at}  {text}"),
-                    }
-                    .into(),
+                    label: marker_label(&time, &m.text).into(),
+                    time: time.into(),
+                    text: m.text.clone().into(),
                 }
             })
             .collect();
@@ -1086,6 +1135,14 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
         n += 1;
     }
     path
+}
+
+/// A marker as the timeline shows it: its time, and its text if any.
+fn marker_label(time: &str, text: &str) -> String {
+    match text.trim() {
+        "" => time.to_string(),
+        text => format!("{time}  {text}"),
+    }
 }
 
 #[cfg(test)]

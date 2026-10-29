@@ -29,8 +29,10 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
 4. Use the floating control bar (or the menu bar menu) to pause, resume, stop
    or discard. The control bar and camera bubble never appear in the recording.
    From any app, **⌥⇧R** starts a recording with your last choices (or stops
-   one), **⌥⇧P** pauses or resumes and **⌥⇧⌫** discards (Alt+Shift+R, P and
-   Backspace on Windows and Linux/X11; they can be turned off in Preferences).
+   one), **⌥⇧P** pauses or resumes, **⌥⇧M** adds a marker and **⌥⇧⌫**
+   discards (Alt+Shift+R, P, M and Backspace on Windows and Linux/X11; they
+   can be turned off in Preferences). The flag button on the control bar
+   adds a marker too: mark each step as you go, and name them later.
 5. Stopping opens the editor, ready for you to name the recording: type a
    name and press Enter to get back to editing. Exports are named after it,
    and you can rename it any time in the sidebar's **Name** field. When the
@@ -40,6 +42,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      timeline to seek, drag on it to select.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
+   - **Markers**: *Add marker* (**M**) marks the playhead. Name each one in
+     the sidebar, click its time to jump there, or delete it.
    - Drag either edge of a cut to adjust it; the preview shows the frame
      under the edge. Click an edge, then **← →** move it a frame at a time
      (**⇧** for 10). Dragging an edge onto the cut's other edge removes it.
