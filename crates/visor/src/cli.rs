@@ -44,6 +44,8 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   open                        open it in the editor
   frame SECONDS [--out FILE]  save the frame at SECONDS, cut or not, as a JPEG
                               (frame-SECONDS.jpg here by default)
+  dead-time [--min SECONDS]   list stretches where the screen is still and
+                              nothing is heard (2 seconds or longer)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
 
@@ -85,7 +87,7 @@ pub fn run(args: &[String]) -> Option<i32> {
                 }
             });
         }
-        "cut" | "trim" | "restore" | "open" => match edit_args(first, rest) {
+        "cut" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
                 attach_console();
@@ -194,6 +196,7 @@ fn start_args(args: &[String]) -> Result<Value, String> {
 fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let command_name = match name {
         "frame" => "view_frame",
+        "dead-time" => "find_dead_time",
         "cut" => "cut_recording",
         "trim" => "trim_recording",
         "restore" => "restore_recording",
@@ -205,6 +208,8 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     while let Some(arg) = args.next() {
         if arg == "--folder" {
             command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+        } else if arg == "--min" && name == "dead-time" {
+            command["min_seconds"] = seconds_arg(args.next().ok_or("--min needs a value")?)?.into();
         } else {
             times.push(seconds_arg(arg)?);
         }
@@ -333,11 +338,11 @@ pub fn call(command: &Value) -> Value {
             // A fresh Visor knows no last recording: only a named one helps.
             Some(
                 "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
-                | "view_frame",
+                | "view_frame" | "find_dead_time",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
                 "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
-                | "view_frame",
+                | "view_frame" | "find_dead_time",
             ) => {
                 json!({
                     "ok": false,
@@ -546,6 +551,11 @@ mod tests {
         assert_eq!(out.as_deref(), Some("f.jpg"));
         assert!(frame_args(&args("1 2")).is_err());
         assert!(frame_args(&[]).is_err());
+        assert_eq!(
+            edit_args("dead-time", &args("--min 1.5")).unwrap(),
+            json!({"command": "find_dead_time", "min_seconds": 1.5})
+        );
+        assert!(edit_args("cut", &args("--min 1 2 3")).is_err());
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }

@@ -3,6 +3,7 @@
 
 mod audio_writer;
 pub mod composite;
+pub mod dead_time;
 pub mod decode;
 pub mod export;
 pub mod player;

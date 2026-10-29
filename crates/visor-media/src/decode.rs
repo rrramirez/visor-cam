@@ -186,7 +186,7 @@ impl VideoReader {
         }
     }
 
-    fn convert(&mut self, raw: frame::Video) -> anyhow::Result<frame::Video> {
+    pub(crate) fn convert(&mut self, raw: frame::Video) -> anyhow::Result<frame::Video> {
         if self.target.is_none() {
             return Ok(raw);
         }
