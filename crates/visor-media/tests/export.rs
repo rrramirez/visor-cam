@@ -15,6 +15,30 @@ fn probe(path: &std::path::Path) -> (f64, Vec<ffmpeg::codec::Id>) {
     (duration, codecs)
 }
 
+/// The file's chapters: start and end seconds, and title.
+fn chapters(path: &std::path::Path) -> Vec<(f64, f64, String)> {
+    let input = ffmpeg::format::input(path).unwrap();
+    input
+        .chapters()
+        .map(|c| {
+            let s = |t: i64| t as f64 * f64::from(c.time_base());
+            let title = c.metadata().get("title").unwrap_or_default().to_string();
+            (
+                (s(c.start()) * 100.0).round() / 100.0,
+                (s(c.end()) * 100.0).round() / 100.0,
+                title,
+            )
+        })
+        .collect()
+}
+
+fn marker(at_us: u64, text: &str) -> visor_core::Marker {
+    visor_core::Marker {
+        at_us,
+        text: text.into(),
+    }
+}
+
 /// Mean luma of the top half (away from the bottom-left camera bubble).
 fn top_luma(f: &ffmpeg::frame::Video) -> f64 {
     let (w, h, stride) = (f.width() as usize, f.height() as usize / 2, f.stride(0));
@@ -30,6 +54,8 @@ fn exports_mp4_with_cuts_and_bubble() {
     let (dir, mut project) = project("export-mp4", 6);
     project.edit.cut(1_000_000, 2_000_000);
     project.edit.cut(3_500_000, 4_000_000);
+    // A NUL, which C strings can't hold, is left out.
+    project.markers = vec![marker(2_500_000, "Step\0 2")];
     let out = dir.join("out.mp4");
     let mut last = 0.0;
     export(
@@ -45,13 +71,22 @@ fn exports_mp4_with_cuts_and_bubble() {
 
     let (duration, codecs) = probe(&out);
     assert!((duration - 4.5).abs() < 0.08, "duration {duration}");
-    // The third stream is the cover art.
+    // Then the chapters' text track (as QuickTime has them), and the cover art.
     assert_eq!(
         codecs,
         [
             ffmpeg::codec::Id::H264,
             ffmpeg::codec::Id::AAC,
+            ffmpeg::codec::Id::BIN_DATA,
             ffmpeg::codec::Id::MJPEG
+        ]
+    );
+    // The marker at 2.5 s, 1 s of it cut before, starts a chapter at 1.5 s.
+    assert_eq!(
+        chapters(&out),
+        [
+            (0.0, 1.5, "export-mp4".to_string()),
+            (1.5, 4.5, "Step 2".to_string())
         ]
     );
 
@@ -81,6 +116,7 @@ fn exports_mp4_with_cuts_and_bubble() {
 fn exports_webm_vp9_and_av1() {
     let (dir, mut project) = project("export-webm", 3);
     project.edit.trim(500_000, 2_500_000);
+    project.markers = vec![marker(1_500_000, "Step 2")];
     for av1 in [false, true] {
         let out = dir.join(format!("out-{av1}.webm"));
         let opts = ExportOptions::new(ExportFormat::WebM { av1 });
@@ -104,6 +140,13 @@ fn exports_webm_vp9_and_av1() {
             ffmpeg::codec::Id::VP9
         };
         assert_eq!(codecs, [video, ffmpeg::codec::Id::OPUS]);
+        assert_eq!(
+            chapters(&out),
+            [
+                (0.0, 1.0, "export-webm".to_string()),
+                (1.0, 2.0, "Step 2".to_string())
+            ]
+        );
     }
     common::cleanup(&dir);
 }

@@ -57,7 +57,8 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    - **Export** to MP4, WebM (VP9 or AV1) or GIF, at original size, 1080p or
      720p, optionally with *Reduce background noise* and *Even out volume*
      (to -16 LUFS; both apply to the export, not the preview). Files go to the
-     recording's `exports/` folder.
+     recording's `exports/` folder. MP4 and WebM exports have a chapter
+     for each marker, named after it, so players can jump between steps.
 
 Recordings are saved to `~/Movies/Visor/<date time> Recording/` (configurable
 in Preferences) as separate tracks plus `project.json`, so edits are

@@ -104,21 +104,7 @@ impl EditorWindow {
         ui.set_bubble_y(o.y as f32);
         ui.set_bubble_size(o.size as f32);
         ui.set_bubble_mirror(o.mirror);
-        ui.set_speed(project.speed as f32);
-        let d = project.duration_us.max(1) as f64;
-        let markers: Vec<MarkerMark> = project
-            .markers
-            .iter()
-            .map(|m| MarkerMark {
-                pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
-                label: match m.text.as_str() {
-                    "" => util::clock(m.at_us),
-                    text => format!("{}  {text}", util::clock(m.at_us)),
-                }
-                .into(),
-            })
-            .collect();
-        ui.set_markers(ModelRc::new(VecModel::from(markers)));
+        ui.set_speed(project.speed() as f32);
         {
             let folded = app().settings.borrow().folded_sections.clone();
             let open = |name: &str| !folded.iter().any(|s| s == name);
@@ -313,7 +299,10 @@ impl EditorWindow {
             settings.save();
         });
         on!(on_speed_changed, |e| {
-            let speed = f64::from(e.ui.get_speed()).clamp(0.5, 2.0);
+            let speed = f64::from(e.ui.get_speed()).clamp(
+                visor_core::project::MIN_SPEED,
+                visor_core::project::MAX_SPEED,
+            );
             e.project.borrow_mut().speed = speed;
             e.control().set_speed(speed);
             e.save();
@@ -660,12 +649,29 @@ impl EditorWindow {
             })
             .collect();
         self.ui.set_cuts(ModelRc::new(VecModel::from(cuts)));
+        // Marked where they were recorded, at the time the clock shows there.
+        let markers: Vec<MarkerMark> = project
+            .markers
+            .iter()
+            .map(|m| {
+                let at = util::clock(project.output_time(m.at_us));
+                MarkerMark {
+                    pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
+                    label: match m.text.as_str() {
+                        "" => at,
+                        text => format!("{at}  {text}"),
+                    }
+                    .into(),
+                }
+            })
+            .collect();
+        self.ui.set_markers(ModelRc::new(VecModel::from(markers)));
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
         self.ui
             .set_edited(project.edit != EditList::full(project.duration_us));
         let kept = project.edit.duration();
-        let speed_label = if (project.speed - 1.0).abs() < 1e-6 {
+        let speed_label = if (project.speed() - 1.0).abs() < 1e-6 {
             format!("Normal speed, {}", util::clock(kept))
         } else {
             format!(
@@ -682,12 +688,11 @@ impl EditorWindow {
         } else {
             -1.0
         });
-        let at = project.edit.kept_before(thumbnail);
         self.ui.set_thumbnail_label(
             if chosen {
                 format!(
                     "Frame at {}",
-                    util::clock_tenths((at as f64 / project.speed) as Micros)
+                    util::clock_tenths(project.output_time(thumbnail))
                 )
             } else {
                 "First frame".to_string()
@@ -733,21 +738,16 @@ impl EditorWindow {
         self.ui.set_playing(playing);
         self.ui
             .set_position((pos as f64 / self.duration() as f64) as f32);
-        let (edit, speed) = {
-            let p = self.project.borrow();
-            (p.edit.clone(), p.speed)
-        };
         // Times as they will be in the export, after cuts and speed.
-        let out = edit.kept_before(pos);
-        let sped = |t: Micros| (t as f64 / speed) as Micros;
-        self.ui.set_time_label(
+        let label = {
+            let p = self.project.borrow();
             format!(
                 "{} / {}",
-                util::clock_tenths(sped(out)),
-                util::clock_tenths(sped(edit.duration()))
+                util::clock_tenths(p.output_time(pos)),
+                util::clock_tenths(p.output_duration())
             )
-            .into(),
-        );
+        };
+        self.ui.set_time_label(label.into());
         self.poll_export();
 
         let idle = self.player.borrow().is_idle() && self.export.borrow().is_none();

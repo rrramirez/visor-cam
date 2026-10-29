@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Chapters:** MP4 and WebM exports have a chapter at each marker, named after it, which QuickTime, VLC and other players list so viewers can jump straight to a step. Chapters follow your cuts and the speed you chose.
+
 ## 0.5.0
 
 ### New
