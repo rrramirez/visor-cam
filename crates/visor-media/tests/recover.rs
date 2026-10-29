@@ -2,9 +2,11 @@ mod common;
 
 use std::fs::OpenOptions;
 
+use visor_core::AudioBuffer;
 use visor_core::project::PROJECT_FILE;
 use visor_media::decode::VideoReader;
 use visor_media::recover;
+use visor_media::{AudioWriter, VideoWriter};
 
 /// Cuts a file to `fraction` of its size, as a crash mid-write would.
 fn truncate(path: &std::path::Path, fraction: f64) {
@@ -38,6 +40,39 @@ fn crashed_recording_is_recovered_from_its_tracks() {
     // The recovered screen track decodes.
     let mut reader = VideoReader::open(&dir.join("screen.mp4"), None).unwrap();
     assert!(reader.next_frame().unwrap().is_some());
+}
+
+#[test]
+fn short_crashed_recording_keeps_all_but_its_last_moments() {
+    // A crash a second and a half in, on a screen that barely changes: the
+    // writers are never finished, and whatever they hold in memory is lost.
+    let dir = common::temp_dir("recover-short");
+    let frames = 45;
+    let mut video = VideoWriter::create(&dir.join("screen.mp4"), 640, 360, 30).unwrap();
+    for i in 0..frames {
+        let y = 100 + (i % 2) as u8;
+        video
+            .write(&common::nv12(640, 360, y, 128), i * common::FRAME_US, false)
+            .unwrap();
+    }
+    let mut audio = AudioWriter::create(&dir.join("mic.m4a")).unwrap();
+    for i in 0..150 {
+        let buf = AudioBuffer {
+            host_ts: 0,
+            sample_rate: 48_000,
+            channels: 2,
+            samples: vec![0.1; 960],
+        };
+        audio.write(&buf, i * 10_000).unwrap();
+    }
+    std::mem::forget(video);
+    std::mem::forget(audio);
+
+    let project = recover::recover(&dir).unwrap();
+    let secs = project.duration_us as f64 / 1e6;
+    assert!(secs >= 0.9, "recovered {secs:.2}s of 1.5s");
+    assert!(project.tracks.mic.is_some(), "mic track recovered");
+    common::cleanup(&dir);
 }
 
 #[test]

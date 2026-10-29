@@ -60,9 +60,7 @@ impl AudioWriter {
         let mut stream = output.add_stream(codec)?;
         stream.set_parameters(&encoder);
         stream.set_time_base(Rational(1, SAMPLE_RATE as i32));
-        let mut opts = Dictionary::new();
-        opts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
-        output.write_header_with(opts)?;
+        output.write_header_with(crate::writer::crash_safe_options())?;
         let stream_time_base = output.stream(0).context("stream vanished")?.time_base();
 
         Ok(Self {

@@ -15,6 +15,19 @@ use crate::scale::Scaler;
 /// Encoder timestamps are in microseconds, matching [`Micros`].
 const MICROS: Rational = Rational(1, 1_000_000);
 
+/// Muxer options for recording tracks, so a crash loses at most about half
+/// a second: fragmented MP4 with a fragment at least that often (not only
+/// at keyframes, which come every 2 s), each written straight to the file
+/// rather than held in FFmpeg's buffer, which a still screen's tiny frames
+/// could take minutes to fill.
+pub(crate) fn crash_safe_options() -> Dictionary<'static> {
+    let mut opts = Dictionary::new();
+    opts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
+    opts.set("frag_duration", "500000");
+    opts.set("flush_packets", "1");
+    opts
+}
+
 /// Hardware encoder first, software fallback second.
 const H264_ENCODERS: &[&str] = &[
     "h264_videotoolbox",
@@ -71,9 +84,7 @@ impl VideoWriter {
                     let mut stream = output.add_stream(codec)?;
                     stream.set_parameters(&encoder);
                     stream.set_time_base(MICROS);
-                    let mut opts = Dictionary::new();
-                    opts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
-                    output.write_header_with(opts)?;
+                    output.write_header_with(crash_safe_options())?;
                     let stream_time_base = output
                         .stream(0)
                         .ok_or_else(|| anyhow!("stream vanished"))?
