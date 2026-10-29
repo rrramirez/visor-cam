@@ -8,9 +8,12 @@ export struct Region {
     end: float,
 }
 
-// A note made while recording (see app::agent), at a timeline position.
+// A marker, at a timeline position: its time in the video, its text, and
+// both together.
 export struct MarkerMark {
     pos: float,
+    time: string,
+    text: string,
     label: string,
 }
 
@@ -142,6 +145,14 @@ export component Editor inherits Window {
     in-out property <bool> camera-open: true;
     in-out property <bool> speed-open: true;
     in-out property <bool> thumbnail-open: true;
+    in-out property <bool> markers-open: true;
+    // The marker whose name field takes the keyboard when it shows up.
+    in-out property <int> focus-marker: -1;
+    // The marker add-marker() just added.
+    in property <int> new-marker: -1;
+    // Added with M, to name once the key is let go (so it doesn't repeat
+    // into the name).
+    property <int> pending-marker: -1;
     // Thumbnail position on the timeline, or -1 for the first frame kept.
     in property <float> thumbnail-pos: -1;
     in property <string> thumbnail-label;
@@ -229,6 +240,9 @@ export component Editor inherits Window {
     callback trim-to-selection();
     // Looks for stretches where nothing happens and cuts them.
     callback cut-pauses();
+    callback add-marker();
+    callback rename-marker(int, string);
+    callback delete-marker(int);
     in property <bool> finding-pauses;
     callback restore();
     callback undo();
@@ -257,11 +271,25 @@ export component Editor inherits Window {
 
     forward-focus: keys;
     keys := FocusScope {
+        key-released(event) => {
+            if (root.pending-marker >= 0) {
+                root.focus-marker = root.pending-marker;
+                root.pending-marker = -1;
+            }
+            reject
+        }
         key-pressed(event) => {
             if (event.text == " ") { root.toggle-play(); return accept; }
             if (event.text == "i") { root.set-in(); return accept; }
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
+            if (event.text == "m" && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
+                if (!event.repeat) {
+                    root.add-marker();
+                    root.pending-marker = root.new-marker;
+                }
+                return accept;
+            }
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
             if (event.text == Key.LeftArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
             if (event.text == Key.RightArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
@@ -468,6 +496,64 @@ export component Editor inherits Window {
                                 }
                                 Text {
                                     text: root.kept-label;
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            CollapsibleSection {
+                                title: "MARKERS";
+                                open <=> root.markers-open;
+                                toggled => { root.sections-changed(); }
+                                SideButton {
+                                    text: "Add marker"; icon: Icons.marker; shortcut: "M";
+                                    clicked => {
+                                        root.add-marker();
+                                        root.focus-marker = root.new-marker;
+                                    }
+                                }
+                                for m[i] in root.markers: HorizontalLayout {
+                                    spacing: 6px;
+                                    Rectangle {
+                                        width: max(48px, time.preferred-width + 8px);
+                                        border-radius: Theme.radius-small;
+                                        background: time-touch.has-hover ? Theme.surface-2 : transparent;
+                                        time := Text {
+                                            text: m.time;
+                                            color: Theme.muted;
+                                            font-size: Theme.font-small;
+                                        }
+                                        time-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.seek(m.pos); keys.focus(); }
+                                        }
+                                    }
+                                    LineEdit {
+                                        text: m.text;
+                                        placeholder-text: "Name it";
+                                        edited(text) => { root.rename-marker(i, text); }
+                                        accepted => { keys.focus(); }
+                                        property <bool> wanted: root.focus-marker == i;
+                                        init => { self.take-focus(); }
+                                        changed wanted => { self.take-focus(); }
+                                        function take-focus() {
+                                            if (self.wanted) {
+                                                root.focus-marker = -1;
+                                                self.focus();
+                                            }
+                                        }
+                                    }
+                                    IconButton {
+                                        size: 30px;
+                                        icon: Icons.trash;
+                                        tint: Theme.muted;
+                                        tooltip: "Delete marker";
+                                        clicked => { root.delete-marker(i); keys.focus(); }
+                                    }
+                                }
+                                Text {
+                                    text: "Marks a step: MP4 and WebM exports get a chapter at each one, named after it.";
                                     color: Theme.faint;
                                     font-size: Theme.font-small;
                                     wrap: word-wrap;

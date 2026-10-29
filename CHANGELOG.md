@@ -7,6 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
+- **Markers:** mark each step while you record, with **⌥⇧M** or the flag button on the control bar, and name them afterwards in the editor's new Markers section. Add markers there too (**M** or *Add marker*), jump to them, or delete them. Exports get a chapter at each one.
 - **Chapters:** MP4 and WebM exports have a chapter at each marker, named after it, which QuickTime, VLC and other players list so viewers can jump straight to a step. Chapters follow your cuts and the speed you chose.
 
 ## 0.5.0
