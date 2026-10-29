@@ -74,6 +74,16 @@ fn send(reply: Reply, result: Result<Value, String>) {
     let _ = reply.send(value);
 }
 
+/// How tall frames shown to agents are at most: enough to read text.
+const FRAME_HEIGHT: u32 = 720;
+
+fn past_the_end(what: &str, duration: Micros) -> String {
+    format!(
+        "{what} is past the end: the recording is {} seconds long.",
+        seconds(duration)
+    )
+}
+
 fn seconds(us: visor_core::Micros) -> f64 {
     (us as f64 / 100_000.0).round() / 10.0
 }
@@ -176,6 +186,7 @@ impl App {
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
+            "view_frame" => return self.agent_frame(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
         };
         send(reply, result);
@@ -638,23 +649,12 @@ impl App {
                 Some(((start * 1e6) as Micros, (end * 1e6) as Micros))
             }
         };
-        // Built once from what the open editor has, else what's on disk.
-        let editor = self.editor_for(&dir);
-        let current = match &editor {
-            Some(editor) => editor.project(),
-            None => visor_core::Project::load(&dir).map_err(|e| e.to_string())?,
-        };
+        let (editor, current) = self.agent_project(&dir)?;
         let duration = current.duration_us;
-        if duration == 0 {
-            return Err("That recording wasn't saved properly, so it can't be edited.".into());
-        }
         if let Some((start, _)) = range
             && start >= duration
         {
-            return Err(format!(
-                "start_seconds is past the end: the recording is {} seconds long.",
-                seconds(duration)
-            ));
+            return Err(past_the_end("start_seconds", duration));
         }
         let mut edit = current.edit.clone();
         match (kind, range) {
@@ -682,6 +682,58 @@ impl App {
             "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
             "editor_open": editor.is_some(),
         }))
+    }
+
+    /// The recording in `dir` as its open editor has it, else as saved, and
+    /// that editor.
+    fn agent_project(
+        &self,
+        dir: &Path,
+    ) -> Result<(Option<Rc<EditorWindow>>, visor_core::Project), String> {
+        let editor = self.editor_for(dir);
+        let project = match &editor {
+            Some(editor) => editor.project(),
+            None => visor_core::Project::load(dir).map_err(|e| e.to_string())?,
+        };
+        if project.duration_us == 0 {
+            return Err("That recording wasn't saved properly, so it can't be used.".into());
+        }
+        Ok((editor, project))
+    }
+
+    /// Shows an agent the frame recorded at `seconds`, cut or not, as the
+    /// export would show it. Rendered off the UI thread.
+    fn agent_frame(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let t = arg(args, "seconds")
+                .and_then(Value::as_f64)
+                .filter(|t| t.is_finite() && *t >= 0.0)
+                .ok_or("seconds is a number of seconds.")?;
+            let (_, project) = self.agent_project(&dir)?;
+            let t = (t * 1e6) as Micros;
+            if t >= project.duration_us {
+                return Err(past_the_end("seconds", project.duration_us));
+            }
+            Ok((dir, project, t))
+        });
+        let (dir, project, t) = match request {
+            Ok(request) => request,
+            Err(e) => return send(reply, Err(e)),
+        };
+        std::thread::spawn(move || {
+            use base64::prelude::*;
+            let result = visor_media::export::frame_jpeg(&dir, &project, t, FRAME_HEIGHT)
+                .map(|jpeg| {
+                    json!({
+                        "folder": dir.display().to_string(),
+                        "seconds": seconds(t),
+                        "cut": project.edit.to_output(t).is_none(),
+                        "image_jpeg": BASE64_STANDARD.encode(jpeg),
+                    })
+                })
+                .map_err(|e| format!("Couldn't show that frame: {e:#}"));
+            send(reply, result);
+        });
     }
 
     /// Opens a recording in the editor for the user.

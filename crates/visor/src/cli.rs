@@ -41,6 +41,8 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   trim START END              keep only START to END
   restore                     undo all cuts
   open                        open it in the editor
+  frame SECONDS [--out FILE]  save the frame at SECONDS, cut or not, as a JPEG
+                              (frame-SECONDS.jpg by default)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
 
@@ -72,6 +74,16 @@ pub fn run(args: &[String]) -> Option<i32> {
             "open_editor": rest.iter().any(|a| a == "--open-editor"),
         }),
         "discard" => json!({"command": "discard_recording"}),
+        "frame" => {
+            attach_console();
+            return Some(match frame_args(rest) {
+                Ok((command, out)) => save_frame(&command, out),
+                Err(e) => {
+                    eprintln!("visor frame: {e}\n\n{USAGE}");
+                    2
+                }
+            });
+        }
         "cut" | "trim" | "restore" | "open" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
@@ -166,6 +178,7 @@ fn start_args(args: &[String]) -> Result<Value, String> {
 
 fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let command_name = match name {
+        "frame" => "view_frame",
         "cut" => "cut_recording",
         "trim" => "trim_recording",
         "restore" => "restore_recording",
@@ -187,10 +200,65 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
             command["end_seconds"] = (*end).into();
         }
         ("cut" | "trim", _) => return Err("give a START and an END time".into()),
+        ("frame", [at]) => command["seconds"] = (*at).into(),
+        ("frame", _) => return Err("give one time".into()),
         (_, []) => {}
         _ => return Err("takes no times".into()),
     }
     Ok(command)
+}
+
+/// `view_frame`'s command, and where to save the frame if not the default.
+fn frame_args(args: &[String]) -> Result<(Value, Option<String>), String> {
+    let mut rest = Vec::new();
+    let mut out = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--out" {
+            out = Some(args.next().ok_or("--out needs a value")?.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    let mut command = edit_args("frame", &rest)?;
+    command["command"] = "view_frame".into();
+    Ok((command, out))
+}
+
+/// Asks for a frame and saves it; prints the reply with the file in place
+/// of the image. Returns the exit code.
+fn save_frame(command: &Value, out: Option<String>) -> i32 {
+    use base64::prelude::*;
+    let mut reply = call(command);
+    let image = reply
+        .as_object_mut()
+        .and_then(|r| r.remove("image_jpeg"))
+        .and_then(|i| BASE64_STANDARD.decode(i.as_str()?).ok());
+    let text = match (reply_text(reply), image) {
+        (Ok(_), None) => Err("Visor sent no image.".to_string()),
+        (Ok(text), Some(jpeg)) => {
+            let out = out.unwrap_or_else(|| format!("frame-{}.jpg", command["seconds"]));
+            let mut reply: Value = serde_json::from_str(&text).unwrap_or_default();
+            std::fs::write(&out, jpeg)
+                .and_then(|()| std::path::absolute(&out))
+                .map(|path| {
+                    reply["image"] = path.display().to_string().into();
+                    serde_json::to_string_pretty(&reply).unwrap_or_default()
+                })
+                .map_err(|e| format!("couldn't save {out}: {e}"))
+        }
+        (Err(e), _) => Err(e),
+    };
+    match text {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("visor: {error}");
+            1
+        }
+    }
 }
 
 /// Seconds, or minutes and seconds as M:SS (seconds below 60).
@@ -220,12 +288,14 @@ pub fn call(command: &Value) -> Value {
         Err(ControlError::NotRunning) => match command["command"].as_str() {
             Some("start_recording" | "list_sources") => launch_and_call(command),
             // A fresh Visor knows no last recording: only a named one helps.
-            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording")
-                if command.get("folder").is_some() =>
-            {
-                launch_and_call(command)
-            }
-            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording") => {
+            Some(
+                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
+                | "view_frame",
+            ) if command.get("folder").is_some() => launch_and_call(command),
+            Some(
+                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
+                | "view_frame",
+            ) => {
                 json!({
                     "ok": false,
                     "error": "Visor isn't running, so it has no last recording; say which with a folder.",
@@ -405,6 +475,14 @@ mod tests {
                 .display()
                 .to_string()
         );
+        let (frame, out) = frame_args(&args("1:02.5 --out f.jpg --folder /tmp/Demo")).unwrap();
+        assert_eq!(
+            frame,
+            json!({"command": "view_frame", "seconds": 62.5, "folder": "/tmp/Demo"})
+        );
+        assert_eq!(out.as_deref(), Some("f.jpg"));
+        assert!(frame_args(&args("1 2")).is_err());
+        assert!(frame_args(&[]).is_err());
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }

@@ -5914,6 +5914,7 @@ name = "visor"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "base64",
  "crossbeam-channel",
  "dirs",
  "global-hotkey",

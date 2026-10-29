@@ -189,7 +189,7 @@ fn run(
     // A nicety: the export goes ahead without it if it can't be made.
     let cover = if opts.format == ExportFormat::Mp4 {
         let t = thumbnail_time(project);
-        let jpeg = renderer.render_source(t).and_then(|f| encode_jpeg(f));
+        let jpeg = renderer.render_source(t).and_then(|f| encode_jpeg(f, 2));
         renderer.reset()?;
         jpeg.inspect_err(|e| tracing::warn!("exporting without cover art: {e:#}"))
             .ok()
@@ -386,12 +386,30 @@ pub fn save_thumbnail(dir: &Path, project: &Project, out: &Path) -> anyhow::Resu
     ffmpeg::init()?;
     let opts = ExportOptions::new(ExportFormat::Mp4);
     let mut renderer = Renderer::open(dir, project, &opts)?.0;
-    let jpeg = encode_jpeg(renderer.render_source(thumbnail_time(project))?)?;
+    let jpeg = encode_jpeg(renderer.render_source(thumbnail_time(project))?, 2)?;
     std::fs::write(out, jpeg).with_context(|| format!("writing {}", out.display()))
 }
 
-/// One frame (video-range YUV 4:2:0) as a JPEG file's bytes.
-fn encode_jpeg(f: &frame::Video) -> anyhow::Result<Vec<u8>> {
+/// The frame at source time `t`, cut or not, composited like the export
+/// (camera bubble included) and at most `max_height` tall, as a JPEG file's
+/// bytes: for an agent to see what was recorded.
+pub fn frame_jpeg(
+    dir: &Path,
+    project: &Project,
+    t: Micros,
+    max_height: u32,
+) -> anyhow::Result<Vec<u8>> {
+    ffmpeg::init()?;
+    let mut opts = ExportOptions::new(ExportFormat::Mp4);
+    opts.max_height = Some(max_height);
+    let mut renderer = Renderer::open(dir, project, &opts)?.0;
+    // Good enough to read text, and a fraction of the thumbnail's size.
+    encode_jpeg(renderer.render_source(t)?, 5)
+}
+
+/// One frame (video-range YUV 4:2:0) as a JPEG file's bytes, at `quality`
+/// (FFmpeg's qscale: 2 is best, higher is smaller).
+fn encode_jpeg(f: &frame::Video, quality: i32) -> anyhow::Result<Vec<u8>> {
     let codec = encoder::find(codec::Id::MJPEG).context("FFmpeg has no JPEG encoder")?;
     let (w, h) = (f.width(), f.height());
     // JPEG viewers assume full range: stretch video range (16–235) to
@@ -417,7 +435,7 @@ fn encode_jpeg(f: &frame::Video) -> anyhow::Result<Vec<u8>> {
     enc.set_color_range(ffmpeg::color::Range::JPEG);
     enc.set_time_base(Rational(1, 30));
     enc.set_flags(codec::Flags::QSCALE);
-    enc.set_global_quality(2 * ffmpeg::ffi::FF_QP2LAMBDA);
+    enc.set_global_quality(quality * ffmpeg::ffi::FF_QP2LAMBDA);
     let mut enc = enc.open()?;
     enc.send_frame(&full)?;
     enc.send_eof()?;

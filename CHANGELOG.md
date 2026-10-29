@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Agents can see what they recorded:** an agent can look at the frame at any moment of a recording, as the export would show it, to check a stretch before cutting it. On the command line, `visor frame SECONDS` saves it as a JPEG.
+
 ## 0.4.0
 
 ### New

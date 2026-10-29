@@ -69,8 +69,8 @@ that many seconds of recorded time.
 
 Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
 you: name the recording, start it, mark each step, pause while they set
-something up or retry a step, stop, and cut what went wrong before handing
-it to you in the editor. Turn on **Let AI agents control recording** in Preferences (it's off
+something up or retry a step, stop, look at what was recorded, and cut what
+went wrong before handing it to you in the editor. Turn on **Let AI agents control recording** in Preferences (it's off
 until you do). Recordings an agent starts say *Agent* on the control bar,
 and your own controls and shortcuts keep working.
 
@@ -96,6 +96,7 @@ visor cut 12 19.5                            # remove 0:12–0:19.5 (recorded ti
 visor trim 2 1:05                            # keep only 0:02–1:05
 visor restore                                # undo all cuts
 visor open                                   # open it in the editor
+visor frame 15                               # save the frame at 0:15 as a JPEG
 visor help                                   # every option
 ```
 
