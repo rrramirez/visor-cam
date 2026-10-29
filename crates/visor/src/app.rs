@@ -63,6 +63,8 @@ pub struct App {
     shortcuts: RefCell<Option<Shortcuts>>,
     /// Shortcuts another app already uses.
     taken_shortcuts: RefCell<Vec<Shortcut>>,
+    /// Clears the control bar's "Marked" note; each mark restarts it.
+    mark_note: Timer,
     /// Starts a recording once the devices are ready (see
     /// `record_when_ready`); dropping it cancels.
     pending_start: RefCell<Option<Timer>>,
@@ -160,6 +162,7 @@ impl App {
             tray: RefCell::default(),
             shortcuts: RefCell::default(),
             taken_shortcuts: RefCell::default(),
+            mark_note: Timer::default(),
             pending_start: RefCell::default(),
             stop_after: RefCell::default(),
             updater: crate::updates::Updater::start(),
@@ -1625,11 +1628,15 @@ impl App {
         let at = recorder.mark(String::new());
         bar.set_note(format!("Marked {}", util::clock(at)).into());
         let weak = bar.as_weak();
-        Timer::single_shot(Duration::from_millis(1500), move || {
-            if let Some(bar) = weak.upgrade() {
-                bar.set_note("".into());
-            }
-        });
+        self.mark_note.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(1500),
+            move || {
+                if let Some(bar) = weak.upgrade() {
+                    bar.set_note("".into());
+                }
+            },
+        );
     }
 
     fn toggle_pause(&self) {

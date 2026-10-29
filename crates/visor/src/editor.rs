@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{EditList, Micros, Project};
+use visor_core::{EditList, Marker, Micros, Project};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
@@ -30,8 +30,8 @@ pub struct EditorWindow {
     dir: PathBuf,
     project: RefCell<Project>,
     player: RefCell<Player>,
-    undo: RefCell<Vec<EditList>>,
-    redo: RefCell<Vec<EditList>>,
+    undo: RefCell<Vec<Step>>,
+    redo: RefCell<Vec<Step>>,
     export: RefCell<Option<ExportJob>>,
     last_export: RefCell<Option<PathBuf>>,
     /// Polls the player and export while something is happening; stopped
@@ -48,6 +48,12 @@ pub struct EditorWindow {
     jobs: Jobs,
     /// Set to stop looking for pauses, when the window closes.
     pauses_cancel: RefCell<Option<Arc<AtomicBool>>>,
+}
+
+/// A step to undo or redo: the edit, or the markers, as they were.
+enum Step {
+    Edit(EditList),
+    Markers(Vec<Marker>),
 }
 
 /// Counts running background jobs; each holds a [`JobGuard`].
@@ -313,15 +319,7 @@ impl EditorWindow {
         on!(on_add_marker, |e| e.add_marker());
         on!(on_rename_marker, |e, i, text| e
             .rename_marker(i as usize, &text));
-        on!(on_delete_marker, |e, i| {
-            let mut project = e.project.borrow_mut();
-            if (i as usize) < project.markers.len() {
-                project.markers.remove(i as usize);
-                drop(project);
-                e.save();
-                e.refresh_edit_ui();
-            }
-        });
+        on!(on_delete_marker, |e, i| e.delete_marker(i as usize));
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
             if !title.is_empty() {
@@ -423,38 +421,53 @@ impl EditorWindow {
     }
 
     /// Adds a marker at the playhead, in time order, ready to be named.
+    /// Its index is `new-marker`, for the UI to put the keyboard in its name.
     fn add_marker(&self) {
         let at = self.player.borrow().position();
-        let index = {
-            let mut project = self.project.borrow_mut();
-            let index = project.markers.partition_point(|m| m.at_us <= at);
-            let marker = visor_core::Marker {
-                at_us: at,
-                text: String::new(),
-            };
-            project.markers.insert(index, marker);
-            index
-        };
-        self.save();
+        let index = self
+            .project
+            .borrow()
+            .markers
+            .partition_point(|m| m.at_us <= at);
+        self.change_markers(|markers| {
+            let text = String::new();
+            markers.insert(index, Marker { at_us: at, text });
+        });
         self.ui.set_markers_open(true);
-        self.ui.set_focus_marker(index as i32);
+        self.ui.set_new_marker(index as i32);
+    }
+
+    fn delete_marker(&self, index: usize) {
+        if index < self.project.borrow().markers.len() {
+            self.change_markers(|markers| {
+                markers.remove(index);
+            });
+        }
+    }
+
+    /// Changes the markers as one step to undo.
+    fn change_markers(&self, change: impl FnOnce(&mut Vec<Marker>)) {
+        let before = self.project.borrow().markers.clone();
+        change(&mut self.project.borrow_mut().markers);
+        self.undo.borrow_mut().push(Step::Markers(before));
+        self.redo.borrow_mut().clear();
+        self.save();
         self.refresh_edit_ui();
     }
 
-    /// Names a marker as it's typed, without rebuilding the list (which
-    /// would take the keyboard away).
-    fn rename_marker(&self, index: usize, text: &str) {
-        let text: String = text.chars().take(200).collect();
-        if let Some(m) = self.project.borrow_mut().markers.get_mut(index) {
-            m.text = text.clone();
-        } else {
-            return;
+    /// Names a marker as it's typed (not a step to undo), updating its row
+    /// in place: rebuilding the list would take the keyboard away.
+    fn rename_marker(&self, index: usize, typed: &str) {
+        let text = typed.trim();
+        match self.project.borrow_mut().markers.get_mut(index) {
+            Some(m) => m.text = text.to_string(),
+            None => return,
         }
         self.save();
         let rows = self.ui.get_markers();
         if let Some(mut row) = rows.row_data(index) {
-            row.label = marker_label(&row.time, &text).into();
-            row.text = text.into();
+            row.label = marker_label(&row.time, text).into();
+            row.text = typed.into();
             rows.set_row_data(index, row);
         }
     }
@@ -647,7 +660,7 @@ impl EditorWindow {
                 .set_kept_label("That would remove everything; nothing changed.".into());
             return false;
         }
-        self.undo.borrow_mut().push(before);
+        self.undo.borrow_mut().push(Step::Edit(before));
         self.redo.borrow_mut().clear();
         self.set_edit(after);
         self.ui.set_sel_start(-1.0);
@@ -661,11 +674,22 @@ impl EditorWindow {
         } else {
             (&self.redo, &self.undo)
         };
-        let Some(edit) = from.borrow_mut().pop() else {
+        let Some(step) = from.borrow_mut().pop() else {
             return;
         };
-        to.borrow_mut().push(self.project.borrow().edit.clone());
-        self.set_edit(edit);
+        match step {
+            Step::Edit(edit) => {
+                to.borrow_mut()
+                    .push(Step::Edit(self.project.borrow().edit.clone()));
+                self.set_edit(edit);
+            }
+            Step::Markers(markers) => {
+                let now = std::mem::replace(&mut self.project.borrow_mut().markers, markers);
+                to.borrow_mut().push(Step::Markers(now));
+                self.save();
+                self.refresh_edit_ui();
+            }
+        }
     }
 
     fn set_edit(&self, edit: EditList) {
@@ -714,7 +738,22 @@ impl EditorWindow {
                 }
             })
             .collect();
-        self.ui.set_markers(ModelRc::new(VecModel::from(markers)));
+        // Changed in place where the rows stay the same, so a name being
+        // typed keeps the keyboard.
+        let rows = self.ui.get_markers();
+        match rows.as_any().downcast_ref::<VecModel<MarkerMark>>() {
+            Some(model) if model.row_count() == markers.len() => {
+                for (i, row) in markers.into_iter().enumerate() {
+                    if model
+                        .row_data(i)
+                        .is_none_or(|r| r.label != row.label || r.pos != row.pos)
+                    {
+                        model.set_row_data(i, row);
+                    }
+                }
+            }
+            _ => self.ui.set_markers(ModelRc::new(VecModel::from(markers))),
+        }
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
         self.ui
