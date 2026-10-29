@@ -539,7 +539,9 @@ mod tests {
             home["folder"].as_str().unwrap(),
             dirs::home_dir()
                 .unwrap()
-                .join("Movies/Visor/Demo")
+                .join("Movies")
+                .join("Visor")
+                .join("Demo")
                 .display()
                 .to_string()
         );
