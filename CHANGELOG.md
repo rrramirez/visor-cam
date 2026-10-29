@@ -4,11 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
-## Unreleased
+## 0.5.0
 
 ### New
 - **Agents can see what they recorded:** an agent can look at the frame at any moment of a recording, as the export would show it, to check a stretch before cutting it. On the command line, `visor frame SECONDS` saves it as a JPEG.
-- **Cut pauses:** one button in the editor finds every stretch of 2 seconds or more where the screen stays still and nothing is heard, and cuts them all in one step you can undo. It leaves a moment around what happens, and isn't fooled by a spinner or a clock ticking on screen. Agents can find these stretches too, and decide what to cut.
+- **Cut pauses:** one button in the editor finds every stretch of 2 seconds or more where the screen stays still and nothing is heard, and cuts them all in one step you can undo. It leaves a moment around what happens, and isn't fooled by a spinner turning or a clock ticking seconds on screen. Agents can find these stretches too, and decide what to cut.
 
 ## 0.4.0
 
