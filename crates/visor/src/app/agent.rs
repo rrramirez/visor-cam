@@ -88,7 +88,15 @@ fn render(job: Job) {
         let (tx, rx) = crossbeam_channel::unbounded::<Job>();
         let spawned = std::thread::Builder::new()
             .name("visor-frames".into())
-            .spawn(move || rx.into_iter().for_each(|job| job()));
+            .spawn(move || {
+                // A crash in one frame (logged by the panic hook) mustn't
+                // stop the rest from rendering.
+                for job in rx {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                        tracing::warn!("rendering a frame crashed");
+                    }
+                }
+            });
         if let Err(e) = spawned {
             tracing::warn!("could not start rendering frames: {e}");
         }
