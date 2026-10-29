@@ -4,11 +4,14 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
-## Unreleased
+## 0.6.0
 
 ### New
 - **Markers:** mark each step while you record, with **⌥⇧M** or the flag button on the control bar, and name them afterwards in the editor's new Markers section. Add markers there too (**M** or *Add marker*), jump to them, or delete them. Exports get a chapter at each one.
 - **Chapters:** MP4 and WebM exports have a chapter at each marker, named after it, which QuickTime, VLC and other players list so viewers can jump straight to a step. Chapters follow your cuts and the speed you chose.
+
+### Fixed
+- The times shown for markers in the editor now match the clock under the video (time in the export, after cuts and speed), and update when you cut. They used to show the time in the recording.
 
 ## 0.5.0
 
