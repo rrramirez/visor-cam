@@ -79,6 +79,28 @@ impl EditList {
         self.keep = out;
     }
 
+    /// Like [`cut`], and also cuts the pieces kept either side of the gap
+    /// it leaves (with any cuts it joins) if shorter than `min`, so cuts
+    /// close together join rather than leave a flash of video between them.
+    /// A cut that removes nothing new changes nothing, and the last kept
+    /// piece always stays.
+    ///
+    /// [`cut`]: Self::cut
+    pub fn cut_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        let kept = self.duration();
+        self.cut(start, end);
+        if self.duration() == kept || self.keep.len() < 2 {
+            return;
+        }
+        // The first piece after the gap; the one before it ends the gap.
+        let after = self.keep.partition_point(|r| r.1 <= start);
+        for i in [Some(after), after.checked_sub(1)].into_iter().flatten() {
+            if self.keep.get(i).is_some_and(|r| r.len() < min) && self.keep.len() > 1 {
+                self.keep.remove(i);
+            }
+        }
+    }
+
     /// The stretches removed from a recording of `duration`, in order: the
     /// gaps between kept ranges, including any trimmed at either end.
     pub fn cuts(&self, duration: Micros) -> Vec<Range> {
@@ -127,6 +149,27 @@ impl EditList {
     pub fn trim(&mut self, start: Micros, end: Micros) {
         self.cut(0, start);
         self.cut(end, Micros::MAX);
+    }
+
+    /// Like [`trim`], and also drops the first or last piece it keeps if
+    /// shorter than `min` and the trim removed something before or after
+    /// it, as [`cut_joining`] does. The last kept piece always stays.
+    ///
+    /// [`trim`]: Self::trim
+    /// [`cut_joining`]: Self::cut_joining
+    pub fn trim_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        let (first, last) = match (self.keep.first(), self.keep.last()) {
+            (Some(first), Some(last)) => (first.0, last.1),
+            _ => return,
+        };
+        self.trim(start, end);
+        let short = |r: Option<&Range>| r.is_some_and(|r| r.len() < min);
+        if last > end && self.keep.len() > 1 && short(self.keep.last()) {
+            self.keep.pop();
+        }
+        if first < start && self.keep.len() > 1 && short(self.keep.first()) {
+            self.keep.remove(0);
+        }
     }
 
     /// Map an output (timeline) time to source time.
@@ -197,6 +240,67 @@ mod tests {
             [Range(20, 30), Range(50, 60), Range(95, 100)]
         );
         assert!(e.with_cut_edge_moved(100, 3, false, 10).is_none());
+    }
+
+    #[test]
+    fn cuts_close_together_join() {
+        let mut e = EditList::full(100);
+        e.cut_joining(20, 30, 5);
+        e.cut_joining(33, 40, 5);
+        assert_eq!(e.cuts(100), [Range(20, 40)]);
+        // At the very start too; far enough away, kept.
+        e.cut_joining(3, 10, 5);
+        e.cut_joining(46, 50, 5);
+        assert_eq!(e.cuts(100), [Range(0, 10), Range(20, 40), Range(46, 50)]);
+        // Only pieces next to the cut go; short ones elsewhere stay.
+        let mut e = EditList::full(100);
+        e.cut(20, 22);
+        e.cut(24, 30);
+        e.cut_joining(60, 70, 5);
+        assert_eq!(e.cuts(100), [Range(20, 22), Range(24, 30), Range(60, 70)]);
+        // Next to the gap a cut joins, not only its own edges.
+        let mut joined = e.clone();
+        joined.cut_joining(25, 50, 5);
+        assert_eq!(joined.cuts(100), [Range(20, 50), Range(60, 70)]);
+        // A cut that removes nothing new leaves short pieces alone.
+        let mut same = e.clone();
+        same.cut_joining(24, 30, 5);
+        assert_eq!(same, e);
+        // The last kept piece stays, however short: a short trim works.
+        let mut e = EditList::full(100);
+        e.cut_joining(0, 10, 5);
+        e.cut_joining(12, Micros::MAX, 5);
+        assert_eq!(e.ranges(), [Range(10, 12)]);
+        let mut e = EditList::full(100);
+        e.cut(2, 50);
+        e.cut_joining(50, 100, 5);
+        assert_eq!(e.ranges(), [Range(0, 2)]);
+    }
+
+    #[test]
+    fn trims_drop_short_ends_but_never_everything() {
+        let mut e = EditList::full(100);
+        e.cut(20, 22);
+        e.cut(24, 30);
+        // Short pieces at either end of the trim go.
+        let mut t = e.clone();
+        t.trim_joining(18, 50, 5);
+        assert_eq!(t.ranges(), [Range(22, 24), Range(30, 50)]);
+        let mut t = e.clone();
+        t.trim_joining(10, 31, 5);
+        assert_eq!(t.ranges(), [Range(10, 20), Range(22, 24)]);
+        // Unless that is all the trim keeps.
+        let mut t = e.clone();
+        t.trim_joining(21, 25, 5);
+        assert_eq!(t.ranges(), [Range(22, 24)]);
+        let mut t = EditList::full(100);
+        t.trim_joining(10, 12, 5);
+        assert_eq!(t.ranges(), [Range(10, 12)]);
+        // Nothing removed on a side: its piece stays, however short.
+        let mut t = e.clone();
+        t.cut(2, 20);
+        t.trim_joining(0, 50, 5);
+        assert_eq!(t.ranges(), [Range(0, 2), Range(22, 24), Range(30, 50)]);
     }
 
     #[test]

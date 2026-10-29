@@ -74,6 +74,10 @@ fn send(reply: Reply, result: Result<Value, String>) {
     let _ = reply.send(value);
 }
 
+/// Kept pieces shorter than this, left between an agent's cut and another
+/// or an end, are cut too: they would only flash by in the video.
+const SLIVER: Micros = 250_000;
+
 /// How tall frames shown to agents are at most: enough to read text.
 const FRAME_HEIGHT: u32 = 720;
 
@@ -113,7 +117,7 @@ fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
     arg(args, name)
         .and_then(Value::as_f64)
         .filter(|t| t.is_finite() && *t >= 0.0)
-        .map(|t| (t * 1e6) as Micros)
+        .map(|t| (t * 1e6).round() as Micros)
         .ok_or_else(|| format!("{name} is a number of seconds."))
 }
 
@@ -124,8 +128,9 @@ fn past_the_end(what: &str, duration: Micros) -> String {
     )
 }
 
+/// Exact to the millisecond, so an agent can cut right at a marker.
 fn seconds(us: visor_core::Micros) -> f64 {
-    (us as f64 / 100_000.0).round() / 10.0
+    (us as f64 / 1000.0).round() / 1000.0
 }
 
 /// A field that is present and not null.
@@ -696,8 +701,8 @@ impl App {
         }
         let mut edit = current.edit.clone();
         match (kind, range) {
-            (EditKind::Cut, Some((a, b))) => edit.cut(a, b),
-            (EditKind::Trim, Some((a, b))) => edit.trim(a, b),
+            (EditKind::Cut, Some((a, b))) => edit.cut_joining(a, b, SLIVER),
+            (EditKind::Trim, Some((a, b))) => edit.trim_joining(a, b, SLIVER),
             _ => edit = EditList::full(duration),
         }
         if edit.duration() == 0 {
@@ -802,8 +807,8 @@ impl App {
                     // the margin left around what happens.
                     let inside = |r: &visor_core::Range| {
                         [
-                            (r.0 as f64 / 1e5).ceil() / 10.0,
-                            (r.1 as f64 / 1e5).floor() / 10.0,
+                            (r.0 as f64 / 1e3).ceil() / 1e3,
+                            (r.1 as f64 / 1e3).floor() / 1e3,
                         ]
                     };
                     json!({
