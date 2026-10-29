@@ -299,7 +299,10 @@ impl EditorWindow {
             settings.save();
         });
         on!(on_speed_changed, |e| {
-            let speed = f64::from(e.ui.get_speed()).clamp(0.5, 2.0);
+            let speed = f64::from(e.ui.get_speed()).clamp(
+                visor_core::project::MIN_SPEED,
+                visor_core::project::MAX_SPEED,
+            );
             e.project.borrow_mut().speed = speed;
             e.control().set_speed(speed);
             e.save();

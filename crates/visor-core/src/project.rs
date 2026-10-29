@@ -177,24 +177,30 @@ impl Project {
 
     /// The exported video's chapters: one from each marker, in output time,
     /// and before the first one a chapter named after the recording. None
-    /// without markers.
+    /// without markers. Markers in what's trimmed off either end start none.
     pub fn chapters(&self) -> Vec<Chapter> {
         let end = self.output_duration();
         let mut markers: Vec<&Marker> = self.markers.iter().collect();
         markers.sort_by_key(|m| m.at_us);
+        let first_kept = self.edit.ranges().first().map_or(0, |r| r.0);
         let mut starts = vec![(0, self.title.trim())];
-        for m in markers {
+        for m in markers.into_iter().filter(|m| m.at_us >= first_kept) {
             let at = self.output_time(m.at_us);
             if at + MIN_CHAPTER > end {
                 break;
             }
-            let mut start = at;
-            if let Some(&(last, _)) = starts.last().filter(|&&(t, _)| at - t < MIN_CHAPTER) {
-                // The later marker, about what follows, names it.
+            let (mut start, mut title) = (at, m.text.trim());
+            if let Some(&(last, last_title)) = starts.last().filter(|&&(t, _)| at - t < MIN_CHAPTER)
+            {
+                // The later marker, about what follows, names it, unless
+                // it says nothing.
                 starts.pop();
                 start = last;
+                if title.is_empty() {
+                    title = last_title;
+                }
             }
-            starts.push((start, m.text.trim()));
+            starts.push((start, title));
         }
         if starts.len() < 2 {
             return Vec::new();
@@ -407,7 +413,7 @@ mod tests {
             marker(30 * S, "Settings"),
             marker(10 * S, "Open Safari"),
             // Just before the cut below, and both in it: the last one
-            // names the chapter.
+            // with text names the chapter.
             marker(39 * S + S * 8 / 10, "Mistake"),
             marker(41 * S, "Oops"),
             marker(42 * S, " "),
@@ -429,13 +435,17 @@ mod tests {
                 chapter(0.0, 5.0, "Safari tour"),
                 chapter(5.0, 15.0, "Open Safari"),
                 chapter(15.0, 19.9, "Settings"),
-                chapter(19.9, 25.0, "Chapter 4"),
+                chapter(19.9, 25.0, "Oops"),
             ]
         );
         // A speed out of range plays (and exports) at the nearest allowed.
         let chapters = p.chapters();
         p.speed = 5.0;
         assert_eq!(p.chapters(), chapters);
+        // Markers trimmed off the start start nothing.
+        let mut trimmed = p.clone();
+        trimmed.edit.cut(0, 12 * S);
+        assert_eq!(trimmed.chapters()[0], chapter(0.0, 9.0, "Safari tour"));
         // A first marker right at the start starts the video.
         p.markers[1].at_us = S;
         assert_eq!(p.chapters()[0], chapter(0.0, 15.0, "Open Safari"));
