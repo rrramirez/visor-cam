@@ -46,6 +46,8 @@ pub struct EditorWindow {
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
+    /// Set to stop looking for pauses, when the window closes.
+    pauses_cancel: RefCell<Option<Arc<AtomicBool>>>,
 }
 
 /// Counts running background jobs; each holds a [`JobGuard`].
@@ -159,6 +161,7 @@ impl EditorWindow {
                 save_error: RefCell::default(),
                 nudged: RefCell::default(),
                 jobs: Jobs::default(),
+                pauses_cancel: RefCell::default(),
             }
         });
         this.wire(Rc::downgrade(&this));
@@ -383,11 +386,20 @@ impl EditorWindow {
         slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
     }
 
+    /// Marks work reading the recording's folder from elsewhere (an agent),
+    /// so the folder isn't renamed under it.
+    pub fn start_job(&self) -> JobGuard {
+        self.jobs.start()
+    }
+
     /// Cancels an export and stops playback. Returns the background jobs,
     /// which may take a moment to wind down.
     pub fn stop_work(&self) -> Jobs {
         if let Some(job) = &*self.export.borrow() {
             job.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(cancel) = self.pauses_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
         }
         self.control().pause();
         self.jobs.clone()
@@ -582,23 +594,25 @@ impl EditorWindow {
         }
     }
 
-    fn apply(&self, change: impl FnOnce(&mut EditList)) {
+    /// Changes the edit as one step to undo. Returns whether it changed.
+    fn apply(&self, change: impl FnOnce(&mut EditList)) -> bool {
         let before = self.project.borrow().edit.clone();
         let mut after = before.clone();
         change(&mut after);
         if after == before {
-            return;
+            return false;
         }
         if after.duration() == 0 {
             self.ui
                 .set_kept_label("That would remove everything; nothing changed.".into());
-            return;
+            return false;
         }
         self.undo.borrow_mut().push(before);
         self.redo.borrow_mut().clear();
         self.set_edit(after);
         self.ui.set_sel_start(-1.0);
         self.ui.set_sel_end(-1.0);
+        true
     }
 
     fn undo_redo(&self, undo: bool) {
@@ -939,9 +953,11 @@ impl EditorWindow {
         let project = self.project.borrow().clone();
         let dir = self.dir.clone();
         let guard = self.jobs.start();
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self.pauses_cancel.borrow_mut() = Some(cancel.clone());
         std::thread::spawn(move || {
-            let found =
-                dead_time::find(&dir, &project, dead_time::MIN_LEN).map_err(|e| format!("{e:#}"));
+            let found = dead_time::find(&dir, &project, dead_time::MIN_LEN, &cancel)
+                .map_err(|e| format!("{e:#}"));
             drop(guard);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(editor) = app().editor_for(&dir) {
@@ -952,7 +968,12 @@ impl EditorWindow {
     }
 
     fn pauses_found(&self, found: Result<Vec<visor_core::Range>, String>) {
+        // Not this window's: it was closed, and opened again since.
+        if !self.ui.get_finding_pauses() {
+            return;
+        }
         self.ui.set_finding_pauses(false);
+        self.pauses_cancel.take();
         let message = match found {
             Err(e) => {
                 tracing::error!("looking for pauses failed: {e}");
@@ -967,10 +988,9 @@ impl EditorWindow {
                 for p in &pauses {
                     edit.cut(p.0, p.1);
                 }
-                if edit.duration() == 0 {
+                if !self.apply(|e| *e = edit) {
                     "Nothing happens in what's kept, so nothing was cut.".into()
                 } else {
-                    self.apply(|e| *e = edit);
                     let total: Micros = pauses.iter().map(|p| p.len()).sum();
                     format!(
                         "Cut {} pause{}, {} in all. ⌘Z undoes it.",

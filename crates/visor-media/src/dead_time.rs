@@ -3,6 +3,9 @@
 //! agents can ask for them.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::bail;
 
 use ffmpeg_next::format;
 use visor_core::{EditList, Micros, Project, Range};
@@ -20,6 +23,9 @@ const PIXEL_CHANGE: u8 = 24;
 /// is). A spinner turning or a clock ticking in place differs from the
 /// last change by its few pixels only, however long it goes on.
 const CHANGED_PIXELS: usize = 32;
+/// Screen frames are compared at most this often: a change of the
+/// screen shows in its next frame anyway, and it's quicker.
+const SAMPLE: Micros = 100_000;
 /// A change that adds up to `CHANGED_PIXELS` began with its first changed
 /// pixel, at most this long before: typing is busy from its first key, not
 /// only every few keys.
@@ -28,8 +34,8 @@ const LOOKBACK: Micros = 1_500_000;
 const WINDOW: Micros = 50_000;
 /// Sound counts once it lasts this many windows, so a lone click doesn't.
 const MIN_SOUND_WINDOWS: usize = 2;
-/// Sound is heard if its level is this many times the recording's quietest
-/// (its background noise), and at least `MIN_LEVEL`.
+/// Sound is heard if its level is this many times its track's quietest (its
+/// background noise), and at least `MIN_LEVEL`.
 const ABOVE_NOISE: f32 = 4.0;
 const MIN_LEVEL: f32 = 0.004;
 /// Kept on each side of something happening, so cuts don't clip it.
@@ -39,18 +45,25 @@ pub const MIN_LEN: Micros = 2_000_000;
 
 /// The stretches of the recording in `dir` at least `min_len` long where
 /// the screen stays still and nothing is heard, leaving out what the edit
-/// already cuts. Decodes the whole recording, so run it off the UI thread.
-pub fn find(dir: &Path, project: &Project, min_len: Micros) -> anyhow::Result<Vec<Range>> {
+/// already cuts. Decodes the whole recording, so run it off the UI thread;
+/// it fails soon after `cancel` is set.
+pub fn find(
+    dir: &Path,
+    project: &Project,
+    min_len: Micros,
+    cancel: &AtomicBool,
+) -> anyhow::Result<Vec<Range>> {
     let mut active = Vec::new();
     if let Some(track) = &project.tracks.screen {
-        screen_changes(&dir.join(&track.file), &mut active)?;
+        let size = track.width.zip(track.height);
+        screen_changes(&dir.join(&track.file), size, cancel, &mut active)?;
     }
     let audio: Vec<_> = [&project.tracks.mic, &project.tracks.system]
         .into_iter()
         .flatten()
         .map(|t| dir.join(&t.file))
         .collect();
-    sounds(&audio, project.duration_us, &mut active)?;
+    sounds(&audio, project.duration_us, cancel, &mut active)?;
     Ok(quiet_stretches(
         active,
         project.duration_us,
@@ -59,19 +72,41 @@ pub fn find(dir: &Path, project: &Project, min_len: Micros) -> anyhow::Result<Ve
     ))
 }
 
+fn check(cancel: &AtomicBool) -> anyhow::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
+    Ok(())
+}
+
 /// Adds the times the screen changed, against the last frame that did, so
-/// slow changes add up too.
-fn screen_changes(path: &Path, active: &mut Vec<Range>) -> anyhow::Result<()> {
-    let (w, h) = VideoReader::open(path, None)?.size();
+/// slow changes add up too. `size` is the track's, if known.
+fn screen_changes(
+    path: &Path,
+    size: Option<(u32, u32)>,
+    cancel: &AtomicBool,
+    active: &mut Vec<Range>,
+) -> anyhow::Result<()> {
+    let (w, h) = match size {
+        Some(size) => size,
+        None => VideoReader::open(path, None)?.size(),
+    };
     let sw = SCAN_WIDTH.min(w.max(2)) & !1;
     let sh = ((u64::from(h) * u64::from(sw) / u64::from(w.max(1))) as u32).max(2) & !1;
     let mut reader = VideoReader::open(path, Some((format::Pixel::GRAY8, sw, sh)))?;
     let (sw, sh) = (sw as usize, sh as usize);
     let mut reference: Option<Vec<u8>> = None;
-    // When the first pixel changed since the reference.
+    // When the screen first differed from the reference, and has since.
     let mut first_change = None;
     let mut pixels = vec![0u8; sw * sh];
-    while let Some((at, frame)) = reader.next_frame()? {
+    let mut next_sample = 0;
+    while let Some((at, raw)) = reader.next_decoded()? {
+        if at < next_sample {
+            continue;
+        }
+        check(cancel)?;
+        next_sample = at + SAMPLE;
+        let frame = reader.convert(raw)?;
         let (data, stride) = (frame.data(0), frame.stride(0));
         for (row, out) in pixels.chunks_exact_mut(sw).enumerate() {
             out.copy_from_slice(&data[row * stride..row * stride + sw]);
@@ -87,11 +122,20 @@ fn screen_changes(path: &Path, active: &mut Vec<Range>) -> anyhow::Result<()> {
             .filter(|(a, b)| a.abs_diff(**b) > PIXEL_CHANGE)
             .take(CHANGED_PIXELS)
             .count();
-        if changed > 0 && first_change.is_none() {
+        if changed == 0 {
+            // Back as it was (a cursor blinking): nothing changed after all.
+            first_change = None;
+        } else if first_change.is_none() {
             first_change = Some(at);
         }
         if changed == CHANGED_PIXELS {
-            let from = first_change.unwrap_or(at).max(at.saturating_sub(LOOKBACK));
+            let first = first_change.unwrap_or(at);
+            let from = first.max(at.saturating_sub(LOOKBACK));
+            if first < from {
+                // A small change long before (a box ticked) that this one
+                // adds to happened then too.
+                active.push(Range(first, first));
+            }
             active.push(Range(from, at));
             reference = Some(pixels.clone());
             first_change = None;
@@ -100,22 +144,21 @@ fn screen_changes(path: &Path, active: &mut Vec<Range>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Adds the stretches where any of the audio tracks is heard.
+/// Adds the stretches where any of the audio tracks is heard, each above
+/// its own background noise: music playing doesn't drown out talking.
 fn sounds(
     paths: &[impl AsRef<Path>],
     duration: Micros,
+    cancel: &AtomicBool,
     active: &mut Vec<Range>,
 ) -> anyhow::Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
     let windows = (duration / WINDOW) as usize + 1;
-    // The loudest track's level in each window.
-    let mut levels = vec![0f32; windows];
+    let mut heard = vec![false; windows];
     for path in paths {
         let mut sums = vec![(0f64, 0u32); windows];
         let mut reader = AudioReader::open(path.as_ref())?;
         while let Some((at, samples)) = reader.next_chunk()? {
+            check(cancel)?;
             for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
                 let t = at + i as u64 * 1_000_000 / 48_000;
                 let w = ((t / WINDOW) as usize).min(windows - 1);
@@ -124,16 +167,18 @@ fn sounds(
                 sums[w].1 += 1;
             }
         }
-        for (level, (sum, n)) in levels.iter_mut().zip(sums) {
-            if n > 0 {
-                *level = level.max((sum / f64::from(n)).sqrt() as f32);
-            }
+        let levels: Vec<f32> = sums
+            .into_iter()
+            .map(|(sum, n)| (sum / f64::from(n.max(1))).sqrt() as f32)
+            .collect();
+        let threshold = loudness_threshold(&levels);
+        for (heard, level) in heard.iter_mut().zip(levels) {
+            *heard |= level > threshold;
         }
     }
-    let threshold = loudness_threshold(&levels);
     let mut run_start = None;
-    for (i, &level) in levels.iter().chain([&0.0]).enumerate() {
-        match (level > threshold, run_start) {
+    for (i, &heard) in heard.iter().chain([&false]).enumerate() {
+        match (heard, run_start) {
             (true, None) => run_start = Some(i),
             (false, Some(start)) => {
                 if i - start >= MIN_SOUND_WINDOWS {
@@ -167,19 +212,16 @@ fn quiet_stretches(
     active.sort_by_key(|r| r.0);
     let mut gaps = Vec::new();
     // The start of the recording, before anything happens, can go whole.
-    let mut quiet_from = Some(0);
+    let mut quiet_from = 0;
     for r in &active {
-        if let Some(from) = quiet_from {
-            let to = r.0.saturating_sub(MARGIN);
-            if to > from {
-                gaps.push(Range(from, to));
-            }
+        let to = r.0.saturating_sub(MARGIN);
+        if to > quiet_from {
+            gaps.push(Range(quiet_from, to));
         }
-        let from = r.1 + MARGIN;
-        quiet_from = Some(quiet_from.map_or(from, |f| f.max(from)));
+        quiet_from = quiet_from.max(r.1 + MARGIN);
     }
-    if let Some(from) = quiet_from.filter(|&f| f < duration) {
-        gaps.push(Range(from, duration));
+    if quiet_from < duration {
+        gaps.push(Range(quiet_from, duration));
     }
     let mut out = Vec::new();
     for gap in gaps {

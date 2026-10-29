@@ -171,7 +171,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "find_dead_time",
-            "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for cut_recording. Each leaves a moment on either side of what happens. Takes a few seconds per minute of recording.",
+            "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for cut_recording. Each leaves a moment on either side of what happens. Takes about a second per minute of recording.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

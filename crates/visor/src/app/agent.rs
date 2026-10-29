@@ -785,24 +785,35 @@ impl App {
                     (min * 1e6) as Micros
                 }
             };
-            let (_, project) = self.agent_project(&dir)?;
-            Ok((dir, project, min))
+            let (editor, project) = self.agent_project(&dir)?;
+            let guard = editor.map(|e| e.start_job());
+            Ok((dir, project, min, guard))
         });
-        let (dir, project, min) = match request {
+        let (dir, project, min, guard) = match request {
             Ok(request) => request,
             Err(e) => return send(reply, Err(e)),
         };
         std::thread::spawn(move || {
-            let result = visor_media::dead_time::find(&dir, &project, min)
+            let cancel = Default::default();
+            let result = visor_media::dead_time::find(&dir, &project, min, &cancel)
                 .map(|stretches| {
                     let total: Micros = stretches.iter().map(|r| r.len()).sum();
+                    // Rounded inwards, so cutting them never cuts into
+                    // the margin left around what happens.
+                    let inside = |r: &visor_core::Range| {
+                        [
+                            (r.0 as f64 / 1e5).ceil() / 10.0,
+                            (r.1 as f64 / 1e5).floor() / 10.0,
+                        ]
+                    };
                     json!({
                         "folder": dir.display().to_string(),
-                        "stretches": stretches.iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
+                        "stretches": stretches.iter().map(inside).collect::<Vec<_>>(),
                         "total_seconds": seconds(total),
                     })
                 })
                 .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
+            drop(guard);
             send(reply, result);
         });
     }
