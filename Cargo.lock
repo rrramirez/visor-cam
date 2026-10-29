@@ -5911,7 +5911,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -5939,7 +5939,7 @@ dependencies = [
 
 [[package]]
 name = "visor-capture"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5964,7 +5964,7 @@ dependencies = [
 
 [[package]]
 name = "visor-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5978,7 +5978,7 @@ dependencies = [
 
 [[package]]
 name = "visor-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5987,7 +5987,7 @@ dependencies = [
 
 [[package]]
 name = "visor-media"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5999,7 +5999,7 @@ dependencies = [
 
 [[package]]
 name = "visor-recorder"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
