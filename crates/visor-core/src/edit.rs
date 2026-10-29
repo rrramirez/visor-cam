@@ -79,6 +79,20 @@ impl EditList {
         self.keep = out;
     }
 
+    /// Like [`cut`], and also cuts what is left kept on either side of it
+    /// if that is shorter than `min`, so cuts close together join rather
+    /// than leave a flash of video between them.
+    ///
+    /// [`cut`]: Self::cut
+    pub fn cut_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        if end <= start {
+            return;
+        }
+        self.cut(start, end);
+        self.keep
+            .retain(|r| r.len() >= min || (r.1 != start && r.0 != end));
+    }
+
     /// The stretches removed from a recording of `duration`, in order: the
     /// gaps between kept ranges, including any trimmed at either end.
     pub fn cuts(&self, duration: Micros) -> Vec<Range> {
@@ -197,6 +211,29 @@ mod tests {
             [Range(20, 30), Range(50, 60), Range(95, 100)]
         );
         assert!(e.with_cut_edge_moved(100, 3, false, 10).is_none());
+    }
+
+    #[test]
+    fn cuts_close_together_join() {
+        let mut e = EditList::full(100);
+        e.cut_joining(20, 30, 5);
+        e.cut_joining(33, 40, 5);
+        assert_eq!(e.cuts(100), [Range(20, 40)]);
+        // Before it, at the very start, and far enough away: kept.
+        e.cut_joining(3, 10, 5);
+        e.cut_joining(46, 50, 5);
+        assert_eq!(e.cuts(100), [Range(0, 10), Range(20, 40), Range(46, 50)]);
+        // Only what the cut touches goes; short pieces elsewhere stay.
+        let mut e = EditList::full(100);
+        e.cut(20, 30);
+        e.cut(32, 40);
+        e.cut_joining(60, 70, 5);
+        assert_eq!(e.cuts(100), [Range(20, 30), Range(32, 40), Range(60, 70)]);
+        // A trimmed end that would leave a sliver takes it too.
+        e.cut_joining(97, Micros::MAX, 5);
+        assert_eq!(e.ranges().last(), Some(&Range(70, 97)));
+        e.cut_joining(0, 18, 5);
+        assert_eq!(e.ranges()[0], Range(30, 32));
     }
 
     #[test]

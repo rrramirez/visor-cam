@@ -4,6 +4,12 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### Improved
+- Agents see times to the millisecond, so a cut at a marker lands exactly on it. They used to be rounded to a tenth of a second, which could leave a moment of what should have been cut.
+- When an agent's cut leaves less than a quarter second between it and another cut, or the start or end, that bit is cut too, rather than flashing by in the video.
+
 ## 0.6.0
 
 ### New

@@ -140,7 +140,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "cut_recording",
-            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Returns what is kept.",
+            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Anything under 0.25 s left kept between this cut and another, or an end, is cut too. Returns what is kept.",
             "inputSchema": edit_schema(),
         },
         {
