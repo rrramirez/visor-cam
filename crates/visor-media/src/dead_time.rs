@@ -31,8 +31,9 @@ const SAMPLE: Micros = 100_000;
 /// only every few keys.
 const LOOKBACK: Micros = 1_500_000;
 /// A smaller change of at least this many pixels (a box ticked) happened
-/// if the screen then stays still this long. A clock ticking or a spinner
-/// turning never does.
+/// if the screen then stays still this long. A spinner turning or a clock
+/// ticking seconds never does; a clock showing only minutes does, once a
+/// minute, which keeps a moment of dead time around each tick.
 const SMALL_PIXELS: usize = 3;
 const SETTLE: Micros = 1_500_000;
 /// Sound is measured in windows this long.
