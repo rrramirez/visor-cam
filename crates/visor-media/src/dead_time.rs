@@ -30,6 +30,11 @@ const SAMPLE: Micros = 100_000;
 /// pixel, at most this long before: typing is busy from its first key, not
 /// only every few keys.
 const LOOKBACK: Micros = 1_500_000;
+/// A smaller change of at least this many pixels (a box ticked) happened
+/// if the screen then stays still this long. A clock ticking or a spinner
+/// turning never does.
+const SMALL_PIXELS: usize = 3;
+const SETTLE: Micros = 1_500_000;
 /// Sound is measured in windows this long.
 const WINDOW: Micros = 50_000;
 /// Sound counts once it lasts this many windows, so a lone click doesn't.
@@ -95,9 +100,7 @@ fn screen_changes(
     let sh = ((u64::from(h) * u64::from(sw) / u64::from(w.max(1))) as u32).max(2) & !1;
     let mut reader = VideoReader::open(path, Some((format::Pixel::GRAY8, sw, sh)))?;
     let (sw, sh) = (sw as usize, sh as usize);
-    let mut reference: Option<Vec<u8>> = None;
-    // When the screen first differed from the reference, and has since.
-    let mut first_change = None;
+    let mut scan = ScreenScan::default();
     let mut pixels = vec![0u8; sw * sh];
     let mut next_sample = 0;
     while let Some((at, raw)) = reader.next_decoded()? {
@@ -111,37 +114,65 @@ fn screen_changes(
         for (row, out) in pixels.chunks_exact_mut(sw).enumerate() {
             out.copy_from_slice(&data[row * stride..row * stride + sw]);
         }
-        let Some(r) = &reference else {
-            // The first frame is where it starts, not something happening.
-            reference = Some(pixels.clone());
-            continue;
-        };
-        let changed = r
-            .iter()
-            .zip(&pixels)
-            .filter(|(a, b)| a.abs_diff(**b) > PIXEL_CHANGE)
-            .take(CHANGED_PIXELS)
-            .count();
-        if changed == 0 {
-            // Back as it was (a cursor blinking): nothing changed after all.
-            first_change = None;
-        } else if first_change.is_none() {
-            first_change = Some(at);
-        }
-        if changed == CHANGED_PIXELS {
-            let first = first_change.unwrap_or(at);
-            let from = first.max(at.saturating_sub(LOOKBACK));
-            if first < from {
-                // A small change long before (a box ticked) that this one
-                // adds to happened then too.
-                active.push(Range(first, first));
-            }
-            active.push(Range(from, at));
-            reference = Some(pixels.clone());
-            first_change = None;
-        }
+        scan.sample(at, &pixels, active);
     }
     Ok(())
+}
+
+/// Finds when the screen changed, from frames in order.
+#[derive(Default)]
+struct ScreenScan {
+    /// The frame when the screen last changed.
+    reference: Option<Vec<u8>>,
+    /// The frame before.
+    previous: Vec<u8>,
+    /// When the screen first differed from the reference, and has since.
+    first_change: Option<Micros>,
+    /// When a small change was made, if the screen has kept still since.
+    settling: Option<Micros>,
+}
+
+impl ScreenScan {
+    fn sample(&mut self, at: Micros, pixels: &[u8], active: &mut Vec<Range>) {
+        let Some(reference) = &self.reference else {
+            // The first frame is where it starts, not something happening.
+            self.reference = Some(pixels.to_vec());
+            self.previous = pixels.to_vec();
+            return;
+        };
+        let changed = differing(reference, pixels, CHANGED_PIXELS);
+        let moved = differing(&self.previous, pixels, 1) > 0;
+        self.previous.copy_from_slice(pixels);
+        if changed == CHANGED_PIXELS {
+            let from = self
+                .first_change
+                .unwrap_or(at)
+                .max(at.saturating_sub(LOOKBACK));
+            active.push(Range(from, at));
+            self.reference = Some(pixels.to_vec());
+            (self.first_change, self.settling) = (None, None);
+        } else if changed == 0 {
+            // Back as it was (a cursor blinking): nothing changed after all.
+            (self.first_change, self.settling) = (None, None);
+        } else {
+            self.first_change.get_or_insert(at);
+            if moved {
+                self.settling = (changed >= SMALL_PIXELS).then_some(at);
+            } else if let Some(since) = self.settling.filter(|&t| at - t >= SETTLE) {
+                active.push(Range(since, since));
+                self.settling = None;
+            }
+        }
+    }
+}
+
+/// How many pixels differ between two frames, counting up to `max`.
+fn differing(a: &[u8], b: &[u8], max: usize) -> usize {
+    a.iter()
+        .zip(b)
+        .filter(|(a, b)| a.abs_diff(**b) > PIXEL_CHANGE)
+        .take(max)
+        .count()
 }
 
 /// Adds the stretches where any of the audio tracks is heard, each above
@@ -171,10 +202,7 @@ fn sounds(
             .into_iter()
             .map(|(sum, n)| (sum / f64::from(n.max(1))).sqrt() as f32)
             .collect();
-        let threshold = loudness_threshold(&levels);
-        for (heard, level) in heard.iter_mut().zip(levels) {
-            *heard |= level > threshold;
-        }
+        add_heard(&levels, &mut heard);
     }
     let mut run_start = None;
     for (i, &heard) in heard.iter().chain([&false]).enumerate() {
@@ -190,6 +218,14 @@ fn sounds(
         }
     }
     Ok(())
+}
+
+/// Marks where a track with these `levels` is heard, above its own noise.
+fn add_heard(levels: &[f32], heard: &mut [bool]) {
+    let threshold = loudness_threshold(levels);
+    for (heard, &level) in heard.iter_mut().zip(levels) {
+        *heard |= level > threshold;
+    }
 }
 
 /// The level above which something is heard: well over the background
@@ -286,5 +322,64 @@ mod tests {
         assert!(threshold > 0.002 && threshold < 0.05);
         // Digital silence: the floor still applies.
         assert_eq!(loudness_threshold(&[0.0; 10]), MIN_LEVEL);
+    }
+
+    #[test]
+    fn talking_is_heard_over_louder_music() {
+        let mut heard = vec![false; 100];
+        // Music playing throughout, then talking, quieter, now and then.
+        add_heard(&[0.1; 100], &mut heard);
+        let talk: Vec<f32> = (0..100)
+            .map(|i| if i % 10 < 3 { 0.03 } else { 0.001 })
+            .collect();
+        add_heard(&talk, &mut heard);
+        let expected: Vec<bool> = (0..100).map(|i| i % 10 < 3).collect();
+        assert_eq!(heard, expected);
+    }
+
+    /// Feeds `scan` a frame every 100 ms from `from` to `to` seconds,
+    /// made by `frame` from the time.
+    fn frames(
+        scan: &mut ScreenScan,
+        from: f64,
+        to: f64,
+        frame: impl Fn(f64) -> Vec<u8>,
+        active: &mut Vec<Range>,
+    ) {
+        for tenth in (from * 10.0) as u64..(to * 10.0) as u64 {
+            scan.sample(tenth * 100_000, &frame(tenth as f64 / 10.0), active);
+        }
+    }
+
+    fn screen(lit: usize) -> Vec<u8> {
+        let mut pixels = vec![0; 1000];
+        pixels[..lit].fill(255);
+        pixels
+    }
+
+    #[test]
+    fn a_box_ticked_counts_a_clock_ticking_doesnt() {
+        // Still, then a box ticked at 2 s (5 pixels), nothing after.
+        let (mut scan, mut active) = (ScreenScan::default(), Vec::new());
+        frames(
+            &mut scan,
+            0.0,
+            6.0,
+            |t| screen(if t < 2.0 { 0 } else { 5 }),
+            &mut active,
+        );
+        assert_eq!(active, [Range(2 * S, 2 * S)]);
+
+        // A clock ticking every second (5 pixels, back and forth), then
+        // something happening at 6 s: only that counts, from the clock's
+        // last tick at the most.
+        let (mut scan, mut active) = (ScreenScan::default(), Vec::new());
+        let clock = |t: f64| {
+            let mut pixels = screen(if t < 6.0 { 0 } else { 100 });
+            pixels[500 + (t as usize % 2) * 5..][..5].fill(255);
+            pixels
+        };
+        frames(&mut scan, 0.0, 8.0, clock, &mut active);
+        assert_eq!(active, [Range(5 * S, 6 * S)]);
     }
 }
