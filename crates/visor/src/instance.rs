@@ -182,9 +182,16 @@ fn answer(mut stream: TcpStream, request: Parsed, handle: &dyn Fn(Request)) -> s
         Parsed::Control(command) => {
             let (tx, rx) = crossbeam_channel::bounded(1);
             handle(Request::Control(command, tx));
-            let reply = rx.recv_timeout(CONTROL_TIMEOUT).unwrap_or_else(
-                |_| serde_json::json!({"ok": false, "error": "Visor didn't answer in time."}),
-            );
+            let reply = rx.recv_timeout(CONTROL_TIMEOUT).unwrap_or_else(|e| {
+                let error = match e {
+                    crossbeam_channel::RecvTimeoutError::Timeout => "Visor didn't answer in time.",
+                    // Dropped without a reply: the command crashed.
+                    crossbeam_channel::RecvTimeoutError::Disconnected => {
+                        "Visor ran into a problem doing that; see its log."
+                    }
+                };
+                serde_json::json!({"ok": false, "error": error})
+            });
             stream.write_all(format!("{reply}\n").as_bytes())?;
         }
     }
