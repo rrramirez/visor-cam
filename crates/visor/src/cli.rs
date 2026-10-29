@@ -5,6 +5,7 @@
 //! running. The app answers only while agent control is on in Preferences.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -42,7 +43,7 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   restore                     undo all cuts
   open                        open it in the editor
   frame SECONDS [--out FILE]  save the frame at SECONDS, cut or not, as a JPEG
-                              (frame-SECONDS.jpg by default)
+                              (frame-SECONDS.jpg here by default)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
 
@@ -108,14 +109,28 @@ pub fn run(args: &[String]) -> Option<i32> {
 }
 
 /// A reply as text: its fields as JSON, or why it failed.
-pub fn reply_text(mut reply: Value) -> Result<String, String> {
+pub fn reply_text(reply: Value) -> Result<String, String> {
+    reply_fields(reply).map(|fields| serde_json::to_string_pretty(&fields).unwrap_or_default())
+}
+
+/// A reply's fields, or why it failed.
+fn reply_fields(mut reply: Value) -> Result<Value, String> {
     if reply["ok"].as_bool() != Some(true) {
         return Err(reply["error"].as_str().unwrap_or("Failed.").to_string());
     }
     if let Some(fields) = reply.as_object_mut() {
         fields.remove("ok");
     }
-    Ok(serde_json::to_string_pretty(&reply).unwrap_or_default())
+    Ok(reply)
+}
+
+/// Where a reply carries a frame, as a base64 JPEG: the command line saves
+/// it, and MCP passes it on as an image.
+pub const IMAGE: &str = "image_jpeg";
+
+/// Takes the frame out of a reply, if it has one.
+pub fn take_image(reply: &mut Value) -> Option<Value> {
+    reply.as_object_mut()?.remove(IMAGE)
 }
 
 fn start_args(args: &[String]) -> Result<Value, String> {
@@ -220,9 +235,7 @@ fn frame_args(args: &[String]) -> Result<(Value, Option<String>), String> {
             rest.push(arg.clone());
         }
     }
-    let mut command = edit_args("frame", &rest)?;
-    command["command"] = "view_frame".into();
-    Ok((command, out))
+    Ok((edit_args("frame", &rest)?, out))
 }
 
 /// Asks for a frame and saves it; prints the reply with the file in place
@@ -230,28 +243,26 @@ fn frame_args(args: &[String]) -> Result<(Value, Option<String>), String> {
 fn save_frame(command: &Value, out: Option<String>) -> i32 {
     use base64::prelude::*;
     let mut reply = call(command);
-    let image = reply
-        .as_object_mut()
-        .and_then(|r| r.remove("image_jpeg"))
-        .and_then(|i| BASE64_STANDARD.decode(i.as_str()?).ok());
-    let text = match (reply_text(reply), image) {
-        (Ok(_), None) => Err("Visor sent no image.".to_string()),
-        (Ok(text), Some(jpeg)) => {
-            let out = out.unwrap_or_else(|| format!("frame-{}.jpg", command["seconds"]));
-            let mut reply: Value = serde_json::from_str(&text).unwrap_or_default();
-            std::fs::write(&out, jpeg)
-                .and_then(|()| std::path::absolute(&out))
-                .map(|path| {
-                    reply["image"] = path.display().to_string().into();
-                    serde_json::to_string_pretty(&reply).unwrap_or_default()
-                })
-                .map_err(|e| format!("couldn't save {out}: {e}"))
-        }
-        (Err(e), _) => Err(e),
-    };
-    match text {
-        Ok(text) => {
-            println!("{text}");
+    let image = take_image(&mut reply);
+    let saved = reply_fields(reply).and_then(|mut reply| {
+        let jpeg = match image {
+            Some(Value::String(image)) => BASE64_STANDARD
+                .decode(image)
+                .map_err(|e| format!("Visor sent an image that can't be read: {e}"))?,
+            Some(_) => return Err("Visor sent an image that can't be read.".into()),
+            None => return Err("Visor sent no image.".into()),
+        };
+        let seconds = command["seconds"].as_f64().unwrap_or_default();
+        let path = write_frame(out, Path::new("."), seconds, &jpeg)?;
+        reply["image"] = path.display().to_string().into();
+        Ok(reply)
+    });
+    match saved {
+        Ok(reply) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).unwrap_or_default()
+            );
             0
         }
         Err(error) => {
@@ -259,6 +270,38 @@ fn save_frame(command: &Value, out: Option<String>) -> i32 {
             1
         }
     }
+}
+
+/// Saves a frame at `out`, or as frame-SECONDS.jpg in `dir`, numbered
+/// rather than replacing one already there. Returns where.
+fn write_frame(
+    out: Option<String>,
+    dir: &Path,
+    seconds: f64,
+    jpeg: &[u8],
+) -> Result<PathBuf, String> {
+    let saved = match out {
+        Some(out) => std::fs::write(&out, jpeg).map(|()| PathBuf::from(out)),
+        None => (1..)
+            .map(|n| match n {
+                1 => dir.join(format!("frame-{seconds}.jpg")),
+                n => dir.join(format!("frame-{seconds} ({n}).jpg")),
+            })
+            .find_map(|name| {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&name);
+                match file {
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    file => Some(file.and_then(|mut f| f.write_all(jpeg)).map(|()| name)),
+                }
+            })
+            .expect("names never run out"),
+    };
+    saved
+        .and_then(std::path::absolute)
+        .map_err(|e| format!("couldn't save the frame: {e}"))
 }
 
 /// Seconds, or minutes and seconds as M:SS (seconds below 60).
@@ -440,6 +483,26 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn frames_are_named_after_their_time_and_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("visor-frames-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = |seconds| {
+            let path = write_frame(None, &dir, seconds, b"jpeg").unwrap();
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        };
+        assert_eq!(name(15.0), "frame-15.jpg");
+        assert_eq!(name(15.0), "frame-15 (2).jpg");
+        assert_eq!(name(62.5), "frame-62.5.jpg");
+        let out = dir.join("chosen.jpg");
+        std::fs::write(&out, "old").unwrap();
+        let out_name = Some(out.display().to_string());
+        assert_eq!(write_frame(out_name, &dir, 1.0, b"new").unwrap(), out);
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -383,28 +383,37 @@ pub fn thumbnail_time(project: &Project) -> Micros {
 /// Saves the project's thumbnail, composited like the export (camera bubble
 /// included) at the recording's full size, as a JPEG at `out`.
 pub fn save_thumbnail(dir: &Path, project: &Project, out: &Path) -> anyhow::Result<()> {
-    ffmpeg::init()?;
-    let opts = ExportOptions::new(ExportFormat::Mp4);
-    let mut renderer = Renderer::open(dir, project, &opts)?.0;
-    let jpeg = encode_jpeg(renderer.render_source(thumbnail_time(project))?, 2)?;
+    let jpeg = render_jpeg(dir, project, thumbnail_time(project), None, 2)?;
     std::fs::write(out, jpeg).with_context(|| format!("writing {}", out.display()))
 }
 
 /// The frame at source time `t`, cut or not, composited like the export
-/// (camera bubble included) and at most `max_height` tall, as a JPEG file's
-/// bytes: for an agent to see what was recorded.
+/// and at most `max_height` tall, as a JPEG file's bytes: for an agent to
+/// see what was recorded. Good enough to read text, and a fraction of the
+/// thumbnail's size.
 pub fn frame_jpeg(
     dir: &Path,
     project: &Project,
     t: Micros,
     max_height: u32,
 ) -> anyhow::Result<Vec<u8>> {
+    render_jpeg(dir, project, t, Some(max_height), 5)
+}
+
+/// The frame at source time `t`, composited like the export (camera bubble
+/// included), as a JPEG file's bytes at `quality` (see [`encode_jpeg`]).
+fn render_jpeg(
+    dir: &Path,
+    project: &Project,
+    t: Micros,
+    max_height: Option<u32>,
+    quality: i32,
+) -> anyhow::Result<Vec<u8>> {
     ffmpeg::init()?;
     let mut opts = ExportOptions::new(ExportFormat::Mp4);
-    opts.max_height = Some(max_height);
+    opts.max_height = max_height;
     let mut renderer = Renderer::open(dir, project, &opts)?.0;
-    // Good enough to read text, and a fraction of the thumbnail's size.
-    encode_jpeg(renderer.render_source(t)?, 5)
+    encode_jpeg(renderer.render_source(t)?, quality)
 }
 
 /// One frame (video-range YUV 4:2:0) as a JPEG file's bytes, at `quality`

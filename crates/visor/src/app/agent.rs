@@ -77,6 +77,38 @@ fn send(reply: Reply, result: Result<Value, String>) {
 /// How tall frames shown to agents are at most: enough to read text.
 const FRAME_HEIGHT: u32 = 720;
 
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Renders frames for agents one at a time, on one thread, so an agent
+/// asking for many at once can't swamp the computer, or a recording going
+/// on.
+fn render(job: Job) {
+    static QUEUE: std::sync::OnceLock<crossbeam_channel::Sender<Job>> = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
+        let spawned = std::thread::Builder::new()
+            .name("visor-frames".into())
+            .spawn(move || rx.into_iter().for_each(|job| job()));
+        if let Err(e) = spawned {
+            tracing::warn!("could not start rendering frames: {e}");
+        }
+        tx
+    });
+    // No thread to take it (it couldn't start): render it here.
+    if let Err(crossbeam_channel::SendError(job)) = queue.send(job) {
+        job();
+    }
+}
+
+/// A time argument, in seconds.
+fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
+    arg(args, name)
+        .and_then(Value::as_f64)
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .map(|t| (t * 1e6) as Micros)
+        .ok_or_else(|| format!("{name} is a number of seconds."))
+}
+
 fn past_the_end(what: &str, duration: Micros) -> String {
     format!(
         "{what} is past the end: the recording is {} seconds long.",
@@ -597,7 +629,7 @@ impl App {
         }
         let root = self.settings.borrow().save_dir.canonicalize().ok();
         if dir.parent() != root.as_deref() {
-            return Err("Only recordings in Visor's recordings folder can be edited.".into());
+            return Err("Only recordings in Visor's recordings folder can be used.".into());
         }
         match &*self.session.borrow() {
             Session::Recording { recorder, .. }
@@ -636,17 +668,14 @@ impl App {
         let range = match kind {
             EditKind::Restore => None,
             EditKind::Cut | EditKind::Trim => {
-                let time = |k: &str| {
-                    arg(args, k)
-                        .and_then(Value::as_f64)
-                        .filter(|t| t.is_finite() && *t >= 0.0)
-                        .ok_or_else(|| format!("{k} is a number of seconds."))
-                };
-                let (start, end) = (time("start_seconds")?, time("end_seconds")?);
+                let (start, end) = (
+                    time_arg(args, "start_seconds")?,
+                    time_arg(args, "end_seconds")?,
+                );
                 if end <= start {
                     return Err("end_seconds must be after start_seconds.".into());
                 }
-                Some(((start * 1e6) as Micros, (end * 1e6) as Micros))
+                Some((start, end))
             }
         };
         let (editor, current) = self.agent_project(&dir)?;
@@ -705,12 +734,8 @@ impl App {
     /// export would show it. Rendered off the UI thread.
     fn agent_frame(&self, args: &Value, reply: Reply) {
         let request = self.agent_recording(args).and_then(|dir| {
-            let t = arg(args, "seconds")
-                .and_then(Value::as_f64)
-                .filter(|t| t.is_finite() && *t >= 0.0)
-                .ok_or("seconds is a number of seconds.")?;
+            let t = time_arg(args, "seconds")?;
             let (_, project) = self.agent_project(&dir)?;
-            let t = (t * 1e6) as Micros;
             if t >= project.duration_us {
                 return Err(past_the_end("seconds", project.duration_us));
             }
@@ -720,20 +745,21 @@ impl App {
             Ok(request) => request,
             Err(e) => return send(reply, Err(e)),
         };
-        std::thread::spawn(move || {
+        render(Box::new(move || {
             use base64::prelude::*;
             let result = visor_media::export::frame_jpeg(&dir, &project, t, FRAME_HEIGHT)
                 .map(|jpeg| {
-                    json!({
+                    let mut reply = json!({
                         "folder": dir.display().to_string(),
                         "seconds": seconds(t),
                         "cut": project.edit.to_output(t).is_none(),
-                        "image_jpeg": BASE64_STANDARD.encode(jpeg),
-                    })
+                    });
+                    reply[crate::cli::IMAGE] = BASE64_STANDARD.encode(jpeg).into();
+                    reply
                 })
                 .map_err(|e| format!("Couldn't show that frame: {e:#}"));
             send(reply, result);
-        });
+        }));
     }
 
     /// Opens a recording in the editor for the user.

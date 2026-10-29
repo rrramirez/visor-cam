@@ -285,7 +285,7 @@ fn call_tool(params: &Value) -> Result<Value, (i64, &'static str)> {
     command["command"] = name.into();
     let mut reply = crate::cli::call(&command);
     // A frame goes to the agent as an image, with the rest as text.
-    let image = reply.as_object_mut().and_then(|r| r.remove("image_jpeg"));
+    let image = crate::cli::take_image(&mut reply);
     let (text, is_error) = match crate::cli::reply_text(reply) {
         Ok(text) => (text, false),
         Err(error) => (error, true),
