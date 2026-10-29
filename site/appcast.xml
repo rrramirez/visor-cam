@@ -7,6 +7,17 @@
         <description>Visor updates</description>
         <language>en</language>
         <item>
+            <title>0.4.0</title>
+            <pubDate>Wed, 28 Oct 2026 19:09:05 -0500</pubDate>
+            <link>https://visor-cam.pages.dev/</link>
+            <sparkle:version>0.4.0</sparkle:version>
+            <sparkle:releaseNotesLink>https://github.com/rrramirez/visor-cam/releases/tag/v0.4.0</sparkle:releaseNotesLink>
+            <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/rrramirez/visor-cam/releases/download/v0.4.0/Visor-0.4.0.dmg" length="18858170" type="application/octet-stream" sparkle:edSignature="mGiboAsyPzSVXT5ukYdsdt0Q8RLkIpbdywZwb2+WkjSufTRqVatdujgX2We/SIRhOMp/rWDC3iqkyL7eHG5mBw=="/>
+        </item>
+        <item>
             <title>0.3.0</title>
             <pubDate>Wed, 28 Oct 2026 14:52:07 -0500</pubDate>
             <link>https://visor-cam.pages.dev/</link>
@@ -27,17 +38,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/rrramirez/visor-cam/releases/download/v0.2.0/Visor-0.2.0.dmg" length="17718033" type="application/octet-stream" sparkle:edSignature="ay7gdFvzI5NnM2HCzqTr5JECuAJI8mzdUDztSg+ZRT9qOCdmim5hjgjU6ZzPIPwWuAJlXrSCMUD8UFmMzkjYAg=="/>
-        </item>
-        <item>
-            <title>0.1.1</title>
-            <pubDate>Tue, 27 Oct 2026 18:34:55 -0500</pubDate>
-            <link>https://visor-cam.pages.dev/</link>
-            <sparkle:version>0.1.1</sparkle:version>
-            <sparkle:releaseNotesLink>https://github.com/rrramirez/visor-cam/releases/tag/v0.1.1</sparkle:releaseNotesLink>
-            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/rrramirez/visor-cam/releases/download/v0.1.1/Visor-0.1.1.dmg" length="17220018" type="application/octet-stream" sparkle:edSignature="3cwm/aFxg9urAEzv4lZb/MsZ4Lru1TFb0CtlK9bRedeisAoZB/NuSI4lMp89RFZE1hqen24CYNn6bCGR06anBA=="/>
         </item>
     </channel>
 </rss>
