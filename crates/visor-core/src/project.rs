@@ -115,11 +115,12 @@ pub struct Chapter {
 }
 
 /// The shortest chapter: a marker this close after the last chapter's
-/// start (just before a cut, or near the start) takes its place, and one
-/// this close to the end starts none.
+/// start (in the video as exported) takes its place, and one this close to
+/// the end starts none.
 const MIN_CHAPTER: Micros = 1_000_000;
 
 /// Playback speeds a project can have; others are taken as the nearest.
+/// What one `atempo` filter handles: the preview and export rely on it.
 pub const MIN_SPEED: f64 = 0.5;
 pub const MAX_SPEED: f64 = 2.0;
 
@@ -183,18 +184,19 @@ impl Project {
         let mut markers: Vec<&Marker> = self.markers.iter().collect();
         markers.sort_by_key(|m| m.at_us);
         let first_kept = self.edit.ranges().first().map_or(0, |r| r.0);
-        let mut starts = vec![(0, self.title.trim())];
+        // FFmpeg takes C strings: a marker's text could hold a NUL.
+        let clean = |text: &str| text.replace('\0', "").trim().to_string();
+        let mut starts = vec![(0, clean(&self.title))];
         for m in markers.into_iter().filter(|m| m.at_us >= first_kept) {
             let at = self.output_time(m.at_us);
             if at + MIN_CHAPTER > end {
                 break;
             }
-            let (mut start, mut title) = (at, m.text.trim());
-            if let Some(&(last, last_title)) = starts.last().filter(|&&(t, _)| at - t < MIN_CHAPTER)
-            {
+            let (mut start, mut title) = (at, clean(&m.text));
+            if starts.last().is_some_and(|(t, _)| at - t < MIN_CHAPTER) {
                 // The later marker, about what follows, names it, unless
                 // it says nothing.
-                starts.pop();
+                let (last, last_title) = starts.pop().unwrap();
                 start = last;
                 if title.is_empty() {
                     title = last_title;
@@ -205,18 +207,22 @@ impl Project {
         if starts.len() < 2 {
             return Vec::new();
         }
-        starts
-            .iter()
-            .enumerate()
-            .map(|(i, &(start_us, title))| Chapter {
+        let mut chapters: Vec<Chapter> = Vec::new();
+        for (i, (start_us, title)) in starts.into_iter().enumerate() {
+            if let Some(last) = chapters.last_mut() {
+                last.end_us = start_us;
+            }
+            chapters.push(Chapter {
                 start_us,
-                end_us: starts.get(i + 1).map_or(end, |&(t, _)| t),
-                title: match title {
-                    "" => format!("Chapter {}", i + 1),
-                    title => title.to_string(),
+                end_us: end,
+                title: if title.is_empty() {
+                    format!("Chapter {}", i + 1)
+                } else {
+                    title
                 },
-            })
-            .collect()
+            });
+        }
+        chapters
     }
 
     pub fn load(dir: &Path) -> Result<Self, ProjectError> {
@@ -416,7 +422,7 @@ mod tests {
             // with text names the chapter.
             marker(39 * S + S * 8 / 10, "Mistake"),
             marker(41 * S, "Oops"),
-            marker(42 * S, " "),
+            marker(42 * S, " \0"),
             // Less than a second before the end, and past it.
             marker(54 * S + S / 2, "Too late"),
             marker(58 * S, "Gone"),

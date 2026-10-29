@@ -639,8 +639,7 @@ impl Muxer {
                 Rational(1, 1_000_000),
                 c.start_us as i64,
                 c.end_us as i64,
-                // FFmpeg takes C strings; a marker's text could hold a NUL.
-                c.title.replace('\0', ""),
+                &c.title,
             )?;
         }
         Ok(())
