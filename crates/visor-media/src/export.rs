@@ -200,6 +200,8 @@ fn run(
     if let Some(jpeg) = cover {
         muxer.cover(jpeg)?;
     }
+    // Markers become chapters, which players list to jump between.
+    muxer.chapters(&project.chapters())?;
     muxer.start()?;
     let segments = SampleMap::new(edit);
     let mut tempo = Tempo::with_filters(speed, &opts.audio.filters())?;
@@ -619,6 +621,20 @@ impl Muxer {
             (*st).disposition |= ffmpeg::ffi::AV_DISPOSITION_ATTACHED_PIC;
         }
         self.cover = Some((stream.index(), jpeg));
+        Ok(())
+    }
+
+    /// Adds chapters. Call before [`start`](Self::start).
+    fn chapters(&mut self, chapters: &[visor_core::Chapter]) -> anyhow::Result<()> {
+        for (id, c) in chapters.iter().enumerate() {
+            self.output.add_chapter(
+                id as i64,
+                Rational(1, 1_000_000),
+                c.start_us as i64,
+                c.end_us as i64,
+                &c.title,
+            )?;
+        }
         Ok(())
     }
 

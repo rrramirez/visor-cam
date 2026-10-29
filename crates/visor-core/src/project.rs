@@ -106,6 +106,18 @@ pub struct Marker {
     pub text: String,
 }
 
+/// A chapter of the exported video, in output time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chapter {
+    pub start_us: Micros,
+    pub end_us: Micros,
+    pub title: String,
+}
+
+/// A first marker this close to the start starts the video, rather than a
+/// moment-long chapter before it.
+const CHAPTER_START: Micros = 1_000_000;
+
 fn speed_default() -> f64 {
     1.0
 }
@@ -145,6 +157,54 @@ impl Project {
     /// Length of the exported video: the kept time, sped up or slowed down.
     pub fn output_duration(&self) -> Micros {
         (self.edit.duration() as f64 / self.speed.max(0.01)).round() as Micros
+    }
+
+    /// The exported video's chapters: one from each marker, in output time
+    /// (after cuts and speed), and before the first one a chapter named
+    /// after the recording. A marker in a cut starts its chapter where the
+    /// video goes on. None without markers.
+    pub fn chapters(&self) -> Vec<Chapter> {
+        let end = self.output_duration();
+        let speed = self.speed.max(0.01);
+        let mut markers: Vec<&Marker> = self.markers.iter().collect();
+        markers.sort_by_key(|m| m.at_us);
+        let mut starts: Vec<(Micros, &str)> = Vec::new();
+        for m in markers {
+            let at = (self.edit.kept_before(m.at_us) as f64 / speed).round() as Micros;
+            if at >= end {
+                break;
+            }
+            // Markers at the same moment (in one cut): the last one, about
+            // what follows, names it.
+            if starts.last().is_some_and(|&(t, _)| t == at) {
+                starts.pop();
+            }
+            starts.push((at, m.text.trim()));
+        }
+        match starts.first_mut() {
+            None => return Vec::new(),
+            Some((t, _)) if *t < CHAPTER_START => *t = 0,
+            Some(_) => starts.insert(0, (0, self.title.trim())),
+        }
+        let ends: Vec<Micros> = starts
+            .iter()
+            .skip(1)
+            .map(|&(t, _)| t)
+            .chain([end])
+            .collect();
+        starts
+            .iter()
+            .zip(ends)
+            .enumerate()
+            .map(|(i, (&(start_us, title), end_us))| Chapter {
+                start_us,
+                end_us,
+                title: match title {
+                    "" => format!("Chapter {}", i + 1),
+                    title => title.to_string(),
+                },
+            })
+            .collect()
     }
 
     pub fn load(dir: &Path) -> Result<Self, ProjectError> {
@@ -327,6 +387,46 @@ pub fn create_unique_dir(root: &Path, name: &str) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chapters_follow_markers_through_cuts_and_speed() {
+        const S: Micros = 1_000_000;
+        let mut p = Project::new("Safari tour", "", 60 * S);
+        assert!(p.chapters().is_empty());
+        let marker = |at_us, text: &str| Marker {
+            at_us,
+            text: text.into(),
+        };
+        p.markers = vec![
+            marker(30 * S, "Settings"),
+            marker(10 * S, "Open Safari"),
+            // Both in the cut below: the second names the chapter.
+            marker(41 * S, "Oops"),
+            marker(42 * S, " "),
+            // Past the end of what's kept.
+            marker(58 * S, "Gone"),
+        ];
+        p.edit.cut(40 * S, 45 * S);
+        p.edit.cut(55 * S, 60 * S);
+        p.speed = 2.0;
+        let chapter = |start: f64, end: f64, title: &str| Chapter {
+            start_us: (start * 1e6) as Micros,
+            end_us: (end * 1e6) as Micros,
+            title: title.into(),
+        };
+        assert_eq!(
+            p.chapters(),
+            [
+                chapter(0.0, 5.0, "Safari tour"),
+                chapter(5.0, 15.0, "Open Safari"),
+                chapter(15.0, 20.0, "Settings"),
+                chapter(20.0, 25.0, "Chapter 4"),
+            ]
+        );
+        // A first marker right at the start starts the video.
+        p.markers[1].at_us = S;
+        assert_eq!(p.chapters()[0], chapter(0.0, 15.0, "Open Safari"));
+    }
 
     fn recording(root: &Path, folder: &str, title: &str, created: &str) -> PathBuf {
         let dir = root.join(folder);
