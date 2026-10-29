@@ -7,7 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### Improved
-- Agents see times to the millisecond, so a cut at a marker lands exactly on it. They used to be rounded to a tenth of a second, which could leave a moment of what should have been cut.
+- Agents see times to the millisecond, so a cut at a marker lands on it, well within a frame. They used to be rounded to a tenth of a second, which could leave a moment of what should have been cut.
 - When an agent's cut leaves less than a quarter second between it and another cut, or the start or end, that bit is cut too, rather than flashing by in the video.
 
 ## 0.6.0

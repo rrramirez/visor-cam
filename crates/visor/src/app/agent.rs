@@ -117,7 +117,7 @@ fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
     arg(args, name)
         .and_then(Value::as_f64)
         .filter(|t| t.is_finite() && *t >= 0.0)
-        .map(|t| (t * 1e6) as Micros)
+        .map(|t| (t * 1e6).round() as Micros)
         .ok_or_else(|| format!("{name} is a number of seconds."))
 }
 
