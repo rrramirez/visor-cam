@@ -62,7 +62,9 @@ jobs:
           # bindgen (ffmpeg-sys) needs libclang; the runner image ships LLVM.
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      # Tests take a couple of minutes; one hanging shouldn't use up the job's time.
       - name: Test
+        timeout-minutes: 15
         run: cargo test --workspace --no-fail-fast
 
       - name: Build
