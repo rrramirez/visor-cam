@@ -227,6 +227,9 @@ export component Editor inherits Window {
     callback set-out();
     callback cut-selection();
     callback trim-to-selection();
+    // Looks for stretches where nothing happens and cuts them.
+    callback cut-pauses();
+    in property <bool> finding-pauses;
     callback restore();
     callback undo();
     callback redo();
@@ -441,6 +444,11 @@ export component Editor inherits Window {
                                         text: "Trim to selection"; icon: Icons.area; shortcut: "T";
                                         enabled: root.has-selection;
                                         clicked => { root.trim-to-selection(); keys.focus(); }
+                                    }
+                                    SideButton {
+                                        text: root.finding-pauses ? "Finding pauses…" : "Cut pauses"; icon: Icons.skip;
+                                        enabled: !root.finding-pauses;
+                                        clicked => { root.cut-pauses(); keys.focus(); }
                                     }
                                     SideButton {
                                         text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";

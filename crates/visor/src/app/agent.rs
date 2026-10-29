@@ -176,6 +176,7 @@ impl App {
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
+            "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
         };
         send(reply, result);
@@ -609,7 +610,7 @@ impl App {
     }
 
     /// The editor showing the recording in `dir`, if one is open.
-    fn editor_for(&self, dir: &Path) -> Option<Rc<EditorWindow>> {
+    pub(crate) fn editor_for(&self, dir: &Path) -> Option<Rc<EditorWindow>> {
         self.editors
             .borrow()
             .iter()
@@ -682,6 +683,45 @@ impl App {
             "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
             "editor_open": editor.is_some(),
         }))
+    }
+
+    /// Lists a recording's dead time, still and silent, for an agent to cut.
+    /// Found off the UI thread: the whole recording is decoded.
+    fn agent_dead_time(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let min = match arg(args, "min_seconds") {
+                None => visor_media::dead_time::MIN_LEN,
+                Some(min) => {
+                    let min = min
+                        .as_f64()
+                        .filter(|m| m.is_finite() && *m >= 0.5)
+                        .ok_or("min_seconds is a number of seconds, 0.5 or more.")?;
+                    (min * 1e6) as Micros
+                }
+            };
+            let project = match self.editor_for(&dir) {
+                Some(editor) => editor.project(),
+                None => visor_core::Project::load(&dir).map_err(|e| e.to_string())?,
+            };
+            Ok((dir, project, min))
+        });
+        let (dir, project, min) = match request {
+            Ok(request) => request,
+            Err(e) => return send(reply, Err(e)),
+        };
+        std::thread::spawn(move || {
+            let result = visor_media::dead_time::find(&dir, &project, min)
+                .map(|stretches| {
+                    let total: Micros = stretches.iter().map(|r| r.len()).sum();
+                    json!({
+                        "folder": dir.display().to_string(),
+                        "stretches": stretches.iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
+                        "total_seconds": seconds(total),
+                    })
+                })
+                .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
+            send(reply, result);
+        });
     }
 
     /// Opens a recording in the editor for the user.

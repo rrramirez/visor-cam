@@ -11,6 +11,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
 use visor_core::{EditList, Micros, Project};
+use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
 
@@ -221,6 +222,7 @@ impl EditorWindow {
                 e.apply(|edit| edit.cut(a, b));
             }
         });
+        on!(on_cut_pauses, |e| e.cut_pauses());
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
                 e.apply(|edit| edit.trim(a, b));
@@ -925,6 +927,61 @@ impl EditorWindow {
                 }
             });
         });
+    }
+
+    /// Looks for dead time (see `visor_media::dead_time`) off the UI
+    /// thread, then cuts it all as one step to undo.
+    fn cut_pauses(&self) {
+        if self.ui.get_finding_pauses() {
+            return;
+        }
+        self.ui.set_finding_pauses(true);
+        let project = self.project.borrow().clone();
+        let dir = self.dir.clone();
+        let guard = self.jobs.start();
+        std::thread::spawn(move || {
+            let found =
+                dead_time::find(&dir, &project, dead_time::MIN_LEN).map_err(|e| format!("{e:#}"));
+            drop(guard);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(editor) = app().editor_for(&dir) {
+                    editor.pauses_found(found);
+                }
+            });
+        });
+    }
+
+    fn pauses_found(&self, found: Result<Vec<visor_core::Range>, String>) {
+        self.ui.set_finding_pauses(false);
+        let message = match found {
+            Err(e) => {
+                tracing::error!("looking for pauses failed: {e}");
+                format!("Couldn't look for pauses: {e}")
+            }
+            Ok(pauses) if pauses.is_empty() => format!(
+                "No pauses of {} seconds or more to cut.",
+                dead_time::MIN_LEN / 1_000_000
+            ),
+            Ok(pauses) => {
+                let mut edit = self.project.borrow().edit.clone();
+                for p in &pauses {
+                    edit.cut(p.0, p.1);
+                }
+                if edit.duration() == 0 {
+                    "Nothing happens in what's kept, so nothing was cut.".into()
+                } else {
+                    self.apply(|e| *e = edit);
+                    let total: Micros = pauses.iter().map(|p| p.len()).sum();
+                    format!(
+                        "Cut {} pause{}, {} in all. ⌘Z undoes it.",
+                        pauses.len(),
+                        if pauses.len() == 1 { "" } else { "s" },
+                        util::clock_tenths(total)
+                    )
+                }
+            }
+        };
+        self.ui.set_kept_label(message.into());
     }
 
     fn poll_export(&self) {

@@ -19,8 +19,9 @@ name for the video, then do the demo, calling add_marker at each step, and final
 stop_recording. Keep the video free of dead time: call pause_recording before \
 setting up something that shouldn't be seen, and as soon as a step fails or you \
 need to retry or think, then resume_recording once the next step is ready to show. \
-After stopping, cut_recording removes stretches that are still dull or went wrong \
-(marker times help find them), and open_recording hands the result to the user. \
+After stopping, find_dead_time lists stretches where nothing happens, and \
+cut_recording removes those and others that went wrong (marker times help find \
+them); then open_recording hands the result to the user. \
 Visor's own windows are never recorded, but your terminal or chat window is if it's \
 on the recorded screen: record a single window or app to keep it out. \
 The user must turn on agent control in Visor's Preferences first; if a tool says it \
@@ -150,6 +151,21 @@ fn tool_list() -> Value {
             "name": "restore_recording",
             "description": "Undoes all cuts and trims of a recording.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
+        },
+        {
+            "name": "find_dead_time",
+            "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for cut_recording. Each leaves a moment on either side of what happens. Takes a few seconds per minute of recording.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "min_seconds": {
+                        "type": "number",
+                        "description": "The shortest stretch to list. Default 2.",
+                    },
+                    "folder": folder_schema(),
+                },
+            },
+            "annotations": {"readOnlyHint": true},
         },
         {
             "name": "open_recording",

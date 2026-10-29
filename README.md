@@ -43,6 +43,10 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    - Drag either edge of a cut to adjust it; the preview shows the frame
      under the edge. Click an edge, then **← →** move it a frame at a time
      (**⇧** for 10). Dragging an edge onto the cut's other edge removes it.
+   - *Cut pauses* finds every stretch of 2 seconds or more where the screen
+     stays still and nothing is heard, and cuts them all in one step. It
+     leaves a moment around what happens, and ignores a spinner or a clock
+     ticking on screen.
    - **Speed** (0.5×–2×) speeds up or slows down the whole video; speech
      keeps its pitch. The preview plays at that speed.
    - Drag, resize, reshape, mirror or hide the camera bubble. It starts where
@@ -96,6 +100,7 @@ visor cut 12 19.5                            # remove 0:12–0:19.5 (recorded ti
 visor trim 2 1:05                            # keep only 0:02–1:05
 visor restore                                # undo all cuts
 visor open                                   # open it in the editor
+visor dead-time                              # where nothing happens, to cut
 visor help                                   # every option
 ```
 

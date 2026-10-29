@@ -41,6 +41,8 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   trim START END              keep only START to END
   restore                     undo all cuts
   open                        open it in the editor
+  dead-time [--min SECONDS]   list stretches where the screen is still and
+                              nothing is heard (2 seconds or longer)
 
 Replies are JSON. Options left out keep what the recorder panel has.";
 
@@ -72,7 +74,7 @@ pub fn run(args: &[String]) -> Option<i32> {
             "open_editor": rest.iter().any(|a| a == "--open-editor"),
         }),
         "discard" => json!({"command": "discard_recording"}),
-        "cut" | "trim" | "restore" | "open" => match edit_args(first, rest) {
+        "cut" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
                 attach_console();
@@ -166,6 +168,7 @@ fn start_args(args: &[String]) -> Result<Value, String> {
 
 fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let command_name = match name {
+        "dead-time" => "find_dead_time",
         "cut" => "cut_recording",
         "trim" => "trim_recording",
         "restore" => "restore_recording",
@@ -177,6 +180,8 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     while let Some(arg) = args.next() {
         if arg == "--folder" {
             command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+        } else if arg == "--min" && name == "dead-time" {
+            command["min_seconds"] = seconds_arg(args.next().ok_or("--min needs a value")?)?.into();
         } else {
             times.push(seconds_arg(arg)?);
         }
@@ -220,12 +225,14 @@ pub fn call(command: &Value) -> Value {
         Err(ControlError::NotRunning) => match command["command"].as_str() {
             Some("start_recording" | "list_sources") => launch_and_call(command),
             // A fresh Visor knows no last recording: only a named one helps.
-            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording")
-                if command.get("folder").is_some() =>
-            {
-                launch_and_call(command)
-            }
-            Some("cut_recording" | "trim_recording" | "restore_recording" | "open_recording") => {
+            Some(
+                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
+                | "find_dead_time",
+            ) if command.get("folder").is_some() => launch_and_call(command),
+            Some(
+                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
+                | "find_dead_time",
+            ) => {
                 json!({
                     "ok": false,
                     "error": "Visor isn't running, so it has no last recording; say which with a folder.",
@@ -405,6 +412,11 @@ mod tests {
                 .display()
                 .to_string()
         );
+        assert_eq!(
+            edit_args("dead-time", &args("--min 1.5")).unwrap(),
+            json!({"command": "find_dead_time", "min_seconds": 1.5})
+        );
+        assert!(edit_args("cut", &args("--min 1 2 3")).is_err());
         assert!(edit_args("cut", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }
