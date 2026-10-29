@@ -54,7 +54,8 @@ fn exports_mp4_with_cuts_and_bubble() {
     let (dir, mut project) = project("export-mp4", 6);
     project.edit.cut(1_000_000, 2_000_000);
     project.edit.cut(3_500_000, 4_000_000);
-    project.markers = vec![marker(2_500_000, "Step 2")];
+    // A NUL, which C strings can't hold, is left out.
+    project.markers = vec![marker(2_500_000, "Step\0 2")];
     let out = dir.join("out.mp4");
     let mut last = 0.0;
     export(

@@ -19,7 +19,7 @@ use visor_core::{EditList, Micros, Project};
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::composite::Bubble;
 use crate::decode::{AudioReader, VideoReader, new_ref, reuse_or_alloc};
-use crate::tempo::{self, Tempo};
+use crate::tempo::Tempo;
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +135,7 @@ fn run(
         (!tracks.is_empty()).then(|| AudioMix::new(tracks))
     };
 
-    let speed = project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
+    let speed = project.speed();
     let total_frames =
         (u128::from(project.output_duration()) * u128::from(fps)).div_ceil(1_000_000) as u64;
     // Edit (cut-aware, before speed) time at the end of output frame `k`.
@@ -200,8 +200,13 @@ fn run(
     if let Some(jpeg) = cover {
         muxer.cover(jpeg)?;
     }
-    // Markers become chapters, which players list to jump between.
-    muxer.chapters(&project.chapters())?;
+    // Markers become chapters, which players list to jump between. The
+    // last one runs to the end of the last frame.
+    let mut chapters = project.chapters();
+    if let Some(last) = chapters.last_mut() {
+        last.end_us = last.end_us.max(total_frames * 1_000_000 / u64::from(fps));
+    }
+    muxer.chapters(&chapters)?;
     muxer.start()?;
     let segments = SampleMap::new(edit);
     let mut tempo = Tempo::with_filters(speed, &opts.audio.filters())?;
@@ -313,7 +318,7 @@ impl<'a> Renderer<'a> {
         let renderer = Self {
             edit: &project.edit,
             fps,
-            speed: project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED),
+            speed: project.speed(),
             screen: FrameCursor::new(screen_reader),
             camera,
             composed: frame::Video::empty(),
@@ -624,15 +629,18 @@ impl Muxer {
         Ok(())
     }
 
-    /// Adds chapters. Call before [`start`](Self::start).
+    /// Adds chapters. Call before [`start`](Self::start). MP4s keep them
+    /// as QuickTime does, in a text track of their own (disabled, so it
+    /// isn't shown as subtitles), and as Nero chapters.
     fn chapters(&mut self, chapters: &[visor_core::Chapter]) -> anyhow::Result<()> {
-        for (id, c) in chapters.iter().enumerate() {
+        for (id, c) in (1..).zip(chapters) {
             self.output.add_chapter(
-                id as i64,
+                id,
                 Rational(1, 1_000_000),
                 c.start_us as i64,
                 c.end_us as i64,
-                &c.title,
+                // FFmpeg takes C strings; a marker's text could hold a NUL.
+                c.title.replace('\0', ""),
             )?;
         }
         Ok(())

@@ -8,8 +8,7 @@ use ffmpeg_next::{ChannelLayout, filter, format::Sample, format::sample::Type, f
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 
 /// Playback speeds the project allows (and `atempo` handles in one stage).
-pub const MIN_SPEED: f64 = 0.5;
-pub const MAX_SPEED: f64 = 2.0;
+pub use visor_core::project::{MAX_SPEED, MIN_SPEED};
 
 pub struct Tempo {
     /// `None` at 1x: samples pass straight through.

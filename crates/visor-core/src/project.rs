@@ -119,6 +119,10 @@ pub struct Chapter {
 /// this close to the end starts none.
 const MIN_CHAPTER: Micros = 1_000_000;
 
+/// Playback speeds a project can have; others are taken as the nearest.
+pub const MIN_SPEED: f64 = 0.5;
+pub const MAX_SPEED: f64 = 2.0;
+
 fn speed_default() -> f64 {
     1.0
 }
@@ -157,13 +161,18 @@ impl Project {
 
     /// Length of the exported video: the kept time, sped up or slowed down.
     pub fn output_duration(&self) -> Micros {
-        (self.edit.duration() as f64 / self.speed.max(0.01)).round() as Micros
+        (self.edit.duration() as f64 / self.speed()).round() as Micros
+    }
+
+    /// The speed the video plays and exports at.
+    pub fn speed(&self) -> f64 {
+        self.speed.clamp(MIN_SPEED, MAX_SPEED)
     }
 
     /// Where source time `source` is in the export, after cuts and speed;
     /// inside a cut, where the video goes on.
     pub fn output_time(&self, source: Micros) -> Micros {
-        (self.edit.kept_before(source) as f64 / self.speed.max(0.01)).round() as Micros
+        (self.edit.kept_before(source) as f64 / self.speed()).round() as Micros
     }
 
     /// The exported video's chapters: one from each marker, in output time,
@@ -190,19 +199,12 @@ impl Project {
         if starts.len() < 2 {
             return Vec::new();
         }
-        let ends: Vec<Micros> = starts
-            .iter()
-            .skip(1)
-            .map(|&(t, _)| t)
-            .chain([end])
-            .collect();
         starts
             .iter()
-            .zip(ends)
             .enumerate()
-            .map(|(i, (&(start_us, title), end_us))| Chapter {
+            .map(|(i, &(start_us, title))| Chapter {
                 start_us,
-                end_us,
+                end_us: starts.get(i + 1).map_or(end, |&(t, _)| t),
                 title: match title {
                     "" => format!("Chapter {}", i + 1),
                     title => title.to_string(),
@@ -430,6 +432,10 @@ mod tests {
                 chapter(19.9, 25.0, "Chapter 4"),
             ]
         );
+        // A speed out of range plays (and exports) at the nearest allowed.
+        let chapters = p.chapters();
+        p.speed = 5.0;
+        assert_eq!(p.chapters(), chapters);
         // A first marker right at the start starts the video.
         p.markers[1].at_us = S;
         assert_eq!(p.chapters()[0], chapter(0.0, 15.0, "Open Safari"));

@@ -132,7 +132,7 @@ impl Player {
             .collect();
 
         let shared = Arc::new(Shared::default());
-        let speed = project.speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
+        let speed = project.speed();
         let clock = Arc::new(Mutex::new(Clock::paused(0, speed)));
         let edit = project.edit.clone();
 
