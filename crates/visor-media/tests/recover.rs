@@ -76,15 +76,19 @@ fn crash_during_a_still_screen_keeps_the_narration() {
     // Audio fragments end every half second: at most that is lost.
     assert!(secs >= 2.4, "recovered {secs:.2}s of 3s");
     assert!(project.tracks.mic.is_some());
-    // The frames were flushed, all but the few a hardware encoder holds
-    // back until more come (about 0.2 s on a Mac), and the last one holds
-    // to the end.
+    // Every frame was flushed, the last included: it is the picture that
+    // stays on screen, and it holds to the end.
     let mut reader = VideoReader::open(&dir.join("screen.mp4"), None).unwrap();
-    let mut frames = 0;
-    while reader.next_frame().unwrap().is_some() {
-        frames += 1;
+    let mut last = None;
+    while let Some((_, frame)) = reader.next_frame().unwrap() {
+        last = Some(common::mean_luma(&frame));
     }
-    assert!(frames >= 20, "{frames} of 30 frames");
+    let last = last.unwrap();
+    let want = f64::from(common::luma(29));
+    assert!(
+        (last - want).abs() < 3.0,
+        "last frame luma {last}, want {want}"
+    );
     let end = visor_media::export::frame_jpeg(&dir, &project, project.duration_us - 1, 360);
     assert!(end.is_ok_and(|jpeg| !jpeg.is_empty()));
     common::cleanup(&dir);

@@ -405,6 +405,12 @@ fn run_until_stopped<T, W>(
     flush: impl Fn(&mut W) -> anyhow::Result<()>,
     timestamp: impl Fn(&T) -> Micros,
 ) -> anyhow::Result<Micros> {
+    // Only a safety step: a failure leaves the track recording.
+    let flush_or_warn = |writer: &mut W| {
+        if let Err(e) = flush(writer) {
+            tracing::warn!("could not save a track's latest frames: {e:#}");
+        }
+    };
     let mut last_write = None;
     let stop_at = loop {
         select! {
@@ -417,7 +423,7 @@ fn run_until_stopped<T, W>(
                 // Source ended (e.g. camera unplugged): wait for the stop signal.
                 Err(_) => {
                     if last_write.take().is_some() {
-                        flush(writer)?;
+                        flush_or_warn(writer);
                     }
                     break stop_rx.recv().unwrap_or_else(|_| host_now());
                 }
@@ -426,7 +432,7 @@ fn run_until_stopped<T, W>(
             default(IDLE_FLUSH) => {}
         }
         if last_write.is_some_and(|t: Instant| t.elapsed() >= IDLE_FLUSH) {
-            flush(writer)?;
+            flush_or_warn(writer);
             last_write = None;
         }
     };

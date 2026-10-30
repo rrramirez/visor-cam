@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use ffmpeg_next::{
@@ -14,6 +15,11 @@ use crate::scale::Scaler;
 
 /// Encoder timestamps are in microseconds, matching [`Micros`].
 const MICROS: Rational = Rational(1, 1_000_000);
+
+/// At most how many copies of the last frame [`VideoWriter::flush`] sends,
+/// and how long it waits for the encoder to give that frame up.
+const MAX_COPIES: Micros = 16;
+const FLUSH_WAIT: Duration = Duration::from_millis(250);
 
 /// Hardware encoder first, software fallback second.
 const H264_ENCODERS: &[&str] = &[
@@ -38,6 +44,8 @@ pub struct VideoWriter {
     rgb: Option<Scaler>,
     stream_time_base: Rational,
     last_pts: Option<Micros>,
+    /// Timestamp of the last packet the encoder gave back.
+    last_out: Option<Micros>,
     /// Nominal frame duration. Only the final sample's length depends on it;
     /// MP4 derives the others from timestamp deltas.
     frame_duration: Micros,
@@ -84,6 +92,7 @@ impl VideoWriter {
                         rgb: None,
                         stream_time_base,
                         last_pts: None,
+                        last_out: None,
                         frame_duration: 1_000_000 / Micros::from(fps.max(1)),
                         encoder_name: name,
                     });
@@ -173,10 +182,30 @@ impl VideoWriter {
         self.drain()
     }
 
-    /// Writes out everything encoded so far, as when no frames have come
-    /// for a while, so a crash doesn't lose it.
+    /// Writes out every frame so far, as when no frames have come for a
+    /// while, so a crash doesn't lose them. On a still screen none come, and
+    /// a hardware encoder holds back its last few frames (about 0.2 s on a
+    /// Mac) until more do; the last is the picture that stays on screen. So
+    /// it gets copies of that frame, a microsecond apart just after it,
+    /// until it gives the frame up. Encoders without that delay get none.
     pub fn flush(&mut self) -> anyhow::Result<()> {
         self.drain()?;
+        if let Some(last) = self.last_pts {
+            let deadline = Instant::now() + FLUSH_WAIT;
+            let mut pts = last;
+            while self.last_out.is_none_or(|out| out < last) && Instant::now() < deadline {
+                if pts - last < MAX_COPIES {
+                    pts += 1;
+                    self.frame.set_pts(Some(pts as i64));
+                    self.frame.set_kind(picture::Type::None);
+                    self.encoder.send_frame(&self.frame)?;
+                    self.last_pts = Some(pts);
+                }
+                // Hardware encoders work in the background.
+                std::thread::sleep(Duration::from_millis(2));
+                self.drain()?;
+            }
+        }
         crate::track_file::flush(&mut self.output)
     }
 
@@ -200,6 +229,7 @@ impl VideoWriter {
     fn drain(&mut self) -> anyhow::Result<()> {
         let mut packet = Packet::empty();
         while self.encoder.receive_packet(&mut packet).is_ok() {
+            self.last_out = packet.pts().map(|pts| pts as Micros).max(self.last_out);
             packet.set_stream(0);
             packet.set_duration(self.frame_duration as i64);
             packet.rescale_ts(MICROS, self.stream_time_base);
