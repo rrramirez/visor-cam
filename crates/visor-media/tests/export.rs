@@ -384,3 +384,71 @@ fn audio_cleanup_keeps_length_and_sets_loudness() {
     );
     common::cleanup(&dir);
 }
+
+/// Spread of luma (standard deviation) in a frame's `(x0, y0, x1, y1)`.
+fn luma_spread(f: &ffmpeg::frame::Video, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> f64 {
+    let stride = f.stride(0);
+    let values: Vec<f64> = (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (y, x)))
+        .map(|(y, x)| f64::from(f.data(0)[y * stride + x]))
+        .collect();
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
+}
+
+#[test]
+fn blurred_areas_hide_detail_while_they_last() {
+    // A fine checkerboard, like small text, for two seconds.
+    let (w, h) = (640u32, 360u32);
+    let (dir, mut project) = checkerboard_project("export-blur", w, h, 2);
+    // The left half, for the second second.
+    project.blurs = vec![visor_core::Blur {
+        start_us: 1_000_000,
+        end_us: 2_000_000,
+        x: 0.0,
+        y: 0.0,
+        width: 0.5,
+        height: 1.0,
+    }];
+    let (left, right) = ((20, 20, 300, 340), (340, 20, 620, 340));
+    let at = |t| decode_jpeg(&visor_media::export::frame_jpeg(&dir, &project, t, h).unwrap());
+
+    let before = at(500_000);
+    assert!(
+        luma_spread(&before, left) > 40.0,
+        "{}",
+        luma_spread(&before, left)
+    );
+    let during = at(1_500_000);
+    assert!(
+        luma_spread(&during, left) < 8.0,
+        "{}",
+        luma_spread(&during, left)
+    );
+    assert!(luma_spread(&during, right) > 40.0, "the rest is untouched");
+
+    // The exported video is blurred the same way, from the second second.
+    let out = dir.join("out.mp4");
+    let opts = ExportOptions::new(ExportFormat::Mp4);
+    export(
+        &dir,
+        &project,
+        &out,
+        &opts,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut reader = VideoReader::open(&out, None).unwrap();
+    let mut spreads = Vec::new();
+    while let Some((t, f)) = reader.next_frame().unwrap() {
+        spreads.push((t, luma_spread(&f, left)));
+    }
+    assert!(
+        spreads
+            .iter()
+            .all(|&(t, s)| if t < 1_000_000 { s > 40.0 } else { s < 8.0 }),
+        "{spreads:?}"
+    );
+    cleanup(&dir);
+}

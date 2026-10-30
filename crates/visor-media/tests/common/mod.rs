@@ -107,6 +107,39 @@ pub fn project(name: &str, seconds: u64) -> (PathBuf, Project) {
     (dir, p)
 }
 
+/// A project folder with only a screen track of a fine checkerboard (4
+/// pixel squares, like small text), for `seconds`.
+pub fn checkerboard_project(name: &str, w: u32, h: u32, seconds: u64) -> (PathBuf, Project) {
+    let dir = temp_dir(name);
+    let mut frame = nv12(w, h, 0, 128);
+    let (wu, hu) = (w as usize, h as usize);
+    frame.planes[0].data = (0..wu * hu)
+        .map(|i| {
+            if (i % wu / 4 + i / wu / 4).is_multiple_of(2) {
+                40
+            } else {
+                200
+            }
+        })
+        .collect::<Vec<u8>>()
+        .into();
+    let frames = seconds * FPS;
+    let mut writer = VideoWriter::create(&dir.join("screen.mp4"), w, h, FPS as u32).unwrap();
+    for i in 0..frames {
+        writer.write(&frame, i * FRAME_US, false).unwrap();
+    }
+    writer.finish(frames * FRAME_US).unwrap();
+    let mut p = Project::new(name, "2026-10-30T00:00:00Z", frames * FRAME_US);
+    p.tracks.screen = Some(Track {
+        file: "screen.mp4".into(),
+        width: Some(w),
+        height: Some(h),
+        fps: Some(FPS as u32),
+    });
+    p.save(&dir).unwrap();
+    (dir, p)
+}
+
 /// Mean luma of a decoded frame's first plane.
 pub fn mean_luma(f: &ffmpeg_next::frame::Video) -> f64 {
     let (w, h, stride) = (f.width() as usize, f.height() as usize, f.stride(0));

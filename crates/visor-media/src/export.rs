@@ -269,11 +269,13 @@ const GIF_PALETTE_STEP: usize = 3;
 /// Produces composited output frames (YUV420P at output size).
 struct Renderer<'a> {
     edit: &'a EditList,
+    blurs: &'a [visor_core::Blur],
     fps: u32,
     speed: f64,
     screen: FrameCursor,
     camera: Option<(FrameCursor, Bubble)>,
-    /// Screen frame with the camera bubble on it; reused across frames.
+    /// Screen frame with blurs and the camera bubble on it; reused across
+    /// frames.
     composed: frame::Video,
 }
 
@@ -317,6 +319,7 @@ impl<'a> Renderer<'a> {
         };
         let renderer = Self {
             edit: &project.edit,
+            blurs: &project.blurs,
             fps,
             speed: project.speed(),
             screen: FrameCursor::new(screen_reader),
@@ -339,26 +342,29 @@ impl<'a> Renderer<'a> {
         Ok(frame)
     }
 
-    /// The composited frame shown at source time `t_src`.
+    /// The composited frame shown at source time `t_src`: blurred areas,
+    /// then the camera bubble on top.
     fn render_source(&mut self, t_src: Micros) -> anyhow::Result<&mut frame::Video> {
         let (_, screen) = self
             .screen
             .at(t_src)?
             .context("screen track has no frames")?;
-        // The screen frame is passed on as is unless a bubble goes on top;
-        // then it's copied, as the same frame may be shown again.
-        let frame = match &mut self.camera {
-            Some((cam, bubble)) => match cam.at(t_src)? {
-                Some((_, cam_frame)) => {
-                    copy_frame(&mut self.composed, screen);
-                    bubble.blend(&mut self.composed, cam_frame);
-                    &mut self.composed
-                }
-                None => screen,
-            },
-            None => screen,
+        let camera = match &mut self.camera {
+            Some((cam, bubble)) => cam.at(t_src)?.map(|(_, f)| (&*bubble, f)),
+            None => None,
         };
-        Ok(frame)
+        let blurs: Vec<_> = self.blurs.iter().filter(|b| b.covers(t_src)).collect();
+        // The screen frame is passed on as is if nothing goes on it; else
+        // it's copied, as the same frame may be shown again.
+        if camera.is_none() && blurs.is_empty() {
+            return Ok(screen);
+        }
+        copy_frame(&mut self.composed, screen);
+        crate::blur::blur_yuv420p(&mut self.composed, &blurs);
+        if let Some((bubble, cam_frame)) = camera {
+            bubble.blend(&mut self.composed, cam_frame);
+        }
+        Ok(&mut self.composed)
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {

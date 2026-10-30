@@ -19,7 +19,7 @@ use anyhow::Context;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ffmpeg_next::{format, frame, software::scaling};
-use visor_core::{EditList, Micros, Project};
+use visor_core::{Blur, EditList, Micros, Project};
 
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
@@ -63,6 +63,8 @@ enum Cmd {
     /// Source time and a sequence number reported back once rendered.
     Seek(Micros, u64),
     SetEdit(EditList),
+    /// Areas to blur; the frame shown is redrawn with them.
+    SetBlurs(Vec<Blur>),
     /// The clock already runs at the new speed; restart audio stretching.
     SetSpeed(f64),
 }
@@ -139,9 +141,10 @@ impl Player {
         let (video_tx, video_rx) = unbounded();
         {
             let (shared, clock, edit) = (shared.clone(), clock.clone(), edit.clone());
+            let blurs = project.blurs.clone();
             thread::Builder::new()
                 .name("visor-player-video".into())
-                .spawn(move || video_loop(screen, camera, edit, shared, clock, video_rx))?;
+                .spawn(move || video_loop(screen, camera, edit, blurs, shared, clock, video_rx))?;
         }
         let audio_tx = if audio_paths.is_empty() {
             None
@@ -243,6 +246,11 @@ impl Player {
         self.seek(pos);
     }
 
+    /// Blurs these areas from now on, redrawing the frame shown.
+    pub fn set_blurs(&mut self, blurs: Vec<Blur>) {
+        self.send(Cmd::SetBlurs(blurs));
+    }
+
     /// Plays at `speed` (0.5–2.0) from now on, audio pitch unchanged.
     pub fn set_speed(&mut self, speed: f64) {
         let speed = speed.clamp(tempo::MIN_SPEED, tempo::MAX_SPEED);
@@ -288,13 +296,17 @@ impl Player {
 
     fn send(&self, cmd: Cmd) {
         if let Some(tx) = &self.audio_tx {
-            let _ = tx.send(match &cmd {
-                Cmd::Play => Cmd::Play,
-                Cmd::Pause => Cmd::Pause,
-                Cmd::Seek(t, seq) => Cmd::Seek(*t, *seq),
-                Cmd::SetEdit(e) => Cmd::SetEdit(e.clone()),
-                Cmd::SetSpeed(s) => Cmd::SetSpeed(*s),
-            });
+            let audio = match &cmd {
+                Cmd::Play => Some(Cmd::Play),
+                Cmd::Pause => Some(Cmd::Pause),
+                Cmd::Seek(t, seq) => Some(Cmd::Seek(*t, *seq)),
+                Cmd::SetEdit(e) => Some(Cmd::SetEdit(e.clone())),
+                Cmd::SetSpeed(s) => Some(Cmd::SetSpeed(*s)),
+                Cmd::SetBlurs(_) => None,
+            };
+            if let Some(cmd) = audio {
+                let _ = tx.send(cmd);
+            }
         }
         let _ = self.video_tx.send(cmd);
     }
@@ -368,6 +380,7 @@ fn video_loop(
     mut screen: FrameCursor,
     mut camera: Option<FrameCursor>,
     mut edit: EditList,
+    mut blurs: Vec<Blur>,
     shared: Arc<Shared>,
     clock: Arc<Mutex<Clock>>,
     rx: Receiver<Cmd>,
@@ -375,8 +388,10 @@ fn video_loop(
     let mut playing = false;
     let mut pending_render: Option<Micros> = None;
     let mut pending_seq = 0;
-    // Source times of the frames last published, to publish only changes.
-    let mut shown_screen = None;
+    // Source times of the frames last published, to publish only changes;
+    // for the screen, with the blurs drawn on it, which a still screen's
+    // frame can gain or lose while it stays up.
+    let mut shown_screen: Option<(Micros, Vec<usize>)> = None;
     let mut shown_camera = None;
     loop {
         // Block while idle; poll while playing.
@@ -414,6 +429,13 @@ fn video_loop(
                     pending_seq = seq;
                 }
                 Cmd::SetEdit(e) => edit = e,
+                Cmd::SetBlurs(b) => {
+                    blurs = b;
+                    shown_screen = None;
+                    if !playing {
+                        pending_render = Some(shared.position.load(Ordering::Relaxed));
+                    }
+                }
                 // The Player rebased the shared clock already.
                 Cmd::SetSpeed(_) => {}
             }
@@ -442,11 +464,21 @@ fn video_loop(
         shared.position.store(target, Ordering::Relaxed);
 
         let mut changed = false;
+        // Blurred by the time shown, as the export is, not the frame's.
+        let active: Vec<usize> = (0..blurs.len())
+            .filter(|&i| blurs[i].covers(target))
+            .collect();
         match screen.at(target) {
-            Ok(Some((pts, f))) if shown_screen != Some(pts) => {
-                let frame = Arc::new(PreviewFrame::from_frame(f));
-                *shared.screen.lock().unwrap() = Some(frame);
-                shown_screen = Some(pts);
+            Ok(Some((pts, f)))
+                if shown_screen
+                    .as_ref()
+                    .is_none_or(|(p, a)| *p != pts || *a != active) =>
+            {
+                let mut frame = PreviewFrame::from_frame(f);
+                let on: Vec<&Blur> = active.iter().map(|&i| &blurs[i]).collect();
+                crate::blur::blur_rgba(&mut frame.rgba, frame.width, frame.height, &on);
+                *shared.screen.lock().unwrap() = Some(Arc::new(frame));
+                shown_screen = Some((pts, active));
                 changed = true;
             }
             Ok(_) => {}
@@ -552,6 +584,8 @@ fn audio_loop(
                 cursor = micros_to_samples(clock.lock().unwrap().now());
                 tempo = Tempo::new(speed)?;
             }
+            // Only video draws them.
+            Some(Cmd::SetBlurs(_)) => {}
             Some(Cmd::SetEdit(e)) => {
                 edit = e;
                 map = SampleMap::new(&edit);

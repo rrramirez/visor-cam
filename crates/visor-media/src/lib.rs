@@ -2,6 +2,7 @@
 //! FFmpeg.
 
 mod audio_writer;
+mod blur;
 pub mod composite;
 pub mod dead_time;
 pub mod decode;

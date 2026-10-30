@@ -44,6 +44,12 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
    - **Markers**: *Add marker* (**M**) marks the playhead. Name each one in
      the sidebar, click its time to jump there, or delete it.
+   - **Blur**: *Blur an area* (**B**) hides part of the screen, like a
+     password or an email address, during the selection (or the whole video
+     without one). Drag its box on the video to place it and its corners to
+     resize it; click a blur in the sidebar to show its box again, or make
+     it cover the current selection instead. It's heavy enough that text
+     under it can't be read, and the camera bubble stays on top.
    - Drag either edge of a cut to adjust it; the preview shows the frame
      under the edge. Click an edge, then **← →** move it a frame at a time
      (**⇧** for 10). Dragging an edge onto the cut's other edge removes it.

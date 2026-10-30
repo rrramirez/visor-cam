@@ -121,3 +121,41 @@ fn plays_at_the_project_speed() {
     );
     common::cleanup(&dir);
 }
+
+/// Spread (standard deviation) of red across a preview frame.
+fn red_spread(f: &PreviewFrame) -> f64 {
+    let reds: Vec<f64> = f
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| f64::from(p[0]))
+        .collect();
+    let mean = reds.iter().sum::<f64>() / reds.len() as f64;
+    (reds.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / reds.len() as f64).sqrt()
+}
+
+#[test]
+fn preview_shows_blurs_and_their_changes() {
+    let (dir, mut project) = checkerboard_project("player-blur", 640, 360, 2);
+    let whole = visor_core::Blur {
+        start_us: 0,
+        end_us: project.duration_us,
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+    project.blurs = vec![whole.clone()];
+    let mut player = Player::open(&dir, &project, (640, 360), 120).unwrap();
+    let blurred = wait_frame(&mut player);
+    assert!(red_spread(&blurred) < 10.0, "{}", red_spread(&blurred));
+
+    // The same frame, redrawn without the blur, then with it again.
+    player.set_blurs(Vec::new());
+    let sharp = wait_frame(&mut player);
+    assert!(red_spread(&sharp) > 50.0, "{}", red_spread(&sharp));
+    player.set_blurs(vec![whole]);
+    assert!(red_spread(&wait_frame(&mut player)) < 10.0);
+    cleanup(&dir);
+}

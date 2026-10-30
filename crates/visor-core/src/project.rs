@@ -96,6 +96,44 @@ pub struct Project {
     /// Points of interest noted while recording, in source time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// Areas of the screen hidden under a blur, e.g. a password.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blurs: Vec<Blur>,
+}
+
+/// An area of the screen blurred for a stretch of the recording. The area
+/// is normalized to the screen frame (0.0–1.0), like the camera bubble;
+/// the camera bubble goes on top of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Blur {
+    /// Source time it starts, and where it ends (exclusive).
+    pub start_us: Micros,
+    pub end_us: Micros,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Blur {
+    /// Whether it blurs the frame shown at source time `t`.
+    pub fn covers(&self, t: Micros) -> bool {
+        (self.start_us..self.end_us).contains(&t)
+    }
+
+    /// The area in a `width` x `height` frame as pixel edges `(x0, y0, x1,
+    /// y1)`, kept inside the frame (`project.json` may say anything), or
+    /// `None` if nothing of it is left.
+    pub fn pixels(&self, width: u32, height: u32) -> Option<(usize, usize, usize, usize)> {
+        let edge = |v: f64, size: u32| {
+            let v = if v.is_finite() { v } else { 0.0 };
+            (v.clamp(0.0, 1.0) * f64::from(size)).round() as usize
+        };
+        let (x0, y0) = (edge(self.x, width), edge(self.y, height));
+        let x1 = edge(self.x + self.width, width);
+        let y1 = edge(self.y + self.height, height);
+        (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+    }
 }
 
 /// A note at a moment of the recording, e.g. "Step 2: open settings".
@@ -157,6 +195,7 @@ impl Project {
             speed: 1.0,
             thumbnail_us: None,
             markers: Vec::new(),
+            blurs: Vec::new(),
         }
     }
 

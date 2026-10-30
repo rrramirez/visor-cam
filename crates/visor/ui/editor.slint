@@ -17,6 +17,13 @@ export struct MarkerMark {
     label: string,
 }
 
+// A blurred area: its stretch on the timeline, and when it is in the video.
+export struct BlurRow {
+    start: float,
+    end: float,
+    time: string,
+}
+
 export struct Thumb {
     image: image,
     start: float,
@@ -146,6 +153,7 @@ export component Editor inherits Window {
     in-out property <bool> speed-open: true;
     in-out property <bool> thumbnail-open: true;
     in-out property <bool> markers-open: true;
+    in-out property <bool> blur-open: true;
     // The marker whose name field takes the keyboard when it shows up.
     in-out property <int> focus-marker: -1;
     // The marker add-marker() just added.
@@ -194,11 +202,42 @@ export component Editor inherits Window {
         }
         keys.focus();
     }
+    // Moves the corner of the picked blur's box on that side to the
+    // pointer (normalized), keeping the opposite corner where it is.
+    function resize-blur(right: bool, bottom: bool, px: float, py: float) {
+        if (right) {
+            root.blur-w = max(root.min-blur, min(1 - root.blur-x, px - root.blur-x));
+        } else {
+            let r = root.blur-x + root.blur-w;
+            let left = max(0, min(r - root.min-blur, px));
+            root.blur-x = left;
+            root.blur-w = r - left;
+        }
+        if (bottom) {
+            root.blur-h = max(root.min-blur, min(1 - root.blur-y, py - root.blur-y));
+        } else {
+            let b = root.blur-y + root.blur-h;
+            let top = max(0, min(b - root.min-blur, py));
+            root.blur-y = top;
+            root.blur-h = b - top;
+        }
+        root.blur-moved(false);
+    }
+
     function cancel-edge() {
         root.drag-cut = -1;
         root.drag-ended();
     }
     in property <[MarkerMark]> markers;
+    in property <[BlurRow]> blurs;
+    // The blur whose box shows on the video, to move and resize, or -1;
+    // and its area, normalized to the frame, as it is dragged.
+    in-out property <int> picked-blur: -1;
+    in-out property <float> blur-x;
+    in-out property <float> blur-y;
+    in-out property <float> blur-w;
+    in-out property <float> blur-h;
+    property <float> min-blur: 0.02;
     in-out property <float> sel-start: -1;
     in-out property <float> sel-end: -1;
     property <bool> has-selection: sel-start >= 0 && sel-end > sel-start;
@@ -243,6 +282,12 @@ export component Editor inherits Window {
     callback add-marker();
     callback rename-marker(int, string);
     callback delete-marker(int);
+    callback add-blur();
+    callback pick-blur(int);
+    callback delete-blur(int);
+    callback blur-to-selection(int);
+    // The picked blur's box moved; true once let go.
+    callback blur-moved(bool);
     in property <bool> finding-pauses;
     callback restore();
     callback undo();
@@ -290,6 +335,10 @@ export component Editor inherits Window {
                 }
                 return accept;
             }
+            if (event.text == "b" && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
+                if (!event.repeat) { root.add-blur(); }
+                return accept;
+            }
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
             if (event.text == Key.LeftArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
             if (event.text == Key.RightArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
@@ -300,6 +349,10 @@ export component Editor inherits Window {
                 return accept;
             }
             if (root.export-card) { return reject; }
+            if (event.text == Key.Escape && root.picked-blur >= 0) {
+                root.pick-blur(-1);
+                return accept;
+            }
             if (event.text == Key.Escape && root.active-edge >= 0) {
                 root.active-edge = -1;
                 return accept;
@@ -406,6 +459,52 @@ export component Editor inherits Window {
                             }
                             pointer-event(event) => {
                                 if (event.kind == PointerEventKind.up) { root.bubble-changed(); }
+                            }
+                        }
+                    }
+
+                    // The picked blur: drag it to move it, or a corner to
+                    // resize it. Hidden while playing.
+                    if root.picked-blur >= 0 && !root.playing: blur-box := Rectangle {
+                        x: parent.width * root.blur-x;
+                        y: parent.height * root.blur-y;
+                        width: parent.width * root.blur-w;
+                        height: parent.height * root.blur-h;
+                        border-width: 2px;
+                        border-color: Theme.warning;
+                        TouchArea {
+                            mouse-cursor: move;
+                            moved => {
+                                root.blur-x = max(0, min(1 - root.blur-w,
+                                    (blur-box.x + self.mouse-x - self.pressed-x) / frame.width));
+                                root.blur-y = max(0, min(1 - root.blur-h,
+                                    (blur-box.y + self.mouse-y - self.pressed-y) / frame.height));
+                                root.blur-moved(false);
+                            }
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.up) { root.blur-moved(true); }
+                            }
+                        }
+                        for corner in [0, 1, 2, 3]: Rectangle {
+                            property <bool> right: corner == 1 || corner == 3;
+                            property <bool> bottom: corner >= 2;
+                            x: (self.right ? parent.width : 0) - self.width / 2;
+                            y: (self.bottom ? parent.height : 0) - self.height / 2;
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 2px;
+                            background: Theme.warning;
+                            TouchArea {
+                                mouse-cursor: parent.right == parent.bottom ? nwse-resize : nesw-resize;
+                                moved => {
+                                    // Where the corner's centre goes, in the frame.
+                                    root.resize-blur(parent.right, parent.bottom,
+                                        (blur-box.x + parent.x + self.mouse-x - self.pressed-x + parent.width / 2) / frame.width,
+                                        (blur-box.y + parent.y + self.mouse-y - self.pressed-y + parent.height / 2) / frame.height);
+                                }
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up) { root.blur-moved(true); }
+                                }
                             }
                         }
                     }
@@ -554,6 +653,60 @@ export component Editor inherits Window {
                                 }
                                 Text {
                                     text: "Marks a step: MP4 and WebM exports get a chapter at each one, named after it.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            CollapsibleSection {
+                                title: "BLUR";
+                                open <=> root.blur-open;
+                                toggled => { root.sections-changed(); }
+                                SideButton {
+                                    text: "Blur an area"; icon: Icons.blur; shortcut: "B";
+                                    clicked => { root.add-blur(); keys.focus(); }
+                                }
+                                for b[i] in root.blurs: HorizontalLayout {
+                                    spacing: 6px;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        border-radius: Theme.radius-small;
+                                        background: root.picked-blur == i ? Theme.surface-3
+                                            : blur-touch.has-hover ? Theme.surface-2 : transparent;
+                                        border-width: root.picked-blur == i ? 1px : 0;
+                                        border-color: Theme.warning;
+                                        Text {
+                                            x: 8px;
+                                            text: b.time;
+                                            color: Theme.text;
+                                            font-size: Theme.font-small;
+                                            vertical-alignment: center;
+                                        }
+                                        blur-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.pick-blur(i); keys.focus(); }
+                                        }
+                                    }
+                                    IconButton {
+                                        size: 30px;
+                                        icon: Icons.trim;
+                                        tint: Theme.muted;
+                                        enabled: root.has-selection;
+                                        tooltip: "Blur during the selection instead";
+                                        clicked => { root.blur-to-selection(i); keys.focus(); }
+                                    }
+                                    IconButton {
+                                        size: 30px;
+                                        icon: Icons.trash;
+                                        tint: Theme.muted;
+                                        tooltip: "Delete blur";
+                                        clicked => { root.delete-blur(i); keys.focus(); }
+                                    }
+                                }
+                                Text {
+                                    text: "Hides part of the screen, like a password. Covers the selection, or the whole video without one. Drag the box on the video to place it.";
                                     color: Theme.faint;
                                     font-size: Theme.font-small;
                                     wrap: word-wrap;
@@ -836,6 +989,16 @@ export component Editor inherits Window {
                         font-size: Theme.font-small;
                         visible: parent.width > 40px;
                     }
+                }
+
+                // Blurred stretches: bands along the bottom, stacked so
+                // overlapping ones show.
+                for b[i] in root.blurs: Rectangle {
+                    x: b.start * track.width;
+                    y: track.height - 5px - mod(i, 3) * 7px;
+                    width: max(2px, (b.end - b.start) * track.width);
+                    height: 5px;
+                    background: root.picked-blur == i ? Theme.warning : Theme.warning.transparentize(50%);
                 }
 
                 if root.has-selection: Rectangle {

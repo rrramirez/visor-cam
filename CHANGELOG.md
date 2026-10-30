@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Blur an area:** hide a password, an email address or a notification. Press **B** or *Blur an area* in the editor, then drag the box over what to hide and resize it from its corners. It covers the part you selected on the timeline, or the whole video. Exports, the thumbnail and what agents see are all blurred, and the text underneath can't be read.
+
 ## 0.7.0
 
 ### Fixed
