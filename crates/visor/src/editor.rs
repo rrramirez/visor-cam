@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{EditList, Marker, Micros, Project};
+use visor_core::{Blur, EditList, Marker, Micros, Project};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
@@ -18,7 +18,7 @@ use visor_media::{ExportFormat, ExportOptions};
 use crate::app::app;
 use crate::platform;
 use crate::util;
-use crate::{Editor, MarkerMark, Region, Thumb};
+use crate::{BlurRow, Editor, MarkerMark, Region, Thumb};
 
 const THUMBNAILS: usize = 24;
 const WAVE_BUCKETS: usize = 600;
@@ -43,6 +43,8 @@ pub struct EditorWindow {
     /// The edit after the last nudge of a cut's edge, and that edge, so
     /// the nudges that follow join its step to undo.
     nudged: RefCell<Option<(EditList, bool, Micros)>>,
+    /// The blurs after the last nudge of a blur's edge, likewise.
+    blur_nudged: RefCell<Option<Vec<Blur>>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -50,10 +52,12 @@ pub struct EditorWindow {
     pauses_cancel: RefCell<Option<Arc<AtomicBool>>>,
 }
 
-/// A step to undo or redo: the edit, or the markers, as they were.
+/// A step to undo or redo: the edit, the markers or the blurs, as they
+/// were.
 enum Step {
     Edit(EditList),
     Markers(Vec<Marker>),
+    Blurs(Vec<Blur>),
 }
 
 /// Counts running background jobs; each holds a [`JobGuard`].
@@ -119,6 +123,7 @@ impl EditorWindow {
             ui.set_speed_open(open("speed"));
             ui.set_thumbnail_open(open("thumbnail"));
             ui.set_markers_open(open("markers"));
+            ui.set_blur_open(open("blur"));
         }
         {
             let app = app();
@@ -153,6 +158,7 @@ impl EditorWindow {
                 idle_ticks: Cell::new(0),
                 save_error: RefCell::default(),
                 nudged: RefCell::default(),
+                blur_nudged: RefCell::default(),
                 jobs: Jobs::default(),
                 pauses_cancel: RefCell::default(),
             }
@@ -296,6 +302,7 @@ impl EditorWindow {
                 ("speed", e.ui.get_speed_open()),
                 ("thumbnail", e.ui.get_thumbnail_open()),
                 ("markers", e.ui.get_markers_open()),
+                ("blur", e.ui.get_blur_open()),
             ]
             .into_iter()
             .filter(|(_, open)| !open)
@@ -320,6 +327,32 @@ impl EditorWindow {
         on!(on_rename_marker, |e, i, text| e
             .rename_marker(i as usize, &text));
         on!(on_delete_marker, |e, i| e.delete_marker(i as usize));
+        on!(on_add_blur, |e| e.add_blur());
+        on!(on_pick_blur, |e, i| e.pick_blur(i));
+        on!(on_delete_blur, |e, i| e.delete_blur(i as usize));
+        on!(on_blur_to_selection, |e, i| e.blur_to_selection(i as usize));
+        on!(on_blur_moved, |e, done| e.blur_moved(done));
+        on!(on_blur_edge_dragged, |e, end, f| {
+            if let Some((blurs, shown)) = e.blur_edge_moved(end, e.nearest_frame(f)) {
+                e.control().set_blurs(blurs);
+                e.control().preview(shown);
+            }
+        });
+        on!(on_blur_edge_moved, |e, end, f| {
+            e.move_blur_edge(end, e.nearest_frame(f), false);
+        });
+        on!(on_show_blur_edge, |e, end| e.show_blur_edge(end));
+        on!(on_nudge_blur_edge, |e, frames, repeat| {
+            let Some(at) = e.picked_blur_edge(e.ui.get_blur_edge() == 1) else {
+                return;
+            };
+            let end = e.ui.get_blur_edge() == 1;
+            // Held down, the nudges of one edge are one step to undo.
+            let again =
+                repeat && e.blur_nudged.borrow().as_ref() == Some(&e.project.borrow().blurs);
+            e.move_blur_edge(end, e.frames_from(at, frames), again);
+            *e.blur_nudged.borrow_mut() = Some(e.project.borrow().blurs.clone());
+        });
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
             if !title.is_empty() {
@@ -470,6 +503,183 @@ impl EditorWindow {
             row.text = typed.into();
             rows.set_row_data(index, row);
         }
+    }
+
+    /// Blurs an area during the selection, or the whole video without one,
+    /// and shows its box to place it.
+    fn add_blur(&self) {
+        let duration = self.project.borrow().duration_us;
+        let (start_us, end_us) = self.selection().unwrap_or((0, duration));
+        let index = self.project.borrow().blurs.len();
+        self.change_blurs(|blurs| {
+            blurs.push(Blur {
+                start_us,
+                end_us,
+                x: 0.35,
+                y: 0.4,
+                width: 0.3,
+                height: 0.2,
+            });
+        });
+        self.ui.set_blur_open(true);
+        self.pick_blur(index as i32);
+    }
+
+    /// Shows a blur's box on the video, at a moment it covers, to move and
+    /// resize it; -1 hides it.
+    fn pick_blur(&self, index: i32) {
+        let blur = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.project.borrow().blurs.get(i).cloned());
+        self.ui.set_blur_edge(-1);
+        let Some(blur) = blur else {
+            self.ui.set_picked_blur(-1);
+            return;
+        };
+        self.ui.set_picked_blur(index);
+        self.show_blur_box(&blur);
+        if !blur.covers(self.player.borrow().position()) {
+            self.control().seek(blur.start_us);
+        }
+    }
+
+    fn show_blur_box(&self, blur: &Blur) {
+        self.ui.set_blur_x(blur.x as f32);
+        self.ui.set_blur_y(blur.y as f32);
+        self.ui.set_blur_w(blur.width as f32);
+        self.ui.set_blur_h(blur.height as f32);
+    }
+
+    fn delete_blur(&self, index: usize) {
+        if index >= self.project.borrow().blurs.len() {
+            return;
+        }
+        let picked = self.ui.get_picked_blur();
+        self.ui.set_picked_blur(match usize::try_from(picked) {
+            Ok(p) if p == index => -1,
+            Ok(p) if p > index => picked - 1,
+            _ => picked,
+        });
+        self.change_blurs(|blurs| {
+            blurs.remove(index);
+        });
+    }
+
+    /// Makes a blur cover the selection instead.
+    fn blur_to_selection(&self, index: usize) {
+        let Some((start, end)) = self.selection() else {
+            return;
+        };
+        if index < self.project.borrow().blurs.len() {
+            self.change_blurs(|blurs| {
+                blurs[index].start_us = start;
+                blurs[index].end_us = end;
+            });
+        }
+    }
+
+    /// The picked blur's box moved: the preview follows as it's dragged,
+    /// and letting go makes it a step to undo.
+    fn blur_moved(&self, done: bool) {
+        let Ok(index) = usize::try_from(self.ui.get_picked_blur()) else {
+            return;
+        };
+        let mut blurs = self.project.borrow().blurs.clone();
+        let Some(blur) = blurs.get_mut(index) else {
+            return;
+        };
+        // Only what moved: the box comes back from the UI less precise, and
+        // a click that moves nothing shouldn't be a step to undo.
+        let set = |v: &mut f64, ui: f32| {
+            if *v as f32 != ui {
+                *v = f64::from(ui);
+            }
+        };
+        set(&mut blur.x, self.ui.get_blur_x());
+        set(&mut blur.y, self.ui.get_blur_y());
+        set(&mut blur.width, self.ui.get_blur_w());
+        set(&mut blur.height, self.ui.get_blur_h());
+        if done {
+            self.change_blurs(|all| *all = blurs);
+        } else {
+            self.control().set_blurs(blurs);
+        }
+    }
+
+    /// Where the picked blur's start (or `end`) is.
+    fn picked_blur_edge(&self, end: bool) -> Option<Micros> {
+        let index = usize::try_from(self.ui.get_picked_blur()).ok()?;
+        let project = self.project.borrow();
+        let blur = project.blurs.get(index)?;
+        Some(if end { blur.end_us } else { blur.start_us })
+    }
+
+    /// The blurs with the picked one's start (or `end`) moved to `t`,
+    /// keeping it a frame long at least, and the frame to show for that
+    /// edge: the first or the last it blurs (the one up just before it
+    /// ends; see `Blur::covers_frame`).
+    fn blur_edge_moved(&self, end: bool, t: Micros) -> Option<(Vec<Blur>, Micros)> {
+        let index = usize::try_from(self.ui.get_picked_blur()).ok()?;
+        let mut blurs = self.project.borrow().blurs.clone();
+        let d = self.duration();
+        let blur = blurs.get_mut(index)?;
+        let shown = if end {
+            blur.end_us = t.max(self.frames_from(blur.start_us, 1)).min(d);
+            blur.end_us.saturating_sub(1).max(blur.start_us)
+        } else {
+            blur.start_us = t.min(self.frames_from(blur.end_us, -1));
+            blur.start_us
+        };
+        Some((blurs, shown))
+    }
+
+    /// Moves the picked blur's start (or `end`) to `t` and shows the frame
+    /// by it (see `blur_edge_moved`). `merge` makes it part of the last
+    /// step to undo.
+    fn move_blur_edge(&self, end: bool, t: Micros, merge: bool) {
+        let Some((blurs, shown)) = self.blur_edge_moved(end, t) else {
+            return;
+        };
+        let steps = self.undo.borrow().len();
+        // Unchanged, after a drag's preview of another place: as it was.
+        self.control().set_blurs(blurs.clone());
+        self.change_blurs(|all| *all = blurs);
+        if merge && self.undo.borrow().len() > steps {
+            self.undo.borrow_mut().pop();
+        }
+        self.control().preview(shown);
+    }
+
+    /// Shows the frame by the picked blur's start (or `end`) as it is.
+    fn show_blur_edge(&self, end: bool) {
+        let Some(at) = self.picked_blur_edge(end) else {
+            return;
+        };
+        if let Some((_, shown)) = self.blur_edge_moved(end, at) {
+            self.control()
+                .set_blurs(self.project.borrow().blurs.clone());
+            self.control().preview(shown);
+        }
+    }
+
+    /// Changes the blurs as one step to undo.
+    fn change_blurs(&self, change: impl FnOnce(&mut Vec<Blur>)) {
+        let before = self.project.borrow().blurs.clone();
+        let mut after = before.clone();
+        change(&mut after);
+        if after == before {
+            return;
+        }
+        self.undo.borrow_mut().push(Step::Blurs(before));
+        self.redo.borrow_mut().clear();
+        self.set_blurs(after);
+    }
+
+    fn set_blurs(&self, blurs: Vec<Blur>) {
+        self.project.borrow_mut().blurs = blurs.clone();
+        self.control().set_blurs(blurs);
+        self.save();
+        self.refresh_edit_ui();
     }
 
     fn position_fraction(&self) -> f32 {
@@ -689,6 +899,21 @@ impl EditorWindow {
                 self.save();
                 self.refresh_edit_ui();
             }
+            Step::Blurs(blurs) => {
+                let now = self.project.borrow().blurs.clone();
+                // A blur added or deleted renumbers the others: keep the
+                // picked one picked, if it's still there as it was.
+                if blurs.len() != now.len() {
+                    let picked = usize::try_from(self.ui.get_picked_blur())
+                        .ok()
+                        .and_then(|i| now.get(i))
+                        .and_then(|p| blurs.iter().position(|b| b == p));
+                    self.ui.set_picked_blur(picked.map_or(-1, |i| i as i32));
+                    self.ui.set_blur_edge(-1);
+                }
+                to.borrow_mut().push(Step::Blurs(now));
+                self.set_blurs(blurs);
+            }
         }
     }
 
@@ -753,6 +978,24 @@ impl EditorWindow {
                 }
             }
             _ => self.ui.set_markers(ModelRc::new(VecModel::from(markers))),
+        }
+        // Blurs, and the picked one's box where it now is.
+        let blurs: Vec<BlurRow> = project
+            .blurs
+            .iter()
+            .map(|b| BlurRow {
+                start: (b.start_us as f64 / d).clamp(0.0, 1.0) as f32,
+                end: (b.end_us as f64 / d).clamp(0.0, 1.0) as f32,
+                time: blur_label(&project, b).into(),
+            })
+            .collect();
+        self.ui.set_blurs(ModelRc::new(VecModel::from(blurs)));
+        match usize::try_from(self.ui.get_picked_blur()) {
+            Ok(i) if i < project.blurs.len() => self.show_blur_box(&project.blurs[i]),
+            _ => {
+                self.ui.set_picked_blur(-1);
+                self.ui.set_blur_edge(-1);
+            }
         }
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());
@@ -1176,6 +1419,26 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
     path
 }
 
+/// When a blur is in the video: the whole of it, a stretch in the video's
+/// time (after cuts and speed), or nothing if that was cut.
+fn blur_label(project: &Project, blur: &Blur) -> String {
+    let (start, end) = (
+        project.output_time(blur.start_us),
+        project.output_time(blur.end_us),
+    );
+    if blur.start_us == 0 && blur.end_us >= project.duration_us {
+        "Whole video".to_string()
+    } else if end <= start {
+        "Cut from the video".to_string()
+    } else {
+        format!(
+            "{} – {}",
+            util::clock_tenths(start),
+            util::clock_tenths(end)
+        )
+    }
+}
+
 /// A marker as the timeline shows it: its time, and its text if any.
 fn marker_label(time: &str, text: &str) -> String {
     match text.trim() {
@@ -1187,6 +1450,31 @@ fn marker_label(time: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blurs_are_labelled_with_their_time_in_the_video() {
+        let mut project = Project::new("Demo", "2026-10-30T00:00:00Z", 20_000_000);
+        let blur = |start_us, end_us| Blur {
+            start_us,
+            end_us,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        assert_eq!(blur_label(&project, &blur(0, 20_000_000)), "Whole video");
+        // After cuts and speed, as the clock under the video shows it.
+        project.edit.cut(0, 2_000_000);
+        project.speed = 2.0;
+        assert_eq!(
+            blur_label(&project, &blur(4_000_000, 8_000_000)),
+            "0:01.0 – 0:03.0"
+        );
+        assert_eq!(
+            blur_label(&project, &blur(500_000, 1_500_000)),
+            "Cut from the video"
+        );
+    }
 
     #[test]
     fn thumbnails_snap_to_kept_frames() {
