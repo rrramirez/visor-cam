@@ -92,30 +92,33 @@ pub fn recover(dir: &Path) -> anyhow::Result<Project> {
             .or(Some(30)),
         ..video_track(SCREEN_FILE, &screen)
     });
-    project.tracks.camera = probe(&dir.join(CAMERA_FILE))
+    let camera = probe(&dir.join(CAMERA_FILE))
         .ok()
-        .filter(|i| i.duration > 0)
-        .map(|i| video_track(CAMERA_FILE, &i));
-    let audio_track = |file: &str| {
-        probe(&dir.join(file))
-            .ok()
-            .filter(|i| i.duration > 0)
-            .map(|_| Track {
-                file: file.into(),
-                width: None,
-                height: None,
-                fps: None,
-            })
+        .filter(|i| i.duration > 0);
+    project.tracks.camera = camera.as_ref().map(|i| video_track(CAMERA_FILE, i));
+    // The longest track sets the length: with a still screen, capture
+    // delivers no frames while narration goes on, and export holds the
+    // last frame, as it does for any finished recording.
+    let mut duration = screen.duration.max(camera.map_or(0, |i| i.duration));
+    let mut audio_track = |file: &str| {
+        let info = probe(&dir.join(file)).ok().filter(|i| i.duration > 0)?;
+        duration = duration.max(info.duration);
+        Some(Track {
+            file: file.into(),
+            width: None,
+            height: None,
+            fps: None,
+        })
     };
     project.tracks.mic = audio_track(MIC_FILE);
     project.tracks.system = audio_track(SYSTEM_FILE);
 
-    project.duration_us = screen.duration;
-    project.edit = EditList::full(screen.duration);
+    project.duration_us = duration;
+    project.edit = EditList::full(duration);
     project.save(dir)?;
     tracing::info!(
         dir = %dir.display(),
-        duration_ms = screen.duration / 1000,
+        duration_ms = duration / 1000,
         "recovered an interrupted recording"
     );
     Ok(project)

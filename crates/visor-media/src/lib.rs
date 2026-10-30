@@ -13,6 +13,7 @@ mod resample;
 mod scale;
 pub mod tempo;
 mod timeline;
+mod track_file;
 mod writer;
 
 pub use audio_writer::AudioWriter;
