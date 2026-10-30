@@ -274,9 +274,12 @@ struct Renderer<'a> {
     speed: f64,
     screen: FrameCursor,
     camera: Option<(FrameCursor, Bubble)>,
-    /// Screen frame with blurs and the camera bubble on it; reused across
-    /// frames.
+    /// Screen frame with the camera bubble on it; reused across frames.
     composed: frame::Video,
+    /// The screen frame with blurs on it, and which frame (its source time)
+    /// under which blurs, so a frame shown again isn't blurred again.
+    blurred: frame::Video,
+    blurred_key: Option<(Micros, Vec<usize>)>,
 }
 
 impl<'a> Renderer<'a> {
@@ -325,6 +328,8 @@ impl<'a> Renderer<'a> {
             screen: FrameCursor::new(screen_reader),
             camera,
             composed: frame::Video::empty(),
+            blurred: frame::Video::empty(),
+            blurred_key: None,
         };
         Ok((renderer, (out_w, out_h)))
     }
@@ -345,6 +350,14 @@ impl<'a> Renderer<'a> {
     /// The composited frame shown at source time `t_src`: blurred areas,
     /// then the camera bubble on top.
     fn render_source(&mut self, t_src: Micros) -> anyhow::Result<&mut frame::Video> {
+        let (pts, next) = self
+            .screen
+            .span_at(t_src)?
+            .context("screen track has no frames")?;
+        // Blurred by when the frame is up, not the time asked for.
+        let active: Vec<usize> = (0..self.blurs.len())
+            .filter(|&i| self.blurs[i].covers_frame(pts, next))
+            .collect();
         let (_, screen) = self
             .screen
             .at(t_src)?
@@ -353,17 +366,26 @@ impl<'a> Renderer<'a> {
             Some((cam, bubble)) => cam.at(t_src)?.map(|(_, f)| (&*bubble, f)),
             None => None,
         };
-        let blurs: Vec<_> = self.blurs.iter().filter(|b| b.covers(t_src)).collect();
-        // The screen frame is passed on as is if nothing goes on it; else
-        // it's copied, as the same frame may be shown again.
-        if camera.is_none() && blurs.is_empty() {
-            return Ok(screen);
+        // The same frame under the same blurs is blurred once, as a still
+        // screen's frame is shown again and again.
+        let blurred = !active.is_empty();
+        let key = (pts, active);
+        if blurred && self.blurred_key.as_ref() != Some(&key) {
+            copy_frame(&mut self.blurred, screen);
+            let on: Vec<_> = key.1.iter().map(|&i| &self.blurs[i]).collect();
+            crate::blur::blur_yuv420p(&mut self.blurred, &on);
+            self.blurred_key = Some(key);
         }
-        copy_frame(&mut self.composed, screen);
-        crate::blur::blur_yuv420p(&mut self.composed, &blurs);
-        if let Some((bubble, cam_frame)) = camera {
-            bubble.blend(&mut self.composed, cam_frame);
-        }
+        // Passed on as is if no bubble goes on it; else copied, as the same
+        // frame may be shown again.
+        let Some((bubble, cam_frame)) = camera else {
+            return Ok(if blurred { &mut self.blurred } else { screen });
+        };
+        copy_frame(
+            &mut self.composed,
+            if blurred { &self.blurred } else { screen },
+        );
+        bubble.blend(&mut self.composed, cam_frame);
         Ok(&mut self.composed)
     }
 

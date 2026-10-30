@@ -464,10 +464,13 @@ fn video_loop(
         shared.position.store(target, Ordering::Relaxed);
 
         let mut changed = false;
-        // Blurred by the time shown, as the export is, not the frame's.
-        let active: Vec<usize> = (0..blurs.len())
-            .filter(|&i| blurs[i].covers(target))
-            .collect();
+        // Blurred by when the frame is up, as the export is.
+        let active: Vec<usize> = match screen.span_at(target) {
+            Ok(Some((pts, next))) => (0..blurs.len())
+                .filter(|&i| blurs[i].covers_frame(pts, next))
+                .collect(),
+            _ => Vec::new(),
+        };
         match screen.at(target) {
             Ok(Some((pts, f)))
                 if shown_screen

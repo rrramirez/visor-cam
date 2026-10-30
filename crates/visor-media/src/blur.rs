@@ -32,7 +32,8 @@ pub(crate) fn blur_yuv420p(f: &mut frame::Video, blurs: &[&Blur]) {
         blur_area::<1>(f.data_mut(0), luma, (x0, y0, x1, y1), block);
         for plane in 1..=2 {
             let chroma = Plane::of(f, plane);
-            let area = (x0 / 2, y0 / 2, x1 / 2, y1 / 2);
+            // An odd width or height's last chroma sample covers one pixel.
+            let area = (x0 / 2, y0 / 2, x1.div_ceil(2), y1.div_ceil(2));
             blur_area::<1>(f.data_mut(plane), chroma, area, (block / 2).max(1));
         }
     }
@@ -341,9 +342,8 @@ mod tests {
         assert!(px(95) > px(105), "a smooth edge");
     }
 
-    #[test]
-    fn yuv_frames_blur_luma_and_chroma() {
-        let (w, h) = (640u32, 480u32);
+    /// A YUV 4:2:0 frame with a checkerboard in each plane.
+    fn checkered_yuv(w: u32, h: u32) -> frame::Video {
         let mut f = frame::Video::new(format::Pixel::YUV420P, w, h);
         for plane in 0..3 {
             let (pw, ph) = (
@@ -356,6 +356,12 @@ mod tests {
                 f.data_mut(plane)[r * stride..][..pw].copy_from_slice(&pattern[r * pw..][..pw]);
             }
         }
+        f
+    }
+
+    #[test]
+    fn yuv_frames_blur_luma_and_chroma() {
+        let mut f = checkered_yuv(640, 480);
         blur_yuv420p(&mut f, &[&blur(0.0, 0.0, 1.0, 1.0)]);
         for plane in 0..3 {
             let stride = f.stride(plane);

@@ -588,10 +588,17 @@ impl EditorWindow {
         let Some(blur) = blurs.get_mut(index) else {
             return;
         };
-        blur.x = f64::from(self.ui.get_blur_x());
-        blur.y = f64::from(self.ui.get_blur_y());
-        blur.width = f64::from(self.ui.get_blur_w());
-        blur.height = f64::from(self.ui.get_blur_h());
+        // Only what moved: the box comes back from the UI less precise, and
+        // a click that moves nothing shouldn't be a step to undo.
+        let set = |v: &mut f64, ui: f32| {
+            if *v as f32 != ui {
+                *v = f64::from(ui);
+            }
+        };
+        set(&mut blur.x, self.ui.get_blur_x());
+        set(&mut blur.y, self.ui.get_blur_y());
+        set(&mut blur.width, self.ui.get_blur_w());
+        set(&mut blur.height, self.ui.get_blur_h());
         if done {
             self.change_blurs(|all| *all = blurs);
         } else {
@@ -609,7 +616,8 @@ impl EditorWindow {
 
     /// The blurs with the picked one's start (or `end`) moved to `t`,
     /// keeping it a frame long at least, and the frame to show for that
-    /// edge: the first or the last it blurs.
+    /// edge: the first or the last it blurs (the one up just before it
+    /// ends; see `Blur::covers_frame`).
     fn blur_edge_moved(&self, end: bool, t: Micros) -> Option<(Vec<Blur>, Micros)> {
         let index = usize::try_from(self.ui.get_picked_blur()).ok()?;
         let mut blurs = self.project.borrow().blurs.clone();
@@ -617,7 +625,7 @@ impl EditorWindow {
         let blur = blurs.get_mut(index)?;
         let shown = if end {
             blur.end_us = t.max(self.frames_from(blur.start_us, 1)).min(d);
-            self.frames_from(blur.end_us, -1).max(blur.start_us)
+            blur.end_us.saturating_sub(1).max(blur.start_us)
         } else {
             blur.start_us = t.min(self.frames_from(blur.end_us, -1));
             blur.start_us
@@ -892,8 +900,18 @@ impl EditorWindow {
                 self.refresh_edit_ui();
             }
             Step::Blurs(blurs) => {
-                to.borrow_mut()
-                    .push(Step::Blurs(self.project.borrow().blurs.clone()));
+                let now = self.project.borrow().blurs.clone();
+                // A blur added or deleted renumbers the others: keep the
+                // picked one picked, if it's still there as it was.
+                if blurs.len() != now.len() {
+                    let picked = usize::try_from(self.ui.get_picked_blur())
+                        .ok()
+                        .and_then(|i| now.get(i))
+                        .and_then(|p| blurs.iter().position(|b| b == p));
+                    self.ui.set_picked_blur(picked.map_or(-1, |i| i as i32));
+                    self.ui.set_blur_edge(-1);
+                }
+                to.borrow_mut().push(Step::Blurs(now));
                 self.set_blurs(blurs);
             }
         }

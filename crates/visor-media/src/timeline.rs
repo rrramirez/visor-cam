@@ -131,6 +131,19 @@ impl FrameCursor {
         }
         Ok(Some((*pts, &mut self.out)))
     }
+
+    /// When the frame shown at `t` is up: its source time, and the next
+    /// frame's (`None` after the last).
+    pub fn span_at(&mut self, t: Micros) -> anyhow::Result<Option<(Micros, Option<Micros>)>> {
+        let Some((pts, _)) = self.at(t)? else {
+            return Ok(None);
+        };
+        if self.upcoming.is_none() && !self.ended {
+            self.upcoming = self.reader.next_decoded()?;
+            self.ended = self.upcoming.is_none();
+        }
+        Ok(Some((pts, self.upcoming.as_ref().map(|(next, _)| *next))))
+    }
 }
 
 /// Mixes several 48 kHz stereo tracks, addressed by source sample position.

@@ -371,14 +371,14 @@ export component Editor inherits Window {
             if (event.text == "i") { root.set-in(); return accept; }
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
-            if (event.text == "m" && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
+            if ((event.text == "m" || event.text == "M") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
                 if (!event.repeat) {
                     root.add-marker();
                     root.pending-marker = root.new-marker;
                 }
                 return accept;
             }
-            if (event.text == "b" && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
+            if ((event.text == "b" || event.text == "B") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
                 if (!event.repeat) { root.add-blur(); }
                 return accept;
             }
@@ -531,8 +531,10 @@ export component Editor inherits Window {
                                     (blur-box.y + self.mouse-y - self.pressed-y) / frame.height));
                                 root.blur-moved(false);
                             }
+                            // Kept where it was dragged to, even if the
+                            // drag is cut short.
                             pointer-event(event) => {
-                                if (event.kind == PointerEventKind.up) { root.blur-moved(true); }
+                                if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) { root.blur-moved(true); }
                             }
                         }
                         for corner in [0, 1, 2, 3]: Rectangle {
@@ -553,7 +555,7 @@ export component Editor inherits Window {
                                         (blur-box.y + parent.y + self.mouse-y - self.pressed-y + parent.height / 2) / frame.height);
                                 }
                                 pointer-event(event) => {
-                                    if (event.kind == PointerEventKind.up) { root.blur-moved(true); }
+                                    if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) { root.blur-moved(true); }
                                 }
                             }
                         }

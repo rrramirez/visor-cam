@@ -452,3 +452,47 @@ fn blurred_areas_hide_detail_while_they_last() {
     );
     cleanup(&dir);
 }
+
+#[test]
+fn a_frame_up_when_a_blur_starts_is_blurred_all_the_while() {
+    // 30 fps: the frame at 1 s is up until 1.033 s, so a blur starting at
+    // 1.01 s blurs it from 1 s, in the preview's frames and the export.
+    let (w, h) = (640u32, 360u32);
+    let (dir, mut project) = checkerboard_project("export-blur-frame", w, h, 2);
+    project.blurs = vec![visor_core::Blur {
+        start_us: 1_010_000,
+        end_us: 2_000_000,
+        x: 0.0,
+        y: 0.0,
+        width: 0.5,
+        height: 1.0,
+    }];
+    let left = (20, 20, 300, 340);
+    let at = |t| decode_jpeg(&visor_media::export::frame_jpeg(&dir, &project, t, h).unwrap());
+    assert!(luma_spread(&at(1_000_000), left) < 8.0);
+    assert!(luma_spread(&at(990_000), left) > 40.0);
+
+    let out = dir.join("out.mp4");
+    let opts = ExportOptions::new(ExportFormat::Mp4);
+    export(
+        &dir,
+        &project,
+        &out,
+        &opts,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut reader = VideoReader::open(&out, None).unwrap();
+    let mut spreads = Vec::new();
+    while let Some((t, f)) = reader.next_frame().unwrap() {
+        spreads.push((t, luma_spread(&f, left)));
+    }
+    assert!(
+        spreads
+            .iter()
+            .all(|&(t, s)| if t < 1_000_000 { s > 40.0 } else { s < 8.0 }),
+        "{spreads:?}"
+    );
+    cleanup(&dir);
+}
