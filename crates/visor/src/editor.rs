@@ -43,6 +43,8 @@ pub struct EditorWindow {
     /// The edit after the last nudge of a cut's edge, and that edge, so
     /// the nudges that follow join its step to undo.
     nudged: RefCell<Option<(EditList, bool, Micros)>>,
+    /// The blurs after the last nudge of a blur's edge, likewise.
+    blur_nudged: RefCell<Option<Vec<Blur>>>,
     /// Background work writing into the recording's folder (exports,
     /// thumbnail images); the folder isn't renamed while any runs.
     jobs: Jobs,
@@ -156,6 +158,7 @@ impl EditorWindow {
                 idle_ticks: Cell::new(0),
                 save_error: RefCell::default(),
                 nudged: RefCell::default(),
+                blur_nudged: RefCell::default(),
                 jobs: Jobs::default(),
                 pauses_cancel: RefCell::default(),
             }
@@ -329,6 +332,27 @@ impl EditorWindow {
         on!(on_delete_blur, |e, i| e.delete_blur(i as usize));
         on!(on_blur_to_selection, |e, i| e.blur_to_selection(i as usize));
         on!(on_blur_moved, |e, done| e.blur_moved(done));
+        on!(on_blur_edge_dragged, |e, end, f| {
+            if let Some((blurs, shown)) = e.blur_edge_moved(end, e.nearest_frame(f)) {
+                e.control().set_blurs(blurs);
+                e.control().preview(shown);
+            }
+        });
+        on!(on_blur_edge_moved, |e, end, f| {
+            e.move_blur_edge(end, e.nearest_frame(f), false);
+        });
+        on!(on_show_blur_edge, |e, end| e.show_blur_edge(end));
+        on!(on_nudge_blur_edge, |e, frames, repeat| {
+            let Some(at) = e.picked_blur_edge(e.ui.get_blur_edge() == 1) else {
+                return;
+            };
+            let end = e.ui.get_blur_edge() == 1;
+            // Held down, the nudges of one edge are one step to undo.
+            let again =
+                repeat && e.blur_nudged.borrow().as_ref() == Some(&e.project.borrow().blurs);
+            e.move_blur_edge(end, e.frames_from(at, frames), again);
+            *e.blur_nudged.borrow_mut() = Some(e.project.borrow().blurs.clone());
+        });
         on!(on_title_edited, |e, title| {
             let title = title.trim().to_string();
             if !title.is_empty() {
@@ -507,6 +531,7 @@ impl EditorWindow {
         let blur = usize::try_from(index)
             .ok()
             .and_then(|i| self.project.borrow().blurs.get(i).cloned());
+        self.ui.set_blur_edge(-1);
         let Some(blur) = blur else {
             self.ui.set_picked_blur(-1);
             return;
@@ -571,6 +596,61 @@ impl EditorWindow {
             self.change_blurs(|all| *all = blurs);
         } else {
             self.control().set_blurs(blurs);
+        }
+    }
+
+    /// Where the picked blur's start (or `end`) is.
+    fn picked_blur_edge(&self, end: bool) -> Option<Micros> {
+        let index = usize::try_from(self.ui.get_picked_blur()).ok()?;
+        let project = self.project.borrow();
+        let blur = project.blurs.get(index)?;
+        Some(if end { blur.end_us } else { blur.start_us })
+    }
+
+    /// The blurs with the picked one's start (or `end`) moved to `t`,
+    /// keeping it a frame long at least, and the frame to show for that
+    /// edge: the first or the last it blurs.
+    fn blur_edge_moved(&self, end: bool, t: Micros) -> Option<(Vec<Blur>, Micros)> {
+        let index = usize::try_from(self.ui.get_picked_blur()).ok()?;
+        let mut blurs = self.project.borrow().blurs.clone();
+        let d = self.duration();
+        let blur = blurs.get_mut(index)?;
+        let shown = if end {
+            blur.end_us = t.max(self.frames_from(blur.start_us, 1)).min(d);
+            self.frames_from(blur.end_us, -1).max(blur.start_us)
+        } else {
+            blur.start_us = t.min(self.frames_from(blur.end_us, -1));
+            blur.start_us
+        };
+        Some((blurs, shown))
+    }
+
+    /// Moves the picked blur's start (or `end`) to `t` and shows the frame
+    /// by it (see `blur_edge_moved`). `merge` makes it part of the last
+    /// step to undo.
+    fn move_blur_edge(&self, end: bool, t: Micros, merge: bool) {
+        let Some((blurs, shown)) = self.blur_edge_moved(end, t) else {
+            return;
+        };
+        let steps = self.undo.borrow().len();
+        // Unchanged, after a drag's preview of another place: as it was.
+        self.control().set_blurs(blurs.clone());
+        self.change_blurs(|all| *all = blurs);
+        if merge && self.undo.borrow().len() > steps {
+            self.undo.borrow_mut().pop();
+        }
+        self.control().preview(shown);
+    }
+
+    /// Shows the frame by the picked blur's start (or `end`) as it is.
+    fn show_blur_edge(&self, end: bool) {
+        let Some(at) = self.picked_blur_edge(end) else {
+            return;
+        };
+        if let Some((_, shown)) = self.blur_edge_moved(end, at) {
+            self.control()
+                .set_blurs(self.project.borrow().blurs.clone());
+            self.control().preview(shown);
         }
     }
 
@@ -894,7 +974,10 @@ impl EditorWindow {
         self.ui.set_blurs(ModelRc::new(VecModel::from(blurs)));
         match usize::try_from(self.ui.get_picked_blur()) {
             Ok(i) if i < project.blurs.len() => self.show_blur_box(&project.blurs[i]),
-            _ => self.ui.set_picked_blur(-1),
+            _ => {
+                self.ui.set_picked_blur(-1);
+                self.ui.set_blur_edge(-1);
+            }
         }
         self.ui.set_can_undo(!self.undo.borrow().is_empty());
         self.ui.set_can_redo(!self.redo.borrow().is_empty());

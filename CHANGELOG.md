@@ -7,7 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
-- **Blur an area:** hide a password, an email address or a notification. Press **B** or *Blur an area* in the editor, drag the box over what to hide, and resize it from its corners. To blur only part of the video, select that part on the timeline first. Exports, the thumbnail and what agents see are all blurred, and the text underneath can't be read.
+- **Blur an area:** hide a password, an email address or a notification. Press **B** or *Blur an area* in the editor, drag the box over what to hide, and resize it from its corners. To blur only part of the video, select that part on the timeline first, then drag the blur's edges on the timeline or nudge them with **← →** to start and end it on the exact frame. Exports, the thumbnail and what agents see are all blurred, and the text underneath can't be read.
 
 ## 0.7.0
 

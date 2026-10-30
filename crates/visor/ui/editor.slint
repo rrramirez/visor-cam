@@ -70,29 +70,32 @@ component SideButton inherits Rectangle {
     }
 }
 
-// One edge of a cut on the timeline: drag it to move it, or click it to
-// pick it for nudging. Its grip lies mostly outside the cut, so a narrow
-// cut's two edges don't cover each other.
+// One edge of a cut or a blur on the timeline: drag it to move it, or
+// click it to pick it for nudging. A cut's grips lie mostly outside it, so
+// a narrow cut's two edges don't cover each other; a blur's lie inside it,
+// so they can be grabbed at either end of the recording.
 component CutEdge inherits Rectangle {
     // Where the edge is, as a fraction of `track-width`.
     in property <float> pos;
     in property <length> track-width;
     in property <bool> end;
+    in property <bool> inside;
     in property <bool> active;
+    in property <color> line: Theme.record;
     callback grab();
     // The fraction under the pointer, keeping where it was grabbed.
     callback drag(float);
     // Whether it was dragged, and whether it ended up moved.
     callback release(bool, bool);
     callback cancel();
-    property <length> edge: end ? 2px : 8px;
+    property <length> edge: end != inside ? 2px : 8px;
     x: pos * track-width - edge;
     width: 10px;
     Rectangle {
         x: parent.edge - self.width / 2;
         width: active ? 4px : 2px;
         border-radius: 1px;
-        background: active ? Theme.accent : Theme.record;
+        background: active ? Theme.accent : root.line;
     }
     TouchArea {
         property <bool> dragged;
@@ -195,12 +198,41 @@ export component Editor inherits Window {
         if (root.drag-cut != cut) { return; }
         root.drag-cut = -1;
         root.active-edge = end ? cut * 2 + 1 : cut * 2;
+        root.blur-edge = -1;
         if (moved) {
             root.cut-edge-moved(cut, end, root.drag-pos);
         } else if (dragged) {
             root.drag-ended();
         }
         keys.focus();
+    }
+    function grab-blur-edge(edge: int, pos: float) {
+        root.drag-blur-edge = edge;
+        root.drag-blur-pos = pos;
+    }
+    function drag-blur(pos: float) {
+        root.drag-blur-pos = pos;
+        root.blur-edge-dragged(root.drag-blur-edge == 1, pos);
+    }
+    // Picks the edge, and moves it there if it was dragged.
+    function release-blur-edge(end: bool, moved: bool) {
+        if (root.drag-blur-edge < 0) { return; }
+        root.drag-blur-edge = -1;
+        root.active-edge = -1;
+        root.blur-edge = end ? 1 : 0;
+        if (moved) {
+            root.blur-edge-moved(end, root.drag-blur-pos);
+        } else {
+            root.show-blur-edge(end);
+        }
+        keys.focus();
+    }
+    function cancel-blur-edge() {
+        if (root.drag-blur-edge < 0) { return; }
+        let end = root.drag-blur-edge == 1;
+        root.drag-blur-edge = -1;
+        root.blur-edge = end ? 1 : 0;
+        root.show-blur-edge(end);
     }
     // Moves the corner of the picked blur's box on that side to the
     // pointer (normalized), keeping the opposite corner where it is.
@@ -228,6 +260,11 @@ export component Editor inherits Window {
         root.drag-cut = -1;
         root.drag-ended();
     }
+    // The picked blur's edge picked for nudging with ← →: 0 its start, 1
+    // its end, -1 none; and the one being dragged, and where it is.
+    in-out property <int> blur-edge: -1;
+    property <int> drag-blur-edge: -1;
+    property <float> drag-blur-pos;
     in property <[MarkerMark]> markers;
     in property <[BlurRow]> blurs;
     // The blur whose box shows on the video, to move and resize, or -1;
@@ -288,6 +325,12 @@ export component Editor inherits Window {
     callback blur-to-selection(int);
     // The picked blur's box moved; true once let go.
     callback blur-moved(bool);
+    // An edge of the picked blur (true for its end): dragged to a timeline
+    // position, let go there, picked without moving, or nudged by frames.
+    callback blur-edge-dragged(bool, float);
+    callback blur-edge-moved(bool, float);
+    callback show-blur-edge(bool);
+    callback nudge-blur-edge(int, bool);
     in property <bool> finding-pauses;
     callback restore();
     callback undo();
@@ -340,6 +383,8 @@ export component Editor inherits Window {
                 return accept;
             }
             if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
+            if (event.text == Key.LeftArrow && root.blur-edge >= 0) { root.nudge-blur-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
+            if (event.text == Key.RightArrow && root.blur-edge >= 0) { root.nudge-blur-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
             if (event.text == Key.LeftArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
             if (event.text == Key.RightArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
             if (event.text == Key.LeftArrow) { root.step(event.modifiers.shift ? -10 : -1); return accept; }
@@ -349,6 +394,10 @@ export component Editor inherits Window {
                 return accept;
             }
             if (root.export-card) { return reject; }
+            if (event.text == Key.Escape && root.blur-edge >= 0) {
+                root.blur-edge = -1;
+                return accept;
+            }
             if (event.text == Key.Escape && root.picked-blur >= 0) {
                 root.pick-blur(-1);
                 return accept;
@@ -709,9 +758,7 @@ export component Editor inherits Window {
                                         ? "Hides part of the screen, like a password. To blur only part of the video, first drag on the timeline to select that part; otherwise it covers the whole video."
                                         : root.picked-blur < 0
                                         ? "Click a blur to move or resize it on the video."
-                                        : root.has-selection
-                                        ? "Drag the box on the video to place it, and its corners to resize it."
-                                        : "Drag the box on the video to place it, and its corners to resize it. To change when it shows, drag on the timeline to select that part, then come back here.";
+                                        : "Drag the box on the video to place it, and its corners to resize it. To change when it shows, drag its edges on the timeline, or click one and press ← → to move it a frame at a time.";
                                     color: Theme.faint;
                                     font-size: Theme.font-small;
                                     wrap: word-wrap;
@@ -929,7 +976,7 @@ export component Editor inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Text {
-                    text: root.active-edge >= 0
+                    text: root.active-edge >= 0 || root.blur-edge >= 0
                         ? "← → move this edge a frame (⇧ for 10) · Esc to stop"
                         : "Drag on the timeline to select · Drag a cut's edge to adjust it · ← → step";
                     color: Theme.faint;
@@ -999,9 +1046,12 @@ export component Editor inherits Window {
                 // Blurred stretches: bands along the bottom, stacked so
                 // overlapping ones show.
                 for b[i] in root.blurs: Rectangle {
-                    x: b.start * track.width;
+                    property <bool> dragged: root.picked-blur == i && root.drag-blur-edge >= 0;
+                    property <float> start: self.dragged && root.drag-blur-edge == 0 ? root.drag-blur-pos : b.start;
+                    property <float> end: self.dragged && root.drag-blur-edge == 1 ? root.drag-blur-pos : b.end;
+                    x: self.start * track.width;
                     y: track.height - 5px - mod(i, 3) * 7px;
-                    width: max(2px, (b.end - b.start) * track.width);
+                    width: max(2px, (self.end - self.start) * track.width);
                     height: 5px;
                     background: root.picked-blur == i ? Theme.warning : Theme.warning.transparentize(50%);
                 }
@@ -1024,6 +1074,7 @@ export component Editor inherits Window {
                             self.dragging = false;
                             self.anchor = max(0, min(1, self.mouse-x / track.width));
                             root.active-edge = -1;
+                            root.blur-edge = -1;
                         }
                         if (event.kind == PointerEventKind.up && !self.dragging) {
                             root.sel-start = -1;
@@ -1100,6 +1151,35 @@ export component Editor inherits Window {
                     drag(f) => { root.drag-edge(max(c.start, min(1, f))); }
                     release(dragged, moved) => { root.release-edge(i, true, dragged, moved); }
                     cancel => { root.cancel-edge(); }
+                }
+
+                // The picked blur's edges: drag one to change when it starts
+                // or ends, showing the first or last frame it blurs; or click
+                // one and nudge it a frame at a time with ← →.
+                for b[i] in root.blurs: CutEdge {
+                    visible: root.picked-blur == i;
+                    pos: root.drag-blur-edge == 0 ? root.drag-blur-pos : b.start;
+                    track-width: track.width;
+                    inside: true;
+                    line: Theme.warning;
+                    active: root.blur-edge == 0;
+                    grab => { root.grab-blur-edge(0, b.start); }
+                    drag(f) => { root.drag-blur(max(0, min(b.end, f))); }
+                    release(dragged, moved) => { root.release-blur-edge(false, moved); }
+                    cancel => { root.cancel-blur-edge(); }
+                }
+                for b[i] in root.blurs: CutEdge {
+                    visible: root.picked-blur == i;
+                    end: true;
+                    pos: root.drag-blur-edge == 1 ? root.drag-blur-pos : b.end;
+                    track-width: track.width;
+                    inside: true;
+                    line: Theme.warning;
+                    active: root.blur-edge == 1;
+                    grab => { root.grab-blur-edge(1, b.end); }
+                    drag(f) => { root.drag-blur(max(b.start, min(1, f))); }
+                    release(dragged, moved) => { root.release-blur-edge(true, moved); }
+                    cancel => { root.cancel-blur-edge(); }
                 }
 
                 // Markers: a line with a flag; hover shows the note, click seeks.

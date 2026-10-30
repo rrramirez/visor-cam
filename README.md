@@ -48,9 +48,12 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      password or an email address. To blur only part of the video, select
      that part on the timeline first; otherwise it covers the whole video.
      Drag its box on the video to place it and its corners to resize it.
-     Click a blur in the sidebar to show its box again; with part of the
-     timeline selected, *Blur only during the selection* changes when it
-     shows. It's heavy enough that text under it can't be read, fades out
+     Click a blur in the sidebar to show its box again, and its edges on
+     the timeline: drag one to change when it starts or ends, with the
+     preview showing the first or last frame it blurs, or click one and
+     press **← →** to move it a frame at a time (**⇧** for 10). With part
+     of the timeline selected, *Blur only during the selection* sets both
+     at once. It's heavy enough that text under it can't be read, fades out
      at its edges, and the camera bubble stays on top.
    - Drag either edge of a cut to adjust it; the preview shows the frame
      under the edge. Click an edge, then **← →** move it a frame at a time
