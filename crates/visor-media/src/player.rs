@@ -465,11 +465,16 @@ fn video_loop(
 
         let mut changed = false;
         // Blurred by when the frame is up, as the export is.
-        let active: Vec<usize> = match screen.span_at(target) {
-            Ok(Some((pts, next))) => (0..blurs.len())
+        let span = if blurs.is_empty() {
+            None
+        } else {
+            screen.span_at(target).ok().flatten()
+        };
+        let active: Vec<usize> = match span {
+            Some((pts, next)) => (0..blurs.len())
                 .filter(|&i| blurs[i].covers_frame(pts, next))
                 .collect(),
-            _ => Vec::new(),
+            None => Vec::new(),
         };
         match screen.at(target) {
             Ok(Some((pts, f)))
