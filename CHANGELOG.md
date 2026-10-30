@@ -4,10 +4,10 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
-## Unreleased
+## 0.7.0
 
 ### Fixed
-- If Visor crashed or was force-quit while recording, little or nothing could be recovered when the screen barely changed, because most of the recording was still held in Visor's memory. Visor now saves it to the file at least every half second, also while the screen is still or recording is paused, and the recovered recording keeps all the narration saved, not only as much as the screen track. (A power cut or a crash of the Mac itself can still lose the last few seconds the system hadn't written yet.)
+- **Crash recovery:** if Visor crashed or was force-quit while recording, little or nothing could be recovered when the screen barely changed, because most of the recording was still in memory. Visor now saves it at least every half second, even while the screen is still or recording is paused, and a recovered recording keeps all the narration. A power cut or a crash of the Mac itself can still lose the last few seconds.
 
 ### Improved
 - Agents see times to the millisecond, so a cut at a marker lands on it, well within a frame. They used to be rounded to a tenth of a second, which could leave a moment of what should have been cut.
