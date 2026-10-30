@@ -471,6 +471,7 @@ export component Editor inherits Window {
                         width: parent.width * root.blur-w;
                         height: parent.height * root.blur-h;
                         border-width: 2px;
+                        border-radius: 4px;
                         border-color: Theme.warning;
                         TouchArea {
                             mouse-cursor: move;
@@ -691,22 +692,26 @@ export component Editor inherits Window {
                                     }
                                     IconButton {
                                         size: 30px;
-                                        icon: Icons.trim;
-                                        tint: Theme.muted;
-                                        enabled: root.has-selection;
-                                        tooltip: "Blur during the selection instead";
-                                        clicked => { root.blur-to-selection(i); keys.focus(); }
-                                    }
-                                    IconButton {
-                                        size: 30px;
                                         icon: Icons.trash;
                                         tint: Theme.muted;
                                         tooltip: "Delete blur";
                                         clicked => { root.delete-blur(i); keys.focus(); }
                                     }
                                 }
+                                // When the picked blur shows: limit it to the selection,
+                                // or how to make one.
+                                if root.picked-blur >= 0 && root.has-selection: SideButton {
+                                    text: "Blur only during the selection"; icon: Icons.trim;
+                                    clicked => { root.blur-to-selection(root.picked-blur); keys.focus(); }
+                                }
                                 Text {
-                                    text: "Hides part of the screen, like a password. Covers the selection, or the whole video without one. Drag the box on the video to place it.";
+                                    text: root.blurs.length == 0
+                                        ? "Hides part of the screen, like a password. To blur only part of the video, first drag on the timeline to select that part; otherwise it covers the whole video."
+                                        : root.picked-blur < 0
+                                        ? "Click a blur to move or resize it on the video."
+                                        : root.has-selection
+                                        ? "Drag the box on the video to place it, and its corners to resize it."
+                                        : "Drag the box on the video to place it, and its corners to resize it. To change when it shows, drag on the timeline to select that part, then come back here.";
                                     color: Theme.faint;
                                     font-size: Theme.font-small;
                                     wrap: word-wrap;
