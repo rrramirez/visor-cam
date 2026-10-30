@@ -6,6 +6,9 @@ is also what the update window shows.
 
 ## Unreleased
 
+### Fixed
+- If Visor crashed or was force-quit while recording, little or nothing could be recovered when the screen barely changed, because most of the recording was still held in Visor's memory. Visor now saves it to the file at least every half second, also while the screen is still or recording is paused, and the recovered recording keeps all the narration saved, not only as much as the screen track. (A power cut or a crash of the Mac itself can still lose the last few seconds the system hadn't written yet.)
+
 ### Improved
 - Agents see times to the millisecond, so a cut at a marker lands on it, well within a frame. They used to be rounded to a tenth of a second, which could leave a moment of what should have been cut.
 - When an agent's cut leaves less than a quarter second between it and another cut, or the start or end, that bit is cut too, rather than flashing by in the video.

@@ -60,9 +60,7 @@ impl AudioWriter {
         let mut stream = output.add_stream(codec)?;
         stream.set_parameters(&encoder);
         stream.set_time_base(Rational(1, SAMPLE_RATE as i32));
-        let mut opts = Dictionary::new();
-        opts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
-        output.write_header_with(opts)?;
+        crate::track_file::write_header(&mut output)?;
         let stream_time_base = output.stream(0).context("stream vanished")?.time_base();
 
         Ok(Self {
@@ -118,6 +116,13 @@ impl AudioWriter {
         self.pending.extend_from_slice(&scratch[skip..]);
         self.scratch = scratch;
         self.encode_full_frames()
+    }
+
+    /// Writes out everything encoded so far, as when no audio has come for
+    /// a while, so a crash doesn't lose it.
+    pub fn flush(&mut self) -> anyhow::Result<()> {
+        self.drain()?;
+        crate::track_file::flush(&mut self.output)
     }
 
     /// Pads with silence to `end`, flushes the encoder and finalizes the file.

@@ -6,7 +6,7 @@ use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, select};
@@ -20,6 +20,10 @@ pub use visor_core::project::{CAMERA_FILE, MIC_FILE, SCREEN_FILE, SYSTEM_FILE};
 
 /// How long to keep draining queued buffers after stop.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long a track may go without writing (the screen is still, or
+/// recording is paused) before what its writer holds is saved to the file,
+/// so a crash loses little. Matches the tracks' fragment length.
+const IDLE_FLUSH: Duration = Duration::from_millis(500);
 
 pub struct RecorderOptions {
     pub config: RecordingConfig,
@@ -329,24 +333,24 @@ fn spawn_video<F: Borrow<VideoFrame> + Send + 'static>(
         .name(format!("visor-{track}"))
         .spawn(move || {
             let mut epoch = usize::MAX;
-            let mut write = |frame: &VideoFrame, writer: &mut VideoWriter| -> anyhow::Result<()> {
+            let write = |writer: &mut VideoWriter, frame: &F| -> anyhow::Result<bool> {
+                let frame = frame.borrow();
                 let (pts, now_epoch) = {
                     let c = clock.lock().unwrap();
                     (c.pts(frame.host_ts), c.epoch())
                 };
-                if let Some(pts) = pts {
-                    let keyframe = now_epoch != epoch;
-                    epoch = now_epoch;
-                    writer.write(frame, pts, keyframe)?;
-                }
-                Ok(())
+                let Some(pts) = pts else {
+                    return Ok(false);
+                };
+                let keyframe = now_epoch != epoch;
+                epoch = now_epoch;
+                writer.write(frame, pts, keyframe)?;
+                Ok(true)
             };
-            let stop_at = run_until_stopped(
-                &rx,
-                &stop_rx,
-                |f| write(f.borrow(), &mut writer),
-                |f| f.borrow().host_ts,
-            )?;
+            let stop_at =
+                run_until_stopped(&rx, &stop_rx, &mut writer, write, VideoWriter::flush, |f| {
+                    f.borrow().host_ts
+                })?;
             let duration = clock.lock().unwrap().elapsed(stop_at);
             writer.finish(duration)
         })?;
@@ -367,15 +371,18 @@ fn spawn_audio<B: Borrow<AudioBuffer> + Send + 'static>(
     let handle = thread::Builder::new()
         .name(format!("visor-{track}"))
         .spawn(move || {
-            let mut write = |buf: &AudioBuffer| -> anyhow::Result<()> {
-                let pts = clock.lock().unwrap().pts(buf.host_ts);
-                if let Some(pts) = pts {
-                    writer.write(buf, pts)?;
-                }
-                Ok(())
+            let write = |writer: &mut AudioWriter, buf: &B| -> anyhow::Result<bool> {
+                let buf = buf.borrow();
+                let Some(pts) = clock.lock().unwrap().pts(buf.host_ts) else {
+                    return Ok(false);
+                };
+                writer.write(buf, pts)?;
+                Ok(true)
             };
             let stop_at =
-                run_until_stopped(&rx, &stop_rx, |b| write(b.borrow()), |b| b.borrow().host_ts)?;
+                run_until_stopped(&rx, &stop_rx, &mut writer, write, AudioWriter::flush, |b| {
+                    b.borrow().host_ts
+                })?;
             let duration = clock.lock().unwrap().elapsed(stop_at);
             writer.finish(duration)
         })?;
@@ -387,26 +394,53 @@ fn spawn_audio<B: Borrow<AudioBuffer> + Send + 'static>(
 }
 
 /// Feeds items to `write` until a stop time arrives, then drains items
-/// captured before that time. Returns the stop time.
-fn run_until_stopped<T>(
+/// captured before that time. Returns the stop time. `write` says whether
+/// it wrote the item (nothing is written while paused); once nothing has
+/// been written for [`IDLE_FLUSH`], `flush` saves what the writer holds.
+fn run_until_stopped<T, W>(
     rx: &Receiver<T>,
     stop_rx: &Receiver<Micros>,
-    mut write: impl FnMut(&T) -> anyhow::Result<()>,
+    writer: &mut W,
+    mut write: impl FnMut(&mut W, &T) -> anyhow::Result<bool>,
+    flush: impl Fn(&mut W) -> anyhow::Result<()>,
     timestamp: impl Fn(&T) -> Micros,
 ) -> anyhow::Result<Micros> {
+    // Only a safety step: a failure leaves the track recording.
+    let flush_or_warn = |writer: &mut W| {
+        if let Err(e) = flush(writer) {
+            tracing::warn!("could not save a track's latest frames: {e:#}");
+        }
+    };
+    let mut last_write = None;
     let stop_at = loop {
         select! {
             recv(rx) -> item => match item {
-                Ok(item) => write(&item)?,
+                Ok(item) => {
+                    if write(writer, &item)? {
+                        last_write = Some(Instant::now());
+                    }
+                }
                 // Source ended (e.g. camera unplugged): wait for the stop signal.
-                Err(_) => break stop_rx.recv().unwrap_or_else(|_| host_now()),
+                Err(_) => {
+                    if last_write.take().is_some() {
+                        flush_or_warn(writer);
+                    }
+                    break stop_rx.recv().unwrap_or_else(|_| host_now());
+                }
             },
             recv(stop_rx) -> at => break at.unwrap_or_else(|_| host_now()),
+            default(IDLE_FLUSH) => {}
+        }
+        if last_write.is_some_and(|t: Instant| t.elapsed() >= IDLE_FLUSH) {
+            flush_or_warn(writer);
+            last_write = None;
         }
     };
     loop {
         match rx.recv_timeout(DRAIN_TIMEOUT) {
-            Ok(item) if timestamp(&item) <= stop_at => write(&item)?,
+            Ok(item) if timestamp(&item) <= stop_at => {
+                write(writer, &item)?;
+            }
             Ok(_) | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -416,6 +450,43 @@ fn run_until_stopped<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_tracks_are_flushed() {
+        // Items 1-3 are written, then 4-9 aren't (paused) though they keep
+        // coming: the track is idle all the same, and is flushed once.
+        let (tx, rx) = bounded(16);
+        let (stop_tx, stop_rx) = bounded(1);
+        let feeder = thread::spawn(move || {
+            for i in 1..10u64 {
+                tx.send(i).unwrap();
+                thread::sleep(Duration::from_millis(100));
+            }
+            thread::sleep(IDLE_FLUSH);
+            stop_tx.send(100).unwrap();
+        });
+        let mut log = Vec::new();
+        run_until_stopped(
+            &rx,
+            &stop_rx,
+            &mut log,
+            |log, &i| {
+                log.push(format!("{i}"));
+                Ok(i <= 3)
+            },
+            |log| {
+                log.push("flush".into());
+                Ok(())
+            },
+            |&i| i,
+        )
+        .unwrap();
+        feeder.join().unwrap();
+        let flushes: Vec<_> = (0..log.len()).filter(|&i| log[i] == "flush").collect();
+        assert_eq!(flushes.len(), 1, "{log:?}");
+        // Half a second after item 3: around when item 8 arrives.
+        assert!((7..=10).contains(&flushes[0]), "{log:?}");
+    }
 
     #[test]
     fn project_dirs_are_created_unique_and_sanitized() {
@@ -460,10 +531,12 @@ mod tests {
         let at = run_until_stopped(
             &rx,
             &stop_rx,
-            |&t| {
+            &mut seen,
+            |seen, &t| {
                 seen.push(t);
-                Ok(())
+                Ok(true)
             },
+            |_| Ok(()),
             |&t| t,
         )
         .unwrap();

@@ -2,9 +2,11 @@ mod common;
 
 use std::fs::OpenOptions;
 
+use visor_core::AudioBuffer;
 use visor_core::project::PROJECT_FILE;
 use visor_media::decode::VideoReader;
 use visor_media::recover;
+use visor_media::{AudioWriter, VideoWriter};
 
 /// Cuts a file to `fraction` of its size, as a crash mid-write would.
 fn truncate(path: &std::path::Path, fraction: f64) {
@@ -21,6 +23,7 @@ fn crashed_recording_is_recovered_from_its_tracks() {
     std::fs::remove_file(dir.join(PROJECT_FILE)).unwrap();
     truncate(&dir.join("screen.mp4"), 0.6);
     truncate(&dir.join("camera.mp4"), 0.6);
+    truncate(&dir.join("system.m4a"), 0.6);
     truncate(&dir.join("mic.m4a"), 0.0);
     assert!(recover::is_interrupted(&dir));
 
@@ -38,6 +41,57 @@ fn crashed_recording_is_recovered_from_its_tracks() {
     // The recovered screen track decodes.
     let mut reader = VideoReader::open(&dir.join("screen.mp4"), None).unwrap();
     assert!(reader.next_frame().unwrap().is_some());
+}
+
+#[test]
+fn crash_during_a_still_screen_keeps_the_narration() {
+    // A second of screen changes, then a still screen (capture delivers no
+    // frames) while the mic records two more seconds, then a crash: the
+    // writers are never finished, so whatever they hold in memory is lost.
+    let dir = common::temp_dir("recover-still");
+    let mut video = VideoWriter::create(&dir.join("screen.mp4"), 640, 360, 30).unwrap();
+    for i in 0..30 {
+        let frame = common::nv12(640, 360, common::luma(i), 128);
+        video.write(&frame, i * common::FRAME_US, false).unwrap();
+    }
+    // The recorder flushes a track that has had nothing to write for a
+    // while; the hardware encoder has long caught up by then.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    video.flush().unwrap();
+    let mut mic = AudioWriter::create(&dir.join("mic.m4a")).unwrap();
+    for i in 0..300 {
+        let buf = AudioBuffer {
+            host_ts: 0,
+            sample_rate: 48_000,
+            channels: 2,
+            samples: vec![0.1; 960],
+        };
+        mic.write(&buf, i * 10_000).unwrap();
+    }
+    std::mem::forget(video);
+    std::mem::forget(mic);
+
+    let project = recover::recover(&dir).unwrap();
+    let secs = project.duration_us as f64 / 1e6;
+    // Audio fragments end every half second: at most that is lost.
+    assert!(secs >= 2.4, "recovered {secs:.2}s of 3s");
+    assert!(project.tracks.mic.is_some());
+    // Every frame was flushed, the last included: it is the picture that
+    // stays on screen, and it holds to the end.
+    let mut reader = VideoReader::open(&dir.join("screen.mp4"), None).unwrap();
+    let mut last = None;
+    while let Some((_, frame)) = reader.next_frame().unwrap() {
+        last = Some(common::mean_luma(&frame));
+    }
+    let last = last.unwrap();
+    let want = f64::from(common::luma(29));
+    assert!(
+        (last - want).abs() < 3.0,
+        "last frame luma {last}, want {want}"
+    );
+    let end = visor_media::export::frame_jpeg(&dir, &project, project.duration_us - 1, 360);
+    assert!(end.is_ok_and(|jpeg| !jpeg.is_empty()));
+    common::cleanup(&dir);
 }
 
 #[test]
