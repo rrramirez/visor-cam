@@ -151,6 +151,20 @@ impl EditList {
         out
     }
 
+    /// `pieces` (in the order they play) with each one that goes on where
+    /// the one before it ends, in the recording as in the video, joined to
+    /// it: the parts of clips split but not moved apart.
+    pub fn joined(pieces: Vec<Range>) -> Vec<Range> {
+        let mut out: Vec<Range> = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            match out.last_mut() {
+                Some(last) if last.1 == p.0 => last.1 = p.1,
+                _ => out.push(p),
+            }
+        }
+        out
+    }
+
     /// Removes output time `[start, end)`, which may span several clips.
     pub fn cut_output(&mut self, start: Micros, end: Micros) {
         for p in self.pieces(start, end) {
@@ -342,6 +356,22 @@ mod tests {
         // Moved to the end, counting from before it moves.
         e.move_clip(0, 2);
         assert_eq!(e.ranges(), [Range(0, 40), Range(40, 100)]);
+    }
+
+    #[test]
+    fn pieces_that_go_on_from_each_other_join() {
+        let mut e = EditList::full(100);
+        e.split(50);
+        assert_eq!(
+            EditList::joined(e.pieces(40, 60)),
+            [Range(40, 60)],
+            "split but not moved"
+        );
+        e.move_clip(1, 0);
+        assert_eq!(
+            EditList::joined(e.pieces(40, 60)),
+            [Range(90, 100), Range(0, 10)]
+        );
     }
 
     #[test]

@@ -260,9 +260,11 @@ fn quiet_stretches(
     if quiet_from < duration {
         gaps.push(Range(quiet_from, duration));
     }
+    // Clips split but not moved apart are one stretch of video here.
+    let kept = EditList::joined(edit.ranges().to_vec());
     let mut out = Vec::new();
     for gap in gaps {
-        for kept in edit.ranges() {
+        for kept in &kept {
             let piece = Range(gap.0.max(kept.0), gap.1.min(kept.1));
             if piece.1 > piece.0 && piece.len() >= min_len {
                 out.push(piece);
@@ -312,6 +314,18 @@ mod tests {
         assert_eq!(
             quiet_stretches(Vec::new(), 20 * S, &edit, 3 * S),
             [Range(0, 4 * S), Range(6 * S, 20 * S)]
+        );
+    }
+
+    #[test]
+    fn a_split_doesnt_hide_a_pause() {
+        // Still from 4 s to 7 s, split at 5.5 s: still one 2 s+ stretch.
+        let mut edit = EditList::full(20 * S);
+        edit.split(5 * S + S / 2);
+        let active = vec![Range(0, 4 * S - MARGIN), Range(7 * S + MARGIN, 20 * S)];
+        assert_eq!(
+            quiet_stretches(active, 20 * S, &edit, 2 * S),
+            [Range(4 * S, 7 * S)]
         );
     }
 
