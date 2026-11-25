@@ -1,0 +1,11 @@
+# Visor knowledge base
+
+How Visor works, for contributors and coding agents about to change it. Each
+page covers one area: how it works, the invariants that must hold, and the
+traps already hit. [`DESIGN.md`](../DESIGN.md) is the one-page overview; start
+there.
+
+- [edit-model.md](edit-model.md): `EditList`, clips, source and output time,
+  cuts and trims, speed, chapters.
+- [editor-ui.md](editor-ui.md): the Slint editor window, its timeline, undo
+  steps and shortcuts.

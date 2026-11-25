@@ -74,8 +74,8 @@ portal + GStreamer).
 ### Crates
 
 - `visor-core`: platform-agnostic types and logic. Includes `Project`
-  (serialized to `project.json`), `EditList` (kept ranges; cut and trim
-  operations), `MediaClock` (pause-aware timestamps), and `RecordingConfig`.
+  (serialized to `project.json`), `EditList` (kept ranges as clips in play
+  order; cut, trim, split and move operations), `MediaClock` (pause-aware timestamps), and `RecordingConfig`.
   Pure Rust, unit-tested, with no FFI.
 - `visor-capture`: capture traits and per-OS backends behind `cfg(target_os)`.
   Backends push timestamped frames and audio buffers into channels.
@@ -158,14 +158,18 @@ is no database: the recordings list is a directory scan.
   UI polls for new frames at 60 Hz and shows them as `slint::Image`s. Mic and
   system audio are mixed and played through `cpal`, following the same clock.
   Positions are in source time; while playing, the player walks the output
-  timeline and skips cut regions.
+  timeline, clip after clip.
 - The camera bubble is composited in the UI for the preview and can be dragged,
   resized, reshaped (circle / rounded square) or hidden.
-- The timeline shows the *source* recording: a filmstrip, a waveform (mic +
-  system), cut regions dimmed, a draggable selection and the playhead.
-  Selection → Cut / Trim; Restore brings everything back.
+- The timeline shows the edit as it plays: clips (kept ranges, which can
+  be split and reordered), each with its part of the filmstrip and waveform
+  (mic + system), a draggable selection and the playhead. Selection → Cut /
+  Trim; clip edges trim or bring back what was cut; Restore brings
+  everything back in recorded order.
 - Edits only mutate `EditList`. **Raw tracks are never modified.**
 - Undo/redo works through snapshots of the `EditList`.
+- More in [`docs/`](docs/README.md): the [edit model](docs/edit-model.md) and
+  the [editor UI](docs/editor-ui.md).
 
 ### Export
 
