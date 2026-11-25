@@ -15,10 +15,15 @@ records why.
 ## Before round 1
 
 - The PR is a **draft** and is pushed (`gh pr view --json isDraft,headRefOid`).
-- `node .claude/skills/tdd/tdd.mjs verify` passes. Don't spend a review round on what fmt,
-  clippy or a failing test already tell you.
-- Note the PR number `<n>` and the local feature note (`.claude/features/<feature>.md`), if
-  there is one. It's gitignored, but the reviewer runs on this machine and can read it.
+- The automatic checks for what the PR touches pass. Don't spend a review round on what a
+  script already tells you:
+  - Rust code: `node .claude/skills/tdd/tdd.mjs verify` (fmt, clippy, tests)
+  - `site/`: `node .claude/skills/site/check.mjs` (CSP, layout, anchors)
+  - only docs: nothing to run, but every claim gets checked against the code.
+- Note the PR number `<n>`, the checkout the branch lives in (the main checkout or a worktree
+  such as `../visor-cam-<feature>`), and the local feature note
+  (`.claude/features/<feature>.md`, in the main checkout), if there is one. The note is
+  gitignored, but the reviewer runs on this machine and can read it.
 
 ## A round
 
@@ -29,7 +34,8 @@ inherits this conversation and its blind spots. The prompt is the brief in
 `references/reviewer-brief.md`, with its placeholders filled in:
 
 - `{{PR}}`: the PR number
-- `{{NOTE}}`: the feature note's path, or "none"
+- `{{WORKDIR}}`: the absolute path of the checkout the PR branch is in
+- `{{NOTE}}`: the feature note's absolute path, or "none"
 - `{{ROUND}}`: the round number
 - `{{PRIOR}}`: for round 2 and later, the earlier decisions as a list (`#id title: fixed in
   <sha>` / `won't fix: <reason>`), so the reviewer checks the fixes and doesn't re-raise
@@ -63,7 +69,7 @@ feature note's *Decisions log*.
   `red`, fix it, prove it `green` (the `tdd` skill).
 - Use one commit per finding or per small group of findings. The message is a plain sentence
   saying what changed (`Keep a blur inside the frame when the clip moves`).
-- Run `tdd.mjs verify` again, then push.
+- Run the PR's automatic checks again (`tdd.mjs verify`, `site/check.mjs`), then push.
 
 ### 4. Post the round
 

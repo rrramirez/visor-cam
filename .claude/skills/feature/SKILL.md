@@ -36,9 +36,25 @@ The phase ends when the user says to build. The note's status becomes **Approved
 
 ## 2. Branch
 
+Use a **worktree** when the user asks for one, or when the main checkout has uncommitted
+changes or sits on another feature's branch. Several features can then be built in parallel,
+and nobody's work in progress gets touched:
+
 ```bash
 git fetch origin
-git status --short          # must be clean. If it isn't, ask what to do with the changes
+git worktree add -b <feature-name> ../visor-cam-<feature-name> origin/main
+```
+
+Then do everything in `../visor-cam-<feature-name>`: edits, builds, checks, commits, pushes.
+The feature note stays in the main checkout's `.claude/features/`. Pass the worktree's path
+to `pr-review` as `{{WORKDIR}}`. Leave the worktree in place after the PR is ready, because
+follow-up changes go there too. Removing it after the merge is the user's call.
+
+Otherwise branch in the main checkout:
+
+```bash
+git fetch origin
+git status --short          # must be clean. If it isn't, don't stash or switch: ask, or use a worktree
 git switch -c <feature-name> origin/main
 ```
 
@@ -61,13 +77,19 @@ first, then the code, and record the call in its *Decisions log*. If it changes 
 
 ## 4. Verify
 
-- `node .claude/skills/tdd/tdd.mjs verify` exits 0 (fmt, clippy `-D warnings`, all tests).
+Run the checks for what the feature touches:
+
+- Rust code: `node .claude/skills/tdd/tdd.mjs verify` exits 0 (fmt, clippy `-D warnings`, all
+  tests). Skip it for a PR that touches no Rust, and say so in the PR.
+- `site/`: `node .claude/skills/site/check.mjs` exits 0, and look at its screenshots.
 - Platform code touched (`visor-capture/src/{windows,linux}.rs`, `#[cfg(target_os)]`) → also
   `scripts/linux-check.sh` (needs Docker) and `scripts/windows-check.sh`. If one can't run
   here, say so in the PR rather than skipping it silently.
 - **Live check**: anything a user can see gets looked at in the real app. Run it
   (`cargo run -p visor`, or the `run` skill) and use the `visor-dev` agent tools to drive it
-  and look at it (`open_recording`, `view_frame`, `status`). Check the note's scenarios that
+  and look at it (`open_recording`, `view_frame`, `status`). For web pages, use Playwright
+  (as `site/check.mjs` does). The Chrome extension can't open `file://` pages or servers on
+  this machine's localhost. Check the note's scenarios that
   automated tests can't cover. Don't move the user's mouse or keyboard without asking. Note
   what you checked live and what you didn't try.
 
@@ -85,7 +107,7 @@ never out of step with the code.
 - **Changelog**: add an entry to `CHANGELOG.md` under *Unreleased* (`### New` / `### Fixed`),
   in the user's terms, like the existing entries.
 
-Then run `tdd.mjs verify` again and commit.
+Then run the checks from phase 4 again and commit.
 
 ## 6. Draft PR → review loop → ready
 

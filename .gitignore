@@ -12,3 +12,6 @@
 
 # Local feature notes (requirements + plan) from the feature skill
 .claude/features/
+
+# Playwright for the site skill's check (npm --prefix .claude/skills/site install)
+.claude/skills/site/node_modules/

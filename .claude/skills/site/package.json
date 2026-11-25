@@ -1,0 +1,12 @@
+{
+  "name": "visor-site-check",
+  "private": true,
+  "description": "Playwright check for site/: CSP, layout and anchors at desktop and phone width. See SKILL.md.",
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

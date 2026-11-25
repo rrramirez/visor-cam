@@ -58,12 +58,46 @@ style-src 'self'`. So:
 Keep the page accessible as it is: `alt` text on every image, a heading order without gaps,
 and real links (not buttons) for navigation.
 
+## Every claim must be true as stated
+
+Each sentence on the site is a promise to someone deciding whether to download Visor. Check
+each claim you write against the code, not only the README, and check its **scope**: a claim
+true for one format, platform or case but written for all of them is false. Reviews of the
+first big site update kept finding exactly this. For example:
+
+- The cover frame is MP4 only, chapters are MP4 and WebM, and GIF has no size choice and no
+  audio (`crates/visor-media/src/export.rs`, `crates/visor/ui/editor.slint`).
+- *Cut pauses* looks at the screen track and listens to mic and system audio, not the camera
+  (`dead_time.rs`).
+- Agents look at the frames they choose (`view_frame`), and those frames go to the agent's AI
+  service. Keep that next to any "nothing leaves your Mac" claim.
+- Use UI labels exactly as the app spells them (grep `crates/visor/ui/*.slint`).
+
+Describe only released behaviour: the latest `CHANGELOG.md` version section, not *Unreleased*,
+unless this PR is the one releasing it.
+
 ## Check it
 
-- `open site/index.html` (or look at it with the browser tools) at desktop and phone width,
-  and check the grid still lines up.
-- `grep -n 'style=\|<script\|http://' site/index.html` should print nothing new.
-- Re-read the changed text next to `CHANGELOG.md` *Unreleased*. They should agree, with the
-  site at the "why you'd want it" level and the changelog at the "what changed" level.
+Run the bundled Playwright check:
+
+```bash
+npm --prefix .claude/skills/site install     # once per checkout (Playwright, pinned)
+node .claude/skills/site/check.mjs           # or: check.mjs <site-dir> <screenshot-dir>
+```
+
+It serves `site/` with the exact CSP from `site/_headers` and loads it at 1280px, 820px and
+390px. It fails on CSP violations (inline styles, scripts), console errors, missing assets,
+horizontal overflow, a ragged feature grid, links to missing anchors, images without `alt`,
+and a nav link whose heading lands under the sticky nav. Exit 0 means everything passed. It
+also prints a screenshot folder: **look at the screenshots** too, because a passing check
+doesn't mean the page reads well.
+
+Use this rather than the Chrome extension, which can't open `file://` pages or servers on this
+machine's localhost. If `npm install` needs to download and you haven't been told you may,
+ask first. Playwright reuses the Chromium in `~/Library/Caches/ms-playwright` when its version
+matches the pin.
+
+Then re-read the changed text next to `CHANGELOG.md`. They should agree, with the site at the
+"why you'd want it" level and the changelog at the "what changed" level.
 
 Commit the site change with the feature (`Mention <feature> on the site`).
