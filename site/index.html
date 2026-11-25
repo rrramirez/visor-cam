@@ -24,6 +24,7 @@
     </a>
     <nav aria-label="Main">
       <a href="#features">Features</a>
+      <a href="#agents">Agents</a>
       <a href="#faq">FAQ</a>
       <a href="https://github.com/rrramirez/visor-cam">Source</a>
       <a class="nav-support" href="https://ko-fi.com/visorcam">Support</a>
@@ -74,15 +75,31 @@
         </article>
         <article>
           <h3>Pause, then carry on</h3>
-          <p>Pause and resume as often as you like. It all ends up in one recording.</p>
+          <p>Pause and resume as often as you like. If Visor crashes, the recording is saved up to the last half second.</p>
         </article>
         <article>
-          <h3>Trim, cut, rearrange</h3>
-          <p>Cut the stumbles, split it into clips and put them in any order, then play it back at 0.5× to 2×.</p>
+          <h3>Shortcuts from any app</h3>
+          <p>Start, stop, pause, mark or discard a recording from whatever app you're in.</p>
+        </article>
+        <article>
+          <h3>Mark each step</h3>
+          <p>Drop a marker as you go and name it later. MP4 and WebM exports get a chapter at each one.</p>
+        </article>
+        <article>
+          <h3>Trim, cut, speed up</h3>
+          <p>Cut the stumbles, fine-tune each cut to the frame, and play it at 0.5× to 2×, with speech that still sounds like you.</p>
+        </article>
+        <article>
+          <h3>Cut the pauses</h3>
+          <p>One click cuts every pause of 2 seconds or more where the screen stays still and nothing is heard.</p>
+        </article>
+        <article>
+          <h3>Blur what's private</h3>
+          <p>Hide a password, an email address or a notification, for the whole video or just a moment.</p>
         </article>
         <article>
           <h3>Export your way</h3>
-          <p>MP4, WebM or GIF, at 1080p, 720p or full size, ready to drop into a chat or an email.</p>
+          <p>MP4 or WebM at 1080p, 720p or full size, or a GIF for a chat. Reduce background noise, even out the volume, pick the cover MP4s show.</p>
         </article>
         <article>
           <h3>Stays out of the shot</h3>
@@ -101,13 +118,36 @@
         <ol>
           <li><strong>Pick what to record</strong> from the menu bar: a screen, a window, an app or an area, plus your camera and mic.</li>
           <li><strong>Hit record.</strong> A short countdown, then a small control bar to pause, stop or start over.</li>
-          <li><strong>Trim and export.</strong> The editor opens right away. Cut, speed up, export, and paste the file wherever it needs to go.</li>
+          <li><strong>Name it, trim it, export it.</strong> The editor opens right away, ready for a name. Cut, speed up, export, and paste the file wherever it needs to go.</li>
         </ol>
       </div>
       <figure class="shot shot-panel">
         <img src="assets/panel.webp" width="760" height="1184" loading="lazy"
              alt="The Visor recorder panel: choose Screen, Window, App or Area, a camera, a microphone and system audio.">
       </figure>
+    </section>
+
+    <section id="agents" class="agents">
+      <h2>Or let an AI agent record the demo</h2>
+      <p class="agents-lede">
+        Ask Claude, Grok Build or another AI agent to show how something works,
+        and it can make the video itself.
+      </p>
+      <ul>
+        <li><strong>It records and marks each step,</strong> and pauses while it sets something up or tries again.</li>
+        <li><strong>It checks what it recorded,</strong> looking at frames where it needs to, and cuts what went wrong or where nothing happens.</li>
+        <li><strong>It hands the video to you</strong> in the editor, where you can change or remove any of its cuts.</li>
+      </ul>
+      <p>
+        It's off until you turn on <em>Let AI agents control recording</em> in
+        Preferences. Then add Visor to your agent. With Claude, in a terminal:
+      </p>
+      <pre><code>claude mcp add visor -- /Applications/Visor.app/Contents/MacOS/visor mcp</code></pre>
+      <p class="agents-note">
+        For Grok Build and other agents, add an MCP server with the
+        part after <code>--</code>: Visor's path, then <code>mcp</code>. Preferences
+        shows it, ready to copy.
+      </p>
     </section>
 
     <section class="support" id="support">
@@ -149,6 +189,27 @@
           account, no recordings and nothing about what you do. Every update is
           signed, and Visor refuses one that doesn't match its signature. You
           can also check by hand from the menu bar: <em>Check for Updates…</em>
+        </p>
+      </details>
+      <details>
+        <summary>Can an agent record without me knowing?</summary>
+        <p>
+          No. Agents can't control Visor until you turn on <em>Let AI agents
+          control recording</em> in Preferences, and a recording an agent starts
+          says <em>Agent</em> on the control bar. Your own controls and shortcuts
+          keep working, so you can pause, stop or discard it at any time. Commands
+          only reach Visor from your own user account on your Mac. When an agent
+          looks at a frame of a recording, that image goes to the agent and the
+          AI service behind it, like anything else you show it.
+        </p>
+      </details>
+      <details>
+        <summary>What are the keyboard shortcuts?</summary>
+        <p>
+          From any app: <kbd>⌥⇧R</kbd> starts a recording with your last choices,
+          or stops one; <kbd>⌥⇧P</kbd> pauses or resumes; <kbd>⌥⇧M</kbd> adds a
+          marker; <kbd>⌥⇧⌫</kbd> discards. You can turn them off in Preferences,
+          which also tells you if another app already uses one.
         </p>
       </details>
       <details>
