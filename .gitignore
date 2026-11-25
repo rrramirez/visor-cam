@@ -9,3 +9,6 @@
 !.dev.vars.example
 .env*
 !.env.example
+
+# Local feature notes (requirements + plan) from the feature skill
+.claude/features/
