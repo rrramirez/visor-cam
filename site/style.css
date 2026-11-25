@@ -17,6 +17,8 @@
 * { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; }
+/* Keep a section's heading clear of the sticky nav when a link jumps to it. */
+section[id] { scroll-margin-top: 80px; }
 
 body {
   margin: 0;
@@ -39,6 +41,27 @@ code {
   background: var(--surface-2);
   padding: 0.1em 0.4em;
   border-radius: 6px;
+}
+
+pre {
+  margin: 0;
+  padding: 14px 18px;
+  overflow-x: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+pre code { background: none; padding: 0; border-radius: 0; font-size: 0.9rem; }
+
+kbd {
+  font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  padding: 0.05em 0.35em;
+  border-radius: 5px;
+  white-space: nowrap;
 }
 
 /* Navigation */
@@ -194,6 +217,16 @@ main { padding: 0 16px; }
 .how strong { color: var(--text); }
 .shot-panel { justify-self: center; max-width: 380px; }
 
+/* Agents */
+.agents { max-width: 760px; margin: 120px auto 0; }
+.agents p { color: var(--muted); margin: 20px 0; }
+.agents .agents-lede { text-align: center; font-size: 1.1rem; max-width: 600px; margin: 16px auto 28px; }
+.agents ul { color: var(--muted); padding-left: 1.2em; margin: 0 0 8px; }
+.agents li { margin-bottom: 12px; padding-left: 6px; }
+.agents li::marker { color: var(--accent); }
+.agents strong { color: var(--text); }
+.agents .agents-note { font-size: 0.95rem; color: var(--faint); margin-top: 14px; }
+
 /* Support */
 .support {
   max-width: 760px;
@@ -246,7 +279,7 @@ main { padding: 0 16px; }
   .hero { padding-top: 48px; }
   .hero-icon { width: 96px; height: 96px; }
   .hero h1 br { display: none; }
-  .features, .how, .support, .faq { margin-top: 80px; }
+  .features, .how, .agents, .support, .faq { margin-top: 80px; }
   .how { grid-template-columns: 1fr; gap: 36px; }
   .how h2 { text-align: center; }
   .shot-panel { max-width: 300px; }
