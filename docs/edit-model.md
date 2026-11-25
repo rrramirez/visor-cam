@@ -29,8 +29,9 @@ is where it plays in the edited video, before speed. The mappings:
 in the exported file, which clocks, labels and chapters show.
 
 **Operations.** In source time: `cut`, `trim`, and the agent variants
-`cut_joining` / `trim_joining`, which also drop pieces shorter than `SLIVER`
-(0.25 s) left next to the cut. In output time, for the editor's selection:
+`cut_joining` / `trim_joining`, which also drop what's left next to the cut
+if it plays for less than `SLIVER` (0.25 s), counting the clips it plays
+straight on with (split but not moved apart) as one. In output time, for the editor's selection:
 `cut_output`, `trim_output`. `with_clip_edge_moved` moves one edge of a clip:
 out as far as the nearest other clip's part of the recording (or either end of
 it), in until the clip is gone. Nothing merges clips, so a cut inside a clip

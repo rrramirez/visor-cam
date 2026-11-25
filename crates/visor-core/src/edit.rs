@@ -228,19 +228,16 @@ impl EditList {
                 .keep
                 .iter()
                 .position(|r| if edge.0 { r.1 == edge.1 } else { r.0 == edge.1 });
-            if let Some(i) = i
-                && self.run_len(i) < min
-                && self.keep.len() > 1
-            {
-                self.keep.remove(i);
+            if let Some(i) = i {
+                self.drop_short_run(i, min);
             }
         }
     }
 
-    /// How long clip `i` plays without a break: with the clips either side
-    /// of it that go on from it, in the recording as in the video (split
-    /// but not moved apart).
-    fn run_len(&self, i: usize) -> Micros {
+    /// Removes clip `i` with the clips either side of it that go on from
+    /// it, in the recording as in the video (split but not moved apart),
+    /// if together they play less than `min` and aren't all that's kept.
+    fn drop_short_run(&mut self, i: usize, min: Micros) {
         let k = &self.keep;
         let (mut a, mut b) = (i, i);
         while a > 0 && k[a - 1].1 == k[a].0 {
@@ -249,7 +246,10 @@ impl EditList {
         while b + 1 < k.len() && k[b].1 == k[b + 1].0 {
             b += 1;
         }
-        k[a..=b].iter().map(Range::len).sum()
+        let len: Micros = k[a..=b].iter().map(Range::len).sum();
+        if len < min && b - a + 1 < k.len() {
+            self.keep.drain(a..=b);
+        }
     }
 
     /// The stretches removed from a recording of `duration`, in order: the
@@ -291,23 +291,15 @@ impl EditList {
         };
         self.trim(start, end);
         // The first and last pieces in the recording, wherever they play.
-        let short = |edit: &Self, last: bool| {
-            let i = if last {
-                (0..edit.keep.len()).max_by_key(|&i| edit.keep[i].1)
-            } else {
-                (0..edit.keep.len()).min_by_key(|&i| edit.keep[i].0)
-            };
-            i.filter(|&i| edit.keep.len() > 1 && edit.run_len(i) < min)
-        };
         if last > end
-            && let Some(i) = short(self, true)
+            && let Some(i) = (0..self.keep.len()).max_by_key(|&i| self.keep[i].1)
         {
-            self.keep.remove(i);
+            self.drop_short_run(i, min);
         }
         if first < start
-            && let Some(i) = short(self, false)
+            && let Some(i) = (0..self.keep.len()).min_by_key(|&i| self.keep[i].0)
         {
-            self.keep.remove(i);
+            self.drop_short_run(i, min);
         }
     }
 
@@ -401,6 +393,18 @@ mod tests {
         t.split(96);
         t.trim_joining(5, 98, 5);
         assert_eq!(t.ranges(), [Range(5, 96), Range(96, 98)]);
+        // A short run of split pieces goes whole, leaving no flash.
+        let mut e = EditList::full(100);
+        e.cut(50, 60);
+        e.split(61);
+        e.split(62);
+        e.cut_joining(63, 90, 5);
+        assert_eq!(e.ranges(), [Range(0, 50), Range(90, 100)]);
+        let mut t = EditList::full(100);
+        t.cut(90, 95);
+        t.split(96);
+        t.trim_joining(0, 97, 5);
+        assert_eq!(t.ranges(), [Range(0, 90)]);
     }
 
     #[test]
