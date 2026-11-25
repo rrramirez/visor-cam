@@ -84,10 +84,10 @@ component SideButton inherits Rectangle {
     }
 }
 
-// One edge of a cut or a blur on the timeline: drag it to move it, or
-// click it to pick it for nudging. A cut's grips lie mostly outside it, so
-// a narrow cut's two edges don't cover each other; a blur's lie inside it,
-// so they can be grabbed at either end of the recording.
+// One edge of a clip or a blur on the timeline: drag it to move it, or
+// click it to pick it for nudging. With `inside`, its grip lies inside what
+// it bounds, so it can be grabbed at either end of the timeline; else
+// mostly outside, so a narrow stretch's two edges don't cover each other.
 component CutEdge inherits Rectangle {
     // Where the edge is, as a fraction of `track-width`.
     in property <float> pos;
@@ -1249,26 +1249,28 @@ export component Editor inherits Window {
                 // Clip edges: drag one to show more or less of the recording,
                 // seeing the clip's first or last frame; or click one and
                 // nudge it a frame at a time with ← →.
+                // An edge at either end of the video can be pulled past the
+                // track, to bring back what was trimmed there.
                 for c[i] in root.clips: CutEdge {
-                    pos: root.drag-clip == i && !root.drag-end ? root.drag-pos : c.start;
+                    pos: root.drag-clip == i && !root.drag-end ? max(0, root.drag-pos) : c.start;
                     track-width: track.width;
                     inside: true;
                     line: Theme.muted;
                     active: root.active-edge == i * 2;
                     grab => { root.grab-edge(i, false, c.start); }
-                    drag(f) => { root.drag-edge(max(0, min(c.end, f))); }
+                    drag(f) => { root.drag-edge(min(c.end, f)); }
                     release(dragged, moved) => { root.release-edge(i, false, dragged, moved); }
                     cancel => { root.cancel-edge(); }
                 }
                 for c[i] in root.clips: CutEdge {
                     end: true;
-                    pos: root.drag-clip == i && root.drag-end ? root.drag-pos : c.end;
+                    pos: root.drag-clip == i && root.drag-end ? min(1, root.drag-pos) : c.end;
                     track-width: track.width;
                     inside: true;
                     line: Theme.muted;
                     active: root.active-edge == i * 2 + 1;
                     grab => { root.grab-edge(i, true, c.end); }
-                    drag(f) => { root.drag-edge(max(c.start, min(1, f))); }
+                    drag(f) => { root.drag-edge(max(c.start, f)); }
                     release(dragged, moved) => { root.release-edge(i, true, dragged, moved); }
                     cancel => { root.cancel-edge(); }
                 }

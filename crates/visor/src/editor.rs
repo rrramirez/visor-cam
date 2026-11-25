@@ -40,7 +40,7 @@ pub struct EditorWindow {
     idle_ticks: Cell<u32>,
     /// Why the last save failed, for an agent's edit to report.
     save_error: RefCell<Option<String>>,
-    /// The edit after the last nudge of a cut's edge, and that edge, so
+    /// The edit after the last nudge of a clip's edge, and that edge, so
     /// the nudges that follow join its step to undo.
     nudged: RefCell<Option<(EditList, bool, Micros)>>,
     /// The blurs after the last nudge of a blur's edge, likewise.
@@ -611,22 +611,19 @@ impl EditorWindow {
         });
     }
 
-    /// Makes a blur cover the selection instead.
+    /// Makes a blur cover the selection instead: one blur for each part of
+    /// the recording it plays, as moved clips can make it several.
     fn blur_to_selection(&self, index: usize) {
-        // From the selection's first frame to its last, in the recording.
         let pieces = self.selection_pieces();
-        let (Some(start), Some(end)) = (
-            pieces.iter().map(|p| p.0).min(),
-            pieces.iter().map(|p| p.1).max(),
-        ) else {
+        let Some(blur) = self.project.borrow().blurs.get(index).cloned() else {
             return;
         };
-        if index < self.project.borrow().blurs.len() {
-            self.change_blurs(|blurs| {
-                blurs[index].start_us = start;
-                blurs[index].end_us = end;
-            });
+        if pieces.is_empty() {
+            return;
         }
+        self.change_blurs(|blurs| {
+            blurs.splice(index..=index, blur_over(&blur, &pieces));
+        });
     }
 
     /// The picked blur's box moved: the preview follows as it's dragged,
@@ -773,11 +770,16 @@ impl EditorWindow {
     }
 
     /// The selection in output time, if any.
+    /// Within half a frame of a clip's edge, it's that edge: no flash of
+    /// the next clip is left by a cut, nor kept by a trim.
     fn selection(&self) -> Option<(Micros, Micros)> {
         let (a, b) = (self.ui.get_sel_start(), self.ui.get_sel_end());
         (a >= 0.0 && b > a).then(|| {
             let d = self.output_duration() as f64;
-            ((f64::from(a) * d) as Micros, (f64::from(b) * d) as Micros)
+            let half_frame = (500_000.0 / self.fps()) as Micros;
+            let edit = &self.project.borrow().edit;
+            let at = |f: f32| snap_to_clip_edge(edit, (f64::from(f) * d) as Micros, half_frame);
+            (at(a), at(b))
         })
     }
 
@@ -851,11 +853,8 @@ impl EditorWindow {
     /// the timeline, at the nearest frame.
     fn clip_edge_time(&self, index: usize, end: bool, f: f32) -> Option<Micros> {
         let edit = &self.project.borrow().edit;
-        let r = *edit.ranges().get(index)?;
-        let (a, b) = edit.clip_span(index)?;
         let at = (f64::from(f) * edit.duration() as f64) as i64;
-        let (edge, out) = if end { (r.1, b) } else { (r.0, a) };
-        let t = (edge as i64 + at - out as i64).max(0) as f64;
+        let t = clip_edge_source(edit, index, end, at)? as f64;
         Some(self.frame_time(self.frames_at(t).round()))
     }
 
@@ -1081,7 +1080,9 @@ impl EditorWindow {
                     start: (a as f64 / out) as f32,
                     end: (b as f64 / out) as f32,
                     src_start: (edit.ranges()[i].0 as f64 / d) as f32,
-                    label: util::clock_tenths(b - a).into(),
+                    // As long as it lasts in the video, after speed.
+                    label: util::clock_tenths(((b - a) as f64 / project.speed()).round() as Micros)
+                        .into(),
                 })
             })
             .collect();
@@ -1557,11 +1558,13 @@ fn kept_frame(edit: &EditList, t: Micros) -> Micros {
         return t;
     }
     let ranges = edit.ranges();
+    // The latest part recorded before it, wherever it plays.
     ranges
         .iter()
-        .rev()
-        .find(|r| r.1 <= t)
-        .map(|r| r.1 - 1)
+        .map(|r| r.1)
+        .filter(|&e| e <= t)
+        .max()
+        .map(|e| e - 1)
         .or_else(|| ranges.first().map(|r| r.0))
         .unwrap_or(0)
 }
@@ -1587,21 +1590,70 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 /// When a blur is in the video: the whole of it, a stretch in the video's
 /// time (after cuts and speed), or nothing if that was cut.
 fn blur_label(project: &Project, blur: &Blur) -> String {
-    let (start, end) = (
-        project.output_time(blur.start_us),
-        project.output_time(blur.end_us),
-    );
     if blur.start_us == 0 && blur.end_us >= project.duration_us {
-        "Whole video".to_string()
-    } else if end <= start {
-        "Cut from the video".to_string()
-    } else {
-        format!(
-            "{} – {}",
-            util::clock_tenths(start),
-            util::clock_tenths(end)
-        )
+        return "Whole video".to_string();
     }
+    // The stretches of the video it plays in, after moves, cuts and speed;
+    // parts of it that play one after the other are one.
+    let mut parts: Vec<(Micros, Micros)> = Vec::new();
+    let mut at = 0;
+    for r in project.edit.ranges() {
+        let (s, e) = (blur.start_us.max(r.0), blur.end_us.min(r.1));
+        if e > s {
+            let part = (at + s - r.0, at + e - r.0);
+            match parts.last_mut() {
+                Some(last) if last.1 == part.0 => last.1 = part.1,
+                _ => parts.push(part),
+            }
+        }
+        at += r.len();
+    }
+    let Some(&(start, end)) = parts.first() else {
+        return "Cut from the video".to_string();
+    };
+    let time = |t: Micros| util::clock_tenths((t as f64 / project.speed()).round() as Micros);
+    let range = format!("{} – {}", time(start), time(end));
+    match parts.len() {
+        1 => range,
+        2 => format!("{range} and 1 more part"),
+        n => format!("{range} and {} more parts", n - 1),
+    }
+}
+
+/// Output time `t` moved onto the nearest clip edge (or either end of the
+/// video) if it's within `tolerance` of one, so a selection made from a
+/// clip's span, which comes back from the UI a few µs off, covers it
+/// exactly.
+fn snap_to_clip_edge(edit: &EditList, t: Micros, tolerance: Micros) -> Micros {
+    (0..edit.ranges().len())
+        .filter_map(|i| edit.clip_span(i))
+        .flat_map(|(a, b)| [a, b])
+        .chain([0])
+        .min_by_key(|e| e.abs_diff(t))
+        .filter(|e| e.abs_diff(t) <= tolerance)
+        .unwrap_or(t)
+}
+
+/// The source time clip `index`'s start (or `end`) goes to when dragged to
+/// output time `at`, which may be outside the video (before it or after
+/// it): as far along the recording as it moved on the timeline.
+fn clip_edge_source(edit: &EditList, index: usize, end: bool, at: i64) -> Option<Micros> {
+    let r = *edit.ranges().get(index)?;
+    let (a, b) = edit.clip_span(index)?;
+    let (edge, out) = if end { (r.1, b) } else { (r.0, a) };
+    Some((edge as i64 + at - out as i64).max(0) as Micros)
+}
+
+/// `blur` as one blur for each of `pieces`, the same area in each.
+fn blur_over(blur: &Blur, pieces: &[visor_core::Range]) -> Vec<Blur> {
+    pieces
+        .iter()
+        .map(|p| Blur {
+            start_us: p.0,
+            end_us: p.1,
+            ..blur.clone()
+        })
+        .collect()
 }
 
 /// A marker as the timeline shows it: its time, and its text if any.
@@ -1639,6 +1691,85 @@ mod tests {
             blur_label(&project, &blur(500_000, 1_500_000)),
             "Cut from the video"
         );
+    }
+
+    #[test]
+    fn blurs_over_moved_clips_are_labelled_by_when_they_play() {
+        let mut project = Project::new("Demo", "2026-10-30T00:00:00Z", 100_000_000);
+        project.edit.split(50_000_000);
+        project.edit.move_clip(1, 0);
+        // [50, 100) plays first, then [0, 50): source 10–60 s plays at
+        // 0–10 s and 60–100 s.
+        let blur = Blur {
+            start_us: 10_000_000,
+            end_us: 60_000_000,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        assert_eq!(
+            blur_label(&project, &blur),
+            "0:00.0 – 0:10.0 and 1 more part"
+        );
+        let inside = Blur {
+            start_us: 60_000_000,
+            end_us: 70_000_000,
+            ..blur.clone()
+        };
+        assert_eq!(blur_label(&project, &inside), "0:10.0 – 0:20.0");
+    }
+
+    #[test]
+    fn selected_clips_snap_to_their_edges() {
+        let mut edit = EditList::full(123_456_789);
+        edit.split(61_000_001);
+        // A few µs off, as a clip's span is after a trip through f32.
+        assert_eq!(snap_to_clip_edge(&edit, 61_000_004, 1_000), 61_000_001);
+        assert_eq!(snap_to_clip_edge(&edit, 123_456_780, 1_000), 123_456_789);
+        assert_eq!(snap_to_clip_edge(&edit, 9, 1_000), 0);
+        assert_eq!(snap_to_clip_edge(&edit, 61_500_000, 1_000), 61_500_000);
+    }
+
+    #[test]
+    fn outer_clip_edges_drag_past_the_timeline() {
+        let mut edit = EditList::full(100);
+        edit.trim(10, 90);
+        // Dragged 5 before the timeline's start, or 4 past its end.
+        assert_eq!(clip_edge_source(&edit, 0, false, -5), Some(5));
+        assert_eq!(clip_edge_source(&edit, 0, true, 84), Some(94));
+        assert_eq!(clip_edge_source(&edit, 0, false, -50), Some(0));
+        assert_eq!(clip_edge_source(&edit, 1, false, 0), None);
+    }
+
+    #[test]
+    fn a_blur_limited_to_a_selection_over_moved_clips_covers_only_it() {
+        let blur = Blur {
+            start_us: 0,
+            end_us: 100,
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+        };
+        let parts = blur_over(
+            &blur,
+            &[visor_core::Range(90, 100), visor_core::Range(0, 10)],
+        );
+        assert_eq!(parts.len(), 2);
+        assert_eq!((parts[0].start_us, parts[0].end_us), (90, 100));
+        assert_eq!((parts[1].start_us, parts[1].end_us), (0, 10));
+        assert!(parts.iter().all(|p| p.x == 0.1 && p.height == 0.4));
+    }
+
+    #[test]
+    fn thumbnails_snap_to_kept_frames_of_moved_clips() {
+        let mut edit = EditList::full(10_000_000);
+        edit.cut(4_000_000, 6_000_000);
+        edit.trim(0, 8_000_000);
+        edit.move_clip(1, 0);
+        // Past everything: the last frame of the latest part recorded.
+        assert_eq!(kept_frame(&edit, 9_000_000), 7_999_999);
     }
 
     #[test]
