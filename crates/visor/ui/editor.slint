@@ -201,8 +201,9 @@ export component Editor inherits Window {
     property <bool> drag-end;
     property <float> drag-pos;
     // A clip being moved, where the pointer is, and the slot it would go
-    // to (before that clip; the clip count for last).
-    property <int> moving-clip: -1;
+    // to (before that clip; the clip count for last). Set to -1 when the
+    // clips change, which ends the move.
+    in-out property <int> moving-clip: -1;
     property <float> moving-pos;
     property <int> moving-slot;
     // Where a dragged clip would go, given the timeline position under the
@@ -1286,7 +1287,10 @@ export component Editor inherits Window {
                     line: Theme.warning;
                     active: root.blur-edge == 0;
                     grab => { root.grab-blur-edge(0, b.start); }
-                    drag(f) => { root.drag-blur(max(0, min(b.end >= 0 ? b.end : 1, f))); }
+                    // Not held to the other edge on the timeline: moved clips
+                    // can play the end first. It's kept in order in the
+                    // recording instead.
+                    drag(f) => { root.drag-blur(max(0, min(1, f))); }
                     release(dragged, moved) => { root.release-blur-edge(false, moved); }
                     cancel => { root.cancel-blur-edge(); }
                 }
@@ -1299,7 +1303,7 @@ export component Editor inherits Window {
                     line: Theme.warning;
                     active: root.blur-edge == 1;
                     grab => { root.grab-blur-edge(1, b.end); }
-                    drag(f) => { root.drag-blur(max(b.start, min(1, f))); }
+                    drag(f) => { root.drag-blur(max(0, min(1, f))); }
                     release(dragged, moved) => { root.release-blur-edge(true, moved); }
                     cancel => { root.cancel-blur-edge(); }
                 }

@@ -783,10 +783,11 @@ impl EditorWindow {
         })
     }
 
-    /// The parts of the recording the selection plays, in order.
+    /// The parts of the recording the selection plays, in order, those of
+    /// clips split but not moved apart joined.
     fn selection_pieces(&self) -> Vec<visor_core::Range> {
         self.selection()
-            .map(|(a, b)| self.project.borrow().edit.pieces(a, b))
+            .map(|(a, b)| EditList::joined(self.project.borrow().edit.pieces(a, b)))
             .unwrap_or_default()
     }
 
@@ -1052,6 +1053,7 @@ impl EditorWindow {
         self.project.borrow_mut().edit = edit.clone();
         self.pick_edge(picked);
         self.ui.set_drag_clip(-1);
+        self.ui.set_moving_clip(-1);
         self.ui.set_sel_start(-1.0);
         self.ui.set_sel_end(-1.0);
         self.control().set_edit(edit);
