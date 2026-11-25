@@ -39,9 +39,14 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    editor closes, the recording's folder is renamed to match.
    In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
-     timeline to seek, drag on it to select.
+     timeline to seek, drag on it to select. The timeline shows the video
+     as it plays: what's cut is gone from it.
    - **I / O** set the selection from the playhead, **⌫** cut the selection,
-     **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore all cuts* to start over.
+     **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore the whole recording*
+     to start over.
+   - **Clips**: **S** (*Split at playhead*) splits the video in two clips
+     there; cutting also leaves one either side. Drag a clip by the bar along
+     its top to play it somewhere else, or click the bar to select the clip.
    - **Markers**: *Add marker* (**M**) marks the playhead. Name each one in
      the sidebar, click its time to jump there, or delete it.
    - **Blur**: *Blur an area* (**B**) hides part of the screen, like a
@@ -55,9 +60,10 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      of the timeline selected, *Blur only during the selection* sets both
      at once. It's heavy enough that text under it can't be read, fades out
      at its edges, and the camera bubble stays on top.
-   - Drag either edge of a cut to adjust it; the preview shows the frame
-     under the edge. Click an edge, then **← →** move it a frame at a time
-     (**⇧** for 10). Dragging an edge onto the cut's other edge removes it.
+   - Drag either edge of a clip to show less of the recording, or more of
+     what was cut next to it; the preview shows the clip's first or last
+     frame. Click an edge, then **← →** move it a frame at a time (**⇧** for
+     10). Dragging an edge onto the clip's other edge removes the clip.
    - *Cut pauses* finds every stretch of 2 seconds or more where the screen
      stays still and nothing is heard, and cuts them all in one step. It
      leaves a moment around what happens, and ignores a spinner or a clock
@@ -114,7 +120,7 @@ visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
 visor cut 12 19.5                            # remove 0:12–0:19.5 (recorded time)
 visor trim 2 1:05                            # keep only 0:02–1:05
-visor restore                                # undo all cuts
+visor restore                                # undo all cuts and clip moves
 visor open                                   # open it in the editor
 visor frame 15                               # save the frame at 0:15 as a JPEG
 visor dead-time                              # where nothing happens, to cut

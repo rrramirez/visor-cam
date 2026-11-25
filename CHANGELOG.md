@@ -4,6 +4,14 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Clips:** split the video into clips with **S** (*Split at playhead*) and drag a clip by its top bar to play it somewhere else; blurs and markers go with it, and chapters follow the new order. The timeline now shows the video as it plays, without the parts that were cut. To bring some of a cut part back, drag the edge of the clip next to it; *Restore the whole recording* puts everything back as it was recorded.
+
+### Fixed
+- The sound wave under the timeline was squeezed into its middle; it spans the timeline again.
+
 ## 0.8.0
 
 ### New

@@ -113,6 +113,50 @@ fn exports_mp4_with_cuts_and_bubble() {
 }
 
 #[test]
+fn moved_clips_export_in_their_order() {
+    // 0–2 s, then 4–6 s moved before it, with a marker in each.
+    let (dir, mut project) = project("export-clips", 6);
+    project.edit.cut(2_000_000, 4_000_000);
+    project.edit.move_clip(1, 0);
+    project.markers = vec![marker(1_000_000, "First"), marker(5_000_000, "Second")];
+    let out = dir.join("out.mp4");
+    export(
+        &dir,
+        &project,
+        &out,
+        &ExportOptions::new(ExportFormat::Mp4),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let (duration, _) = probe(&out);
+    assert!((duration - 4.0).abs() < 0.08, "duration {duration}");
+    // Chapters in the order they play.
+    assert_eq!(
+        chapters(&out),
+        [
+            (0.0, 1.0, "export-clips".to_string()),
+            (1.0, 3.0, "Second".to_string()),
+            (3.0, 4.0, "First".to_string())
+        ]
+    );
+    // Output 0.5 s is source 4.5 s (frame 135); output 2.5 s is 0.5 s (15).
+    let mut reader =
+        VideoReader::open(&out, Some((ffmpeg::format::Pixel::YUV420P, 640, 360))).unwrap();
+    for (out_t, src_frame) in [(500_000u64, 135u64), (2_500_000, 15), (3_900_000, 57)] {
+        reader.seek(out_t).unwrap();
+        let (_, f) = reader.frame_at(out_t).unwrap().unwrap();
+        let expected = f64::from(luma(src_frame));
+        assert!(
+            (top_luma(&f) - expected).abs() < 8.0,
+            "at {out_t}: {} vs {expected}",
+            top_luma(&f)
+        );
+    }
+    common::cleanup(&dir);
+}
+
+#[test]
 fn exports_webm_vp9_and_av1() {
     let (dir, mut project) = project("export-webm", 3);
     project.edit.trim(500_000, 2_500_000);

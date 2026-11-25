@@ -1,7 +1,10 @@
 //! Non-destructive edit list: the ranges of the recording that are kept.
 //!
 //! Raw tracks are never modified; trimming and cutting only change this list,
-//! and export renders it. Ranges are sorted, non-overlapping and non-empty.
+//! and export renders it. Each range is a clip, played in the list's order,
+//! which needn't be the recording's: clips can be split and moved. Ranges
+//! don't overlap and aren't empty; neighbours may touch, as two clips split
+//! from one do.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,16 +44,123 @@ impl EditList {
         &self.keep
     }
 
-    /// Whether the ranges are sorted, non-overlapping, non-empty and end by
+    /// Whether the ranges are non-overlapping, non-empty and end by
     /// `duration`, as the edit operations keep them. Lists loaded from disk
     /// are checked with this.
     pub fn is_valid(&self, duration: Micros) -> bool {
         let mut prev_end = 0;
-        self.keep.iter().all(|r| {
+        self.in_recording_order().iter().all(|r| {
             let ok = !r.is_empty() && r.0 >= prev_end && r.1 <= duration;
             prev_end = r.1;
             ok
         })
+    }
+
+    /// The ranges in the order they were recorded.
+    fn in_recording_order(&self) -> Vec<Range> {
+        let mut sorted = self.keep.clone();
+        sorted.sort_by_key(|r| r.0);
+        sorted
+    }
+
+    /// Whether the clips play in the order they were recorded.
+    pub fn in_order(&self) -> bool {
+        self.keep.windows(2).all(|w| w[0].1 <= w[1].0)
+    }
+
+    /// Where clip `index` plays: its output start and end.
+    pub fn clip_span(&self, index: usize) -> Option<(Micros, Micros)> {
+        let r = self.keep.get(index)?;
+        let start = self.keep[..index].iter().map(Range::len).sum();
+        Some((start, start + r.len()))
+    }
+
+    /// The clip that source time `source` is in.
+    pub fn clip_at(&self, source: Micros) -> Option<usize> {
+        self.keep.iter().position(|r| (r.0..r.1).contains(&source))
+    }
+
+    /// Splits the clip that `source` is inside of in two there. False if it
+    /// is in no clip, or at a clip's start.
+    pub fn split(&mut self, source: Micros) -> bool {
+        match self.clip_at(source) {
+            Some(i) if self.keep[i].0 < source => {
+                let r = self.keep[i];
+                self.keep[i] = Range(r.0, source);
+                self.keep.insert(i + 1, Range(source, r.1));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Moves clip `from` to play before clip `to` (counted before it moves),
+    /// or last if `to` is past the end.
+    pub fn move_clip(&mut self, from: usize, to: usize) {
+        if from >= self.keep.len() {
+            return;
+        }
+        let clip = self.keep.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.keep.insert(to.min(self.keep.len()), clip);
+    }
+
+    /// This edit with the start (or `end`) of clip `index` moved to source
+    /// time `t`: out to show more of the recording, up to where another
+    /// clip's part of it begins, or in to show less. A clip moved onto its
+    /// other edge goes away, unless it's the last one. `None` if there's
+    /// no such clip.
+    pub fn with_clip_edge_moved(
+        &self,
+        duration: Micros,
+        index: usize,
+        end: bool,
+        t: Micros,
+    ) -> Option<Self> {
+        let r = *self.keep.get(index)?;
+        let others = self.keep.iter().enumerate().filter(|&(i, _)| i != index);
+        let mut edit = self.clone();
+        if end {
+            let limit = others.map(|(_, o)| o.0).filter(|&s| s >= r.1).min();
+            edit.keep[index].1 = t.clamp(r.0, limit.unwrap_or(duration).min(duration));
+        } else {
+            let limit = others.map(|(_, o)| o.1).filter(|&e| e <= r.0).max();
+            edit.keep[index].0 = t.clamp(limit.unwrap_or(0), r.1);
+        }
+        if edit.keep[index].is_empty() {
+            if edit.keep.len() == 1 {
+                return Some(self.clone());
+            }
+            edit.keep.remove(index);
+        }
+        Some(edit)
+    }
+
+    /// The source pieces that play over output time `[start, end)`, in the
+    /// order they play.
+    pub fn pieces(&self, start: Micros, end: Micros) -> Vec<Range> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        for r in &self.keep {
+            let (a, b) = (start.max(at), end.min(at + r.len()));
+            if b > a {
+                out.push(Range(r.0 + (a - at), r.0 + (b - at)));
+            }
+            at += r.len();
+        }
+        out
+    }
+
+    /// Removes output time `[start, end)`, which may span several clips.
+    pub fn cut_output(&mut self, start: Micros, end: Micros) {
+        for p in self.pieces(start, end) {
+            self.cut(p.0, p.1);
+        }
+    }
+
+    /// Keeps only output time `[start, end)`.
+    pub fn trim_output(&mut self, start: Micros, end: Micros) {
+        self.keep = self.pieces(start, end);
     }
 
     /// Length of the edited output.
@@ -92,10 +202,22 @@ impl EditList {
         if self.duration() == kept || self.keep.len() < 2 {
             return;
         }
-        // The first piece after the gap; the one before it ends the gap.
-        let after = self.keep.partition_point(|r| r.1 <= start);
-        for i in [Some(after), after.checked_sub(1)].into_iter().flatten() {
-            if self.keep.get(i).is_some_and(|r| r.len() < min) && self.keep.len() > 1 {
+        // The pieces either side of the gap in the recording, wherever
+        // they play.
+        let after = self.keep.iter().filter(|r| r.1 > start).map(|r| r.0).min();
+        let before = self.keep.iter().filter(|r| r.1 <= start).map(|r| r.1).max();
+        for edge in [after.map(|s| (false, s)), before.map(|e| (true, e))]
+            .into_iter()
+            .flatten()
+        {
+            let i = self
+                .keep
+                .iter()
+                .position(|r| if edge.0 { r.1 == edge.1 } else { r.0 == edge.1 });
+            if let Some(i) = i
+                && self.keep[i].len() < min
+                && self.keep.len() > 1
+            {
                 self.keep.remove(i);
             }
         }
@@ -106,7 +228,7 @@ impl EditList {
     pub fn cuts(&self, duration: Micros) -> Vec<Range> {
         let mut cuts = Vec::new();
         let mut last = 0;
-        for r in &self.keep {
+        for r in &self.in_recording_order() {
             if r.0 > last {
                 cuts.push(Range(last, r.0));
             }
@@ -116,33 +238,6 @@ impl EditList {
             cuts.push(Range(last, duration));
         }
         cuts
-    }
-
-    /// This edit with the start (or `end`) of cut `index` (see [`cuts`])
-    /// moved to `t`. A cut moved onto its other edge goes away; one moved
-    /// over a neighbour joins it. `None` if there's no such cut.
-    ///
-    /// [`cuts`]: Self::cuts
-    pub fn with_cut_edge_moved(
-        &self,
-        duration: Micros,
-        index: usize,
-        end: bool,
-        t: Micros,
-    ) -> Option<Self> {
-        let mut cuts = self.cuts(duration);
-        let cut = cuts.get_mut(index)?;
-        let t = t.min(duration);
-        if end {
-            cut.1 = t;
-        } else {
-            cut.0 = t;
-        }
-        let mut edit = Self::full(duration);
-        for c in cuts {
-            edit.cut(c.0, c.1);
-        }
-        Some(edit)
     }
 
     /// Keep only `[start, end)` (source time), dropping everything outside it.
@@ -158,17 +253,32 @@ impl EditList {
     /// [`trim`]: Self::trim
     /// [`cut_joining`]: Self::cut_joining
     pub fn trim_joining(&mut self, start: Micros, end: Micros, min: Micros) {
-        let (first, last) = match (self.keep.first(), self.keep.last()) {
-            (Some(first), Some(last)) => (first.0, last.1),
+        let (first, last) = match (
+            self.keep.iter().map(|r| r.0).min(),
+            self.keep.iter().map(|r| r.1).max(),
+        ) {
+            (Some(first), Some(last)) => (first, last),
             _ => return,
         };
         self.trim(start, end);
-        let short = |r: Option<&Range>| r.is_some_and(|r| r.len() < min);
-        if last > end && self.keep.len() > 1 && short(self.keep.last()) {
-            self.keep.pop();
+        // The first and last pieces in the recording, wherever they play.
+        let short = |edit: &Self, last: bool| {
+            let i = if last {
+                (0..edit.keep.len()).max_by_key(|&i| edit.keep[i].1)
+            } else {
+                (0..edit.keep.len()).min_by_key(|&i| edit.keep[i].0)
+            };
+            i.filter(|&i| edit.keep.len() > 1 && edit.keep[i].len() < min)
+        };
+        if last > end
+            && let Some(i) = short(self, true)
+        {
+            self.keep.remove(i);
         }
-        if first < start && self.keep.len() > 1 && short(self.keep.first()) {
-            self.keep.remove(0);
+        if first < start
+            && let Some(i) = short(self, false)
+        {
+            self.keep.remove(i);
         }
     }
 
@@ -184,20 +294,25 @@ impl EditList {
         None
     }
 
-    /// How much is kept before source time `source`: its output time, and
-    /// inside a cut, that of the kept time after it.
+    /// Where source time `source` plays: its output time, and inside a
+    /// cut, that of the kept time after it in the recording (the end, if
+    /// none is).
     pub fn kept_before(&self, source: Micros) -> Micros {
-        self.keep.iter().map(|r| source.clamp(r.0, r.1) - r.0).sum()
+        if let Some(out) = self.to_output(source) {
+            return out;
+        }
+        let next = (0..self.keep.len())
+            .filter(|&i| self.keep[i].0 > source)
+            .min_by_key(|&i| self.keep[i].0);
+        next.and_then(|i| self.clip_span(i))
+            .map_or(self.duration(), |(start, _)| start)
     }
 
     /// Map a source time to output time, or `None` if it was cut.
     pub fn to_output(&self, source: Micros) -> Option<Micros> {
         let mut acc = 0;
         for r in &self.keep {
-            if source < r.0 {
-                return None;
-            }
-            if source < r.1 {
+            if (r.0..r.1).contains(&source) {
                 return Some(acc + (source - r.0));
             }
             acc += r.len();
@@ -211,35 +326,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cut_edges_move_shrink_and_join() {
+    fn clips_split_move_and_play_in_their_order() {
         let mut e = EditList::full(100);
-        e.cut(20, 30);
-        e.cut(50, 60);
-        e.cut(90, 100);
-        assert_eq!(e.cuts(100), [Range(20, 30), Range(50, 60), Range(90, 100)]);
-        // Shrink the first cut from its end, grow the second from its start.
-        let moved = e.with_cut_edge_moved(100, 0, true, 25).unwrap();
-        assert_eq!(
-            moved.cuts(100),
-            [Range(20, 25), Range(50, 60), Range(90, 100)]
-        );
-        let moved = e.with_cut_edge_moved(100, 1, false, 45).unwrap();
-        assert_eq!(
-            moved.cuts(100),
-            [Range(20, 30), Range(45, 60), Range(90, 100)]
-        );
-        // Onto its other edge: gone. Over its neighbour: joined.
-        let gone = e.with_cut_edge_moved(100, 0, true, 20).unwrap();
-        assert_eq!(gone.cuts(100), [Range(50, 60), Range(90, 100)]);
-        let joined = e.with_cut_edge_moved(100, 0, true, 55).unwrap();
-        assert_eq!(joined.cuts(100), [Range(20, 60), Range(90, 100)]);
-        // The trimmed end, moved back, keeps more.
-        let kept = e.with_cut_edge_moved(100, 2, false, 95).unwrap();
-        assert_eq!(
-            kept.cuts(100),
-            [Range(20, 30), Range(50, 60), Range(95, 100)]
-        );
-        assert!(e.with_cut_edge_moved(100, 3, false, 10).is_none());
+        assert!(e.split(40));
+        assert!(!e.split(40), "already a clip's start");
+        assert!(e.in_order());
+        // The second clip first: it plays first.
+        e.move_clip(1, 0);
+        assert_eq!(e.ranges(), [Range(40, 100), Range(0, 40)]);
+        assert!(!e.in_order() && e.is_valid(100));
+        assert_eq!(e.to_source(0), Some(40));
+        assert_eq!(e.to_source(60), Some(0));
+        assert_eq!(e.to_output(10), Some(70));
+        assert_eq!(e.clip_span(1), Some((60, 100)));
+        // Moved to the end, counting from before it moves.
+        e.move_clip(0, 2);
+        assert_eq!(e.ranges(), [Range(0, 40), Range(40, 100)]);
+    }
+
+    #[test]
+    fn output_cuts_and_trims_span_clips() {
+        let mut e = EditList::full(100);
+        e.split(50);
+        e.move_clip(1, 0);
+        // Plays 50–100, then 0–50: output 40–60 is 90–100 and 0–10.
+        assert_eq!(e.pieces(40, 60), [Range(90, 100), Range(0, 10)]);
+        let mut cut = e.clone();
+        cut.cut_output(40, 60);
+        assert_eq!(cut.ranges(), [Range(50, 90), Range(10, 50)]);
+        e.trim_output(40, 60);
+        assert_eq!(e.ranges(), [Range(90, 100), Range(0, 10)]);
+    }
+
+    #[test]
+    fn clip_edges_show_more_up_to_other_clips_or_less() {
+        let mut e = EditList::full(100);
+        e.cut(40, 60);
+        e.move_clip(1, 0);
+        // [60, 100) then [0, 40): the first clip's start goes back to 40 at
+        // most, where the other clip's part ends.
+        let more = e.with_clip_edge_moved(100, 0, false, 10).unwrap();
+        assert_eq!(more.ranges(), [Range(40, 100), Range(0, 40)]);
+        let less = e.with_clip_edge_moved(100, 1, true, 30).unwrap();
+        assert_eq!(less.ranges(), [Range(60, 100), Range(0, 30)]);
+        let end = e.with_clip_edge_moved(100, 1, true, 90).unwrap();
+        assert_eq!(end.ranges(), [Range(60, 100), Range(0, 60)]);
+        // Onto its other edge: gone, unless it's the only clip.
+        let gone = e.with_clip_edge_moved(100, 1, false, 40).unwrap();
+        assert_eq!(gone.ranges(), [Range(60, 100)]);
+        let only = gone.with_clip_edge_moved(100, 0, true, 60).unwrap();
+        assert_eq!(only, gone);
+        assert!(e.with_clip_edge_moved(100, 2, true, 10).is_none());
+    }
+
+    #[test]
+    fn reordered_clips_join_cuts_and_trim_by_the_recording() {
+        let mut e = EditList::full(100);
+        e.split(50);
+        e.move_clip(1, 0);
+        // A short piece left next to a cut, in the recording, goes.
+        e.cut_joining(52, 60, 5);
+        assert_eq!(e.ranges(), [Range(60, 100), Range(0, 50)]);
+        let mut t = e.clone();
+        t.trim_joining(3, 98, 5);
+        assert_eq!(t.ranges(), [Range(60, 98), Range(3, 50)]);
+        // Inside a cut, a time plays where the video goes on after it.
+        assert_eq!(e.kept_before(55), 0);
+        assert_eq!(e.kept_before(100), 90);
     }
 
     #[test]

@@ -229,14 +229,19 @@ impl Project {
     /// without markers. Markers in what's trimmed off either end start none.
     pub fn chapters(&self) -> Vec<Chapter> {
         let end = self.output_duration();
-        let mut markers: Vec<&Marker> = self.markers.iter().collect();
-        markers.sort_by_key(|m| m.at_us);
-        let first_kept = self.edit.ranges().first().map_or(0, |r| r.0);
+        let first_kept = self.edit.ranges().iter().map(|r| r.0).min().unwrap_or(0);
+        // In the order they play, which moved clips change.
+        let mut markers: Vec<(Micros, &Marker)> = self
+            .markers
+            .iter()
+            .filter(|m| m.at_us >= first_kept)
+            .map(|m| (self.output_time(m.at_us), m))
+            .collect();
+        markers.sort_by_key(|&(at, m)| (at, m.at_us));
         // FFmpeg takes C strings: a marker's text could hold a NUL.
         let clean = |text: &str| text.replace('\0', "").trim().to_string();
         let mut starts = vec![(0, clean(&self.title))];
-        for m in markers.into_iter().filter(|m| m.at_us >= first_kept) {
-            let at = self.output_time(m.at_us);
+        for (at, m) in markers {
             if at + MIN_CHAPTER > end {
                 break;
             }

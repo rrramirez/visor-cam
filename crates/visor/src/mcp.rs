@@ -140,7 +140,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "cut_recording",
-            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Anything under 0.25 s it leaves kept between it and another cut, or an end, is cut too, unless that is all that's left. Returns what is kept.",
+            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Anything under 0.25 s it leaves kept between it and another cut, or an end, is cut too, unless that is all that's left. Returns what is kept: the clips in the order they play, which the user may have changed in the editor.",
             "inputSchema": edit_schema(),
         },
         {
@@ -150,7 +150,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "restore_recording",
-            "description": "Undoes all cuts and trims of a recording.",
+            "description": "Undoes all cuts and trims of a recording, and plays its clips in the order recorded again.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
         },
         {

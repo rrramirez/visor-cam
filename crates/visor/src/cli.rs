@@ -40,7 +40,7 @@ Edit the recording last stopped, or the one given with --folder FOLDER.
 Times are recorded seconds (or M:SS), as marks and status show them:
   cut START END               remove START to END
   trim START END              keep only START to END
-  restore                     undo all cuts
+  restore                     undo all cuts, clips in recorded order
   open                        open it in the editor
   frame SECONDS [--out FILE]  save the frame at SECONDS, cut or not, as a JPEG
                               (frame-SECONDS.jpg here by default)

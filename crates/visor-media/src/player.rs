@@ -320,15 +320,17 @@ fn fit(w: u32, h: u32, (max_w, max_h): (u32, u32)) -> (u32, u32) {
     (even(f64::from(w) * scale), even(f64::from(h) * scale))
 }
 
-/// `t` if kept, else the start of the next kept range (or the last kept time).
+/// `t` if kept, else the start of the next kept range in the recording (or
+/// the last kept time, where the video ends).
 fn snap_to_kept(edit: &EditList, t: Micros) -> Micros {
     if edit.to_output(t).is_some() {
         return t;
     }
     edit.ranges()
         .iter()
-        .find(|r| r.0 >= t)
         .map(|r| r.0)
+        .filter(|&s| s >= t)
+        .min()
         .or_else(|| edit.ranges().last().map(|r| r.1.saturating_sub(1)))
         .unwrap_or(0)
 }
