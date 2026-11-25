@@ -229,12 +229,27 @@ impl EditList {
                 .iter()
                 .position(|r| if edge.0 { r.1 == edge.1 } else { r.0 == edge.1 });
             if let Some(i) = i
-                && self.keep[i].len() < min
+                && self.run_len(i) < min
                 && self.keep.len() > 1
             {
                 self.keep.remove(i);
             }
         }
+    }
+
+    /// How long clip `i` plays without a break: with the clips either side
+    /// of it that go on from it, in the recording as in the video (split
+    /// but not moved apart).
+    fn run_len(&self, i: usize) -> Micros {
+        let k = &self.keep;
+        let (mut a, mut b) = (i, i);
+        while a > 0 && k[a - 1].1 == k[a].0 {
+            a -= 1;
+        }
+        while b + 1 < k.len() && k[b].1 == k[b + 1].0 {
+            b += 1;
+        }
+        k[a..=b].iter().map(Range::len).sum()
     }
 
     /// The stretches removed from a recording of `duration`, in order: the
@@ -282,7 +297,7 @@ impl EditList {
             } else {
                 (0..edit.keep.len()).min_by_key(|&i| edit.keep[i].0)
             };
-            i.filter(|&i| edit.keep.len() > 1 && edit.keep[i].len() < min)
+            i.filter(|&i| edit.keep.len() > 1 && edit.run_len(i) < min)
         };
         if last > end
             && let Some(i) = short(self, true)
@@ -372,6 +387,20 @@ mod tests {
             EditList::joined(e.pieces(40, 60)),
             [Range(90, 100), Range(0, 10)]
         );
+    }
+
+    #[test]
+    fn a_split_isnt_a_cut_to_join() {
+        // What goes on from a split, in the recording and the video, isn't
+        // a short piece left by the cut or trim.
+        let mut e = EditList::full(100);
+        e.split(40);
+        e.cut_joining(42, 60, 5);
+        assert_eq!(e.ranges(), [Range(0, 40), Range(40, 42), Range(60, 100)]);
+        let mut t = EditList::full(100);
+        t.split(96);
+        t.trim_joining(5, 98, 5);
+        assert_eq!(t.ranges(), [Range(5, 96), Range(96, 98)]);
     }
 
     #[test]
