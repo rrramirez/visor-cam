@@ -92,8 +92,9 @@ pub struct App {
     /// that is being recorded onto (see `record_more`). Its editor is
     /// hidden meanwhile.
     more: RefCell<Option<PathBuf>>,
-    /// A take cancelled while its recorder was still starting: its editor
-    /// comes back once that recorder is discarded.
+    /// A cancelled take's recording, until its recorder is discarded and
+    /// the project put back (agents may not edit it meanwhile); its editor
+    /// comes back then.
     more_cancelled: RefCell<Option<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
@@ -1514,11 +1515,14 @@ impl App {
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
         if !current {
             // This start was cancelled; throw away what it created.
-            let more = self.more_cancelled.borrow_mut().take();
+            let more = self.more_cancelled.borrow().clone();
             match (result, more) {
                 (Ok(r), Some(dir)) => discard_take_then_show(r, dir),
                 (Ok(r), None) => discard_in_background(r),
-                (Err(_), Some(dir)) => self.show_hidden_editor(&dir),
+                (Err(_), Some(dir)) => {
+                    self.more_cancelled.borrow_mut().take();
+                    self.show_hidden_editor(&dir);
+                }
                 (Err(_), None) => {}
             }
             return;
@@ -1723,10 +1727,10 @@ impl App {
                     self.release_devices();
                     self.refresh_tray();
                     self.agent_start_finished(Err("The recording was cancelled.".into()));
-                    match recorder {
-                        Some(r) => discard_take_then_show(r, dir),
-                        // Still starting: on_recorder_ready discards it.
-                        None => *self.more_cancelled.borrow_mut() = Some(dir),
+                    *self.more_cancelled.borrow_mut() = Some(dir.clone());
+                    // Still starting: on_recorder_ready discards it.
+                    if let Some(r) = recorder {
+                        discard_take_then_show(r, dir);
                     }
                     return;
                 }
@@ -2096,7 +2100,10 @@ fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
         if let Err(e) = recorder.discard() {
             tracing::warn!("discarding a cancelled take failed: {e:#}");
         }
-        post(move |app| app.show_hidden_editor(&dir));
+        post(move |app| {
+            app.more_cancelled.borrow_mut().take();
+            app.show_hidden_editor(&dir);
+        });
     });
 }
 

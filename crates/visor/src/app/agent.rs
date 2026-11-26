@@ -766,8 +766,10 @@ impl App {
         // Being recorded more onto (from the countdown on): the take's save
         // would overwrite an edit made now. Only waiting in the panel, the
         // recorder hasn't read it yet.
-        if self.more.borrow().as_ref() == Some(&dir)
-            && !matches!(*self.session.borrow(), Session::Idle)
+        let cancelled = self.more_cancelled.borrow().as_ref() == Some(&dir);
+        if cancelled
+            || (self.more.borrow().as_ref() == Some(&dir)
+                && !matches!(*self.session.borrow(), Session::Idle))
         {
             return Err(
                 "Visor is recording more onto that recording; stop or discard that first.".into(),
@@ -946,6 +948,15 @@ impl App {
     /// Opens a recording in the editor for the user.
     fn agent_open(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
+        // Its editor is hidden while the user picks what to record more
+        // onto it from the recorder panel.
+        if self.more.borrow().as_ref() == Some(&dir) {
+            return Err(
+                "The user is about to record more onto that recording from the \
+                 recorder panel; it opens again once they record or close the panel."
+                    .into(),
+            );
+        }
         self.open_editor(dir.clone());
         Ok(json!({"folder": dir.display().to_string()}))
     }
