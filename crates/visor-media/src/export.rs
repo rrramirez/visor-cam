@@ -14,7 +14,7 @@ use ffmpeg_next::{
     self as ffmpeg, ChannelLayout, Dictionary, Packet, Rational, codec, encoder, filter, format,
     format::sample::Type, frame, software::scaling,
 };
-use visor_core::{EditList, Micros, Project};
+use visor_core::{EditList, Micros, Project, TrackKind};
 
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::composite::Bubble;
@@ -127,10 +127,10 @@ fn run(
     let mut audio = if gif {
         None
     } else {
-        let tracks: Vec<_> = [&project.tracks.mic, &project.tracks.system]
+        let tracks: Vec<_> = [TrackKind::Mic, TrackKind::System]
             .into_iter()
-            .flatten()
-            .map(|t| AudioReader::open(&dir.join(&t.file)))
+            .filter(|&k| project.has_track(k))
+            .map(|k| AudioReader::open_parts(dir, &project.parts(k)))
             .collect::<anyhow::Result<_>>()?;
         (!tracks.is_empty()).then(|| AudioMix::new(tracks))
     };
@@ -294,8 +294,8 @@ impl<'a> Renderer<'a> {
             .screen
             .as_ref()
             .context("project has no screen track")?;
-        let screen_path = dir.join(&screen_track.file);
-        let (src_w, src_h) = VideoReader::open(&screen_path, None)?.size();
+        let screen_parts = project.parts(TrackKind::Screen);
+        let (src_w, src_h) = VideoReader::open_parts(dir, &screen_parts, None)?.size();
         let (out_w, out_h) = output_size(src_w, src_h, opts);
         let fps = if opts.format == ExportFormat::Gif {
             opts.gif_fps.max(1)
@@ -303,22 +303,23 @@ impl<'a> Renderer<'a> {
             screen_track.fps.unwrap_or(30).clamp(1, 120)
         };
 
-        let mut screen_reader =
-            VideoReader::open(&screen_path, Some((format::Pixel::YUV420P, out_w, out_h)))?;
+        let mut screen_reader = VideoReader::open_parts(
+            dir,
+            &screen_parts,
+            Some((format::Pixel::YUV420P, out_w, out_h)),
+        )?;
         // Half the cores, like the encoder.
         screen_reader.set_scaling(scaling::Flags::BILINEAR, encoder_threads());
-        let camera = match &project.tracks.camera {
-            Some(track) => match Bubble::new(&project.camera_overlay, out_w, out_h) {
-                Some(bubble) => {
-                    let path = dir.join(&track.file);
-                    let (cw, ch) = VideoReader::open(&path, None)?.size();
-                    let (sw, sh) = bubble.camera_scale(cw, ch);
-                    let reader = VideoReader::open(&path, Some((format::Pixel::YUV420P, sw, sh)))?;
-                    Some((FrameCursor::new(reader), bubble))
-                }
-                None => None,
-            },
-            None => None,
+        let camera = match Bubble::new(&project.camera_overlay, out_w, out_h) {
+            Some(bubble) if project.has_track(TrackKind::Camera) => {
+                let parts = project.parts(TrackKind::Camera);
+                let (cw, ch) = VideoReader::open_parts(dir, &parts, None)?.size();
+                let (sw, sh) = bubble.camera_scale(cw, ch);
+                let reader =
+                    VideoReader::open_parts(dir, &parts, Some((format::Pixel::YUV420P, sw, sh)))?;
+                Some((FrameCursor::new(reader), bubble))
+            }
+            _ => None,
         };
         let renderer = Self {
             edit: &project.edit,

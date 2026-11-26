@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
+use visor_core::TrackKind;
 use visor_media::player::{Player, PreviewFrame};
 
 /// Expected RGB grey for a video-range luma value.
@@ -78,19 +79,55 @@ fn scrubs_plays_through_cuts_and_stops_at_end() {
 }
 
 #[test]
+fn plays_into_a_take() {
+    let (dir, mut project) = project("player-takes", 2);
+    project.tracks.mic = None;
+    project.tracks.system = None;
+    add_take(&dir, &mut project, 1, (360, 360), false);
+    project.takes[0].tracks.mic = None;
+    let mut player = Player::open(&dir, &project, (320, 180), 120).unwrap();
+    wait_frame(&mut player);
+    assert!(player.camera_shown());
+
+    player.seek(2_500_000);
+    std::thread::sleep(Duration::from_millis(300));
+    let f = wait_frame(&mut player);
+    assert_eq!((f.width, f.height), (320, 180));
+    // The take's frame 15 in the middle, black bars either side.
+    let red_at = |x: u32| {
+        let i = ((f.height / 2 * f.width + x) * 4) as usize;
+        f64::from(f.rgba[i])
+    };
+    assert!(
+        (red_at(160) - grey(luma(15))).abs() < 12.0,
+        "{}",
+        red_at(160)
+    );
+    assert!(red_at(10) < 5.0 && red_at(310) < 5.0);
+    // No camera in the take: no bubble.
+    assert!(!player.camera_shown());
+    common::cleanup(&dir);
+}
+
+#[test]
 fn builds_thumbnails_and_waveform() {
-    let (dir, project) = project("preview", 3);
-    let thumbs =
-        visor_media::preview::thumbnails(&dir.join("screen.mp4"), project.duration_us, 6, 40)
-            .unwrap();
-    assert_eq!(thumbs.len(), 6);
+    // 3 s, then a take of 1 s (with a mic, no system audio).
+    let (dir, mut project) = project("preview", 3);
+    add_take(&dir, &mut project, 1, (640, 360), true);
+    let d = project.duration_us;
+    let screen = project.parts(TrackKind::Screen);
+    let thumbs = visor_media::preview::thumbnails(&dir, &screen, d, 8, 40).unwrap();
+    assert_eq!(thumbs.len(), 8);
     assert!(thumbs.windows(2).all(|w| w[0].0 < w[1].0), "times increase");
+    assert!(thumbs[7].0 > 3_000_000, "{}", thumbs[7].0);
     assert_eq!((thumbs[0].1.width, thumbs[0].1.height), (72, 40));
 
-    let mic = dir.join("mic.m4a");
-    let system = dir.join("system.m4a");
-    let wave = visor_media::preview::waveform(&[&mic, &system], project.duration_us, 30).unwrap();
-    assert_eq!(wave.len(), 30);
+    let audio = [
+        project.parts(TrackKind::Mic),
+        project.parts(TrackKind::System),
+    ];
+    let wave = visor_media::preview::waveform(&dir, &audio, d, 40).unwrap();
+    assert_eq!(wave.len(), 40);
     assert!(wave.iter().all(|&p| (0.3..0.5).contains(&p)), "{wave:?}");
     common::cleanup(&dir);
 }

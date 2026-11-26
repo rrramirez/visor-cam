@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{Blur, EditList, Layout, Marker, Micros, Project};
+use visor_core::{Blur, EditList, Layout, Marker, Micros, Project, TrackKind};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
@@ -106,7 +106,7 @@ impl EditorWindow {
         {
             ui.set_screen_aspect(w as f32 / h.max(1) as f32);
         }
-        ui.set_has_camera(project.tracks.camera.is_some());
+        ui.set_has_camera(project.has_track(TrackKind::Camera));
         let o = &project.camera_overlay;
         ui.set_bubble_visible(o.visible);
         ui.set_bubble_shape(if o.shape == BubbleShape::Circle { 0 } else { 1 });
@@ -133,7 +133,7 @@ impl EditorWindow {
             ui.set_export_denoise(settings.export_denoise);
             ui.set_export_normalize(settings.export_normalize);
         }
-        ui.set_has_audio(project.tracks.mic.is_some() || project.tracks.system.is_some());
+        ui.set_has_audio(project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System));
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -1271,6 +1271,8 @@ impl EditorWindow {
             if let Some(f) = camera {
                 self.ui.set_camera(util::preview_image(&f));
             }
+            self.ui
+                .set_camera_shown(self.player.borrow().camera_shown());
         }
         let (pos, playing) = {
             let p = self.player.borrow();
@@ -1302,23 +1304,21 @@ impl EditorWindow {
         let project = self.project.borrow();
         let duration = project.duration_us;
         let screen = project
-            .tracks
-            .screen
-            .as_ref()
-            .map(|t| self.dir.join(&t.file));
-        let audio: Vec<PathBuf> = [&project.tracks.mic, &project.tracks.system]
+            .has_track(TrackKind::Screen)
+            .then(|| project.parts(TrackKind::Screen));
+        let audio: Vec<_> = [TrackKind::Mic, TrackKind::System]
             .into_iter()
-            .flatten()
-            .map(|t| self.dir.join(&t.file))
+            .filter(|&k| project.has_track(k))
+            .map(|k| project.parts(k))
             .collect();
+        let dir = self.dir.clone();
         // Separate threads: thumbnails come from the screen track alone and
         // shouldn't wait for every audio track to be decoded.
         let weak = self.ui.as_weak();
         if !audio.is_empty() {
-            let weak = weak.clone();
+            let (weak, dir) = (weak.clone(), dir.clone());
             std::thread::spawn(move || {
-                let paths: Vec<&Path> = audio.iter().map(PathBuf::as_path).collect();
-                match visor_media::preview::waveform(&paths, duration, WAVE_BUCKETS) {
+                match visor_media::preview::waveform(&dir, &audio, duration, WAVE_BUCKETS) {
                     Ok(peaks) => {
                         let path = util::wave_path(&peaks);
                         let _ = weak.upgrade_in_event_loop(move |ui| ui.set_wave_path(path.into()));
@@ -1329,7 +1329,7 @@ impl EditorWindow {
         }
         if let Some(screen) = screen {
             std::thread::spawn(move || {
-                match visor_media::preview::thumbnails(&screen, duration, THUMBNAILS, 64) {
+                match visor_media::preview::thumbnails(&dir, &screen, duration, THUMBNAILS, 64) {
                     Ok(thumbs) => {
                         let thumbs: Vec<_> = thumbs
                             .into_iter()

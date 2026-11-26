@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::bail;
 
 use ffmpeg_next::format;
-use visor_core::{EditList, Micros, Project, Range};
+use visor_core::{EditList, Micros, Part, Project, Range, TrackKind};
 
 use crate::decode::{AudioReader, VideoReader};
 
@@ -60,16 +60,21 @@ pub fn find(
     cancel: &AtomicBool,
 ) -> anyhow::Result<Vec<Range>> {
     let mut active = Vec::new();
-    if let Some(track) = &project.tracks.screen {
-        let size = track.width.zip(track.height);
-        screen_changes(&dir.join(&track.file), size, cancel, &mut active)?;
+    if project.has_track(TrackKind::Screen) {
+        let size = project
+            .tracks
+            .screen
+            .as_ref()
+            .and_then(|t| t.width.zip(t.height));
+        let parts = project.parts(TrackKind::Screen);
+        screen_changes(dir, &parts, size, cancel, &mut active)?;
     }
-    let audio: Vec<_> = [&project.tracks.mic, &project.tracks.system]
+    let audio: Vec<_> = [TrackKind::Mic, TrackKind::System]
         .into_iter()
-        .flatten()
-        .map(|t| dir.join(&t.file))
+        .filter(|&k| project.has_track(k))
+        .map(|k| project.parts(k))
         .collect();
-    sounds(&audio, project.duration_us, cancel, &mut active)?;
+    sounds(dir, &audio, project.duration_us, cancel, &mut active)?;
     Ok(quiet_stretches(
         active,
         project.duration_us,
@@ -88,18 +93,19 @@ fn check(cancel: &AtomicBool) -> anyhow::Result<()> {
 /// Adds the times the screen changed, against the last frame that did, so
 /// slow changes add up too. `size` is the track's, if known.
 fn screen_changes(
-    path: &Path,
+    dir: &Path,
+    parts: &[Part],
     size: Option<(u32, u32)>,
     cancel: &AtomicBool,
     active: &mut Vec<Range>,
 ) -> anyhow::Result<()> {
     let (w, h) = match size {
         Some(size) => size,
-        None => VideoReader::open(path, None)?.size(),
+        None => VideoReader::open_parts(dir, parts, None)?.size(),
     };
     let sw = SCAN_WIDTH.min(w.max(2)) & !1;
     let sh = ((u64::from(h) * u64::from(sw) / u64::from(w.max(1))) as u32).max(2) & !1;
-    let mut reader = VideoReader::open(path, Some((format::Pixel::GRAY8, sw, sh)))?;
+    let mut reader = VideoReader::open_parts(dir, parts, Some((format::Pixel::GRAY8, sw, sh)))?;
     let (sw, sh) = (sw as usize, sh as usize);
     let mut scan = ScreenScan::default();
     let mut pixels = vec![0u8; sw * sh];
@@ -179,16 +185,17 @@ fn differing(a: &[u8], b: &[u8], max: usize) -> usize {
 /// Adds the stretches where any of the audio tracks is heard, each above
 /// its own background noise: music playing doesn't drown out talking.
 fn sounds(
-    paths: &[impl AsRef<Path>],
+    dir: &Path,
+    tracks: &[Vec<Part>],
     duration: Micros,
     cancel: &AtomicBool,
     active: &mut Vec<Range>,
 ) -> anyhow::Result<()> {
     let windows = (duration / WINDOW) as usize + 1;
     let mut heard = vec![false; windows];
-    for path in paths {
+    for parts in tracks {
         let mut sums = vec![(0f64, 0u32); windows];
-        let mut reader = AudioReader::open(path.as_ref())?;
+        let mut reader = AudioReader::open_parts(dir, parts)?;
         while let Some((at, samples)) = reader.next_chunk()? {
             check(cancel)?;
             for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {

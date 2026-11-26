@@ -173,6 +173,8 @@ export component Editor inherits Window {
     in property <float> screen-aspect: 16 / 9;
     in property <image> camera;
     in property <bool> has-camera;
+    // False in a take recorded without the camera.
+    in property <bool> camera-shown: true;
     in-out property <bool> bubble-visible: true;
     // 0 circle, 1 rounded square
     in-out property <int> bubble-shape;
@@ -570,7 +572,7 @@ export component Editor inherits Window {
                         clicked => { root.toggle-play(); keys.focus(); }
                     }
 
-                    if root.has-camera && root.bubble-visible: bubble := Rectangle {
+                    if root.has-camera && root.camera-shown && root.bubble-visible: bubble := Rectangle {
                         property <length> size: parent.width * root.bubble-size;
                         x: max(0, min(parent.width - self.size, parent.width * root.bubble-x));
                         y: max(0, min(parent.height - self.size, parent.height * root.bubble-y));
