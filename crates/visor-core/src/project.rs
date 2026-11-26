@@ -297,6 +297,54 @@ impl Project {
         self.tracks.get(kind).is_some() || self.takes.iter().any(|t| t.tracks.get(kind).is_some())
     }
 
+    /// The take being recorded, if one is.
+    pub fn recording_take(&self) -> Option<&Take> {
+        self.takes.last().filter(|t| t.duration_us == 0)
+    }
+
+    /// Starts recording a take after what is recorded, into `tracks`;
+    /// returns its number (2 for the first take), which names its files
+    /// ([`take_file`]).
+    pub fn begin_take(&mut self, tracks: Tracks) -> usize {
+        self.takes.push(Take {
+            start_us: self.duration_us,
+            duration_us: 0,
+            tracks,
+        });
+        self.takes.len() + 1
+    }
+
+    /// Ends the take being recorded, `duration` long: the recording grows by
+    /// it, it plays as the last clip, and `markers` (in the take's own time)
+    /// are added. One with nothing recorded is dropped.
+    pub fn finish_take(&mut self, duration: Micros, markers: Vec<Marker>) {
+        if duration == 0 {
+            self.drop_take();
+            return;
+        }
+        let Some(take) = self.takes.last_mut().filter(|t| t.duration_us == 0) else {
+            return;
+        };
+        take.duration_us = duration;
+        let start = take.start_us;
+        self.duration_us = start + duration;
+        self.edit.append(crate::Range(start, start + duration));
+        self.markers.extend(markers.into_iter().map(|m| Marker {
+            at_us: start + m.at_us.min(duration),
+            ..m
+        }));
+    }
+
+    /// Forgets the take being recorded (its files are the caller's). False
+    /// if none is.
+    pub fn drop_take(&mut self) -> bool {
+        let recording = self.recording_take().is_some();
+        if recording {
+            self.takes.pop();
+        }
+        recording
+    }
+
     /// Length of the exported video: the kept time, sped up or slowed down.
     pub fn output_duration(&self) -> Micros {
         (self.edit.duration() as f64 / self.speed()).round() as Micros
@@ -554,6 +602,7 @@ pub fn create_unique_dir(root: &Path, name: &str) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Range;
 
     #[test]
     fn blurs_cover_frames_up_at_any_moment_they_last() {
@@ -771,6 +820,53 @@ mod tests {
         assert!(loaded.takes.is_empty() && loaded.sources.is_none());
         assert_eq!(loaded.parts(TrackKind::Screen), [part(0, 10, None)]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_finished_take_plays_as_a_clip_at_the_end() {
+        let mut p = Project::new("Demo", "2026-10-19T18:42:00Z", 20);
+        p.edit.cut(5, 8);
+        p.edit.split(12);
+        p.edit.move_clip(2, 0);
+        p.markers.push(Marker {
+            at_us: 3,
+            text: "Before".into(),
+        });
+        let before = p.clone();
+
+        // Being recorded: nothing changes but the pending take.
+        let tracks = Tracks {
+            screen: track("screen-2.mp4"),
+            ..Tracks::default()
+        };
+        assert_eq!(p.begin_take(tracks.clone()), 2);
+        assert_eq!(p.recording_take().map(|t| t.start_us), Some(20));
+        assert_eq!((p.duration_us, &p.edit), (20, &before.edit));
+        // Discarded: as it was.
+        assert!(p.drop_take());
+        assert_eq!(p, before);
+
+        p.begin_take(tracks);
+        let marker = Marker {
+            at_us: 2,
+            text: "In the take".into(),
+        };
+        p.finish_take(5, vec![marker]);
+        assert_eq!(p.recording_take(), None);
+        assert_eq!(p.duration_us, 25);
+        assert_eq!(p.takes[0].duration_us, 5);
+        assert_eq!(
+            p.edit.ranges(),
+            [Range(12, 20), Range(0, 5), Range(8, 12), Range(20, 25)]
+        );
+        assert_eq!(p.markers.last().map(|m| m.at_us), Some(22));
+        assert!(p.edit.is_valid(p.duration_us));
+
+        // A take with nothing in it is dropped.
+        let mut q = before.clone();
+        q.begin_take(Tracks::default());
+        q.finish_take(0, Vec::new());
+        assert_eq!(q, before);
     }
 
     #[test]
