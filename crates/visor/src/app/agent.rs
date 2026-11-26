@@ -382,7 +382,7 @@ impl App {
         // Not recording more after all: its editor comes back.
         if result.is_err()
             && matches!(*self.session.borrow(), Session::Idle)
-            && let Some(dir) = self.more.borrow_mut().take()
+            && let Some(dir) = self.take_more()
         {
             self.show_hidden_editor(&dir);
         }

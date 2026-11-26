@@ -696,7 +696,7 @@ impl App {
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
                 // Not recording more after all.
-                if let Some(dir) = app.more.borrow_mut().take() {
+                if let Some(dir) = app.take_more() {
                     app.show_hidden_editor(&dir);
                 }
             }
@@ -1719,7 +1719,7 @@ impl App {
                 if let Some((ui, _)) = countdown {
                     let _ = ui.hide();
                 }
-                if let Some(dir) = self.more.borrow_mut().take() {
+                if let Some(dir) = self.take_more() {
                     // Back to the editor it was recording more from, once
                     // the take is gone and the project put back as it was,
                     // so nothing overwrites an edit made meanwhile.
@@ -1832,7 +1832,7 @@ impl App {
             *self.session.borrow_mut() = Session::Idle;
             return self.quit();
         }
-        if let Some(dir) = self.more.borrow_mut().take() {
+        if let Some(dir) = self.take_more() {
             // Only the take went: back to the recording as it was.
             *self.session.borrow_mut() = Session::Idle;
             self.refresh_tray();
@@ -1875,6 +1875,13 @@ impl App {
             Ok(()) => self.record_when_ready(None),
             Err((e, _)) => self.set_panel_error(&e),
         }
+    }
+
+    /// Takes the recording being recorded more onto. A method, so the
+    /// borrow ends here: in `if let`, a `borrow_mut()` would be held
+    /// through the block, and what it calls may look at `more` again.
+    fn take_more(&self) -> Option<PathBuf> {
+        self.more.borrow_mut().take()
     }
 
     /// Shows the editor of `dir` again, if one is open (hidden while
