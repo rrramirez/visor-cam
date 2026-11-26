@@ -1,7 +1,8 @@
 //! Edit-aware preview player for the editor.
 //!
-//! Positions are in *source* time so the timeline can show cut regions; while
-//! playing, the player walks the *output* timeline (skipping cuts). A video
+//! Positions are in *source* time, so a frame inside a cut can be shown (and
+//! markers, blurs and the editor all speak it); while playing, the player
+//! walks the *output* timeline, clip after clip. A video
 //! thread decodes screen and camera frames to RGBA at preview size and
 //! publishes the latest ones; an audio thread mixes the audio tracks into a
 //! cpal output stream. Both follow one wall clock started at the same
@@ -224,7 +225,7 @@ impl Player {
     }
 
     /// Shows the frame at source time `t` even if it was cut, e.g. while a
-    /// cut's edge is dragged, pausing playback. Playing from there starts
+    /// clip's edge is dragged, pausing playback. Playing from there starts
     /// at the next kept time.
     pub fn preview(&mut self, t: Micros) {
         if self.is_playing() {
@@ -320,15 +321,17 @@ fn fit(w: u32, h: u32, (max_w, max_h): (u32, u32)) -> (u32, u32) {
     (even(f64::from(w) * scale), even(f64::from(h) * scale))
 }
 
-/// `t` if kept, else the start of the next kept range (or the last kept time).
+/// `t` if kept, else the start of the next kept range in the recording (or
+/// the last kept time, where the video ends).
 fn snap_to_kept(edit: &EditList, t: Micros) -> Micros {
     if edit.to_output(t).is_some() {
         return t;
     }
     edit.ranges()
         .iter()
-        .find(|r| r.0 >= t)
         .map(|r| r.0)
+        .filter(|&s| s >= t)
+        .min()
         .or_else(|| edit.ranges().last().map(|r| r.1.saturating_sub(1)))
         .unwrap_or(0)
 }
@@ -634,6 +637,18 @@ mod tests {
         assert_eq!(snap_to_kept(&e, 3_000_000), 4_000_000);
         e.trim(0, 8_000_000);
         assert_eq!(snap_to_kept(&e, 9_000_000), 7_999_999);
+    }
+
+    #[test]
+    fn snaps_into_the_next_part_recorded_when_clips_moved() {
+        let mut e = EditList::full(10_000_000);
+        e.cut(2_000_000, 4_000_000);
+        e.move_clip(1, 0);
+        // In the cut: where the recording goes on, though it plays first.
+        assert_eq!(snap_to_kept(&e, 3_000_000), 4_000_000);
+        // Past everything: the end of the video, the first clip's end.
+        e.trim(0, 8_000_000);
+        assert_eq!(snap_to_kept(&e, 9_000_000), 1_999_999);
     }
 
     #[test]

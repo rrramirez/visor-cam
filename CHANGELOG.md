@@ -4,6 +4,18 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Clips:** cut the video into clips with **C** or **⌘B** (*Cut at playhead*) and drag a clip to play it somewhere else, while the others make room; blurs and markers go with it, and chapters follow the new order. Above the clips, a ruler is where you click to seek and drag to select. What you delete stays on the timeline, dimmed, next to the clip it came from, and moves with it; playing and exporting skip it.
+- **Bring back what you deleted:** hover a dimmed part and click *Bring back* to put just that part back, without undoing everything you did since. You can still drag a clip's edge to bring back some of it, and *Restore the whole recording* puts everything back as it was recorded.
+
+### Changed
+- The editor's words: *Cut selection* is now *Delete selection*, and *Cut pauses* is now *Remove pauses*. For agents, `cut_recording` is now `remove_from_recording`, and on the command line `visor cut` is now `visor remove`.
+
+### Fixed
+- The sound wave under the timeline was squeezed into its middle; it spans the timeline again.
+
 ## 0.8.0
 
 ### New

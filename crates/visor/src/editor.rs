@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{Blur, EditList, Marker, Micros, Project};
+use visor_core::{Blur, EditList, Layout, Marker, Micros, Project};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
@@ -18,7 +18,7 @@ use visor_media::{ExportFormat, ExportOptions};
 use crate::app::app;
 use crate::platform;
 use crate::util;
-use crate::{BlurRow, Editor, MarkerMark, Region, Thumb};
+use crate::{BlurBand, BlurRow, Clip, Editor, Gone, MarkerMark, Thumb, Tick};
 
 const THUMBNAILS: usize = 24;
 const WAVE_BUCKETS: usize = 600;
@@ -40,7 +40,7 @@ pub struct EditorWindow {
     idle_ticks: Cell<u32>,
     /// Why the last save failed, for an agent's edit to report.
     save_error: RefCell<Option<String>>,
-    /// The edit after the last nudge of a cut's edge, and that edge, so
+    /// The edit after the last nudge of a clip's edge, and that edge, so
     /// the nudges that follow join its step to undo.
     nudged: RefCell<Option<(EditList, bool, Micros)>>,
     /// The blurs after the last nudge of a blur's edge, likewise.
@@ -197,8 +197,8 @@ impl EditorWindow {
         }
         on!(on_toggle_play, |e| e.control().toggle());
         on!(on_seek, |e, f| {
-            let d = e.duration();
-            e.control().seek((f64::from(f) * d as f64) as Micros);
+            let t = e.source_at(f);
+            e.control().seek(t);
         });
         on!(on_selection_changed, |e, _a, _b| e
             .ui
@@ -219,15 +219,17 @@ impl EditorWindow {
             e.ui.set_sel_end(p);
             e.ui.set_kept_label(e.kept_label().into());
         });
-        on!(on_cut_selection, |e| {
+        on!(on_delete_selection, |e| {
             if let Some((a, b)) = e.selection() {
-                e.apply(|edit| edit.cut(a, b));
+                let pieces = e.layout().kept_pieces(a, b);
+                e.apply(|edit| edit.delete(&pieces));
             }
         });
-        on!(on_cut_pauses, |e| e.cut_pauses());
+        on!(on_remove_pauses, |e| e.remove_pauses());
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
-                e.apply(|edit| edit.trim(a, b));
+                let pieces = e.layout().kept_pieces(a, b);
+                e.apply(|edit| edit.keep_only(pieces));
             }
         });
         on!(on_restore, |e| {
@@ -237,42 +239,89 @@ impl EditorWindow {
         on!(on_undo, |e| e.undo_redo(true));
         on!(on_redo, |e| e.undo_redo(false));
         on!(on_step, |e, frames| {
-            let pos = e.player.borrow().position();
-            let to = e.frames_from(pos, frames);
+            let to = e.stepped(frames);
             e.control().seek(to);
         });
         on!(on_preview, |e, index, f, end| {
             // The frame it will show once let go.
-            let t = e.nearest_frame(f);
-            if let Some((_, _, shown)) = e.cut_edge_moved(index as usize, end, t) {
+            let index = index as usize;
+            let Some(t) = e.clip_edge_time(index, end, f) else {
+                return;
+            };
+            if let Some((_, _, shown)) = e.clip_edge_moved(index, end, t) {
                 e.control().preview(shown);
             }
+        });
+        on!(on_cut_at_playhead, |e| e.cut_at_playhead());
+        on!(on_bring_back, |e, index| {
+            let d = e.duration();
+            if let Ok(i) = usize::try_from(index) {
+                e.apply(|edit| {
+                    bring_back_shown(edit, d, i);
+                });
+            }
+        });
+        on!(on_move_clip, |e, from, to| {
+            if let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) {
+                e.ui.set_active_edge(-1);
+                e.apply(|edit| edit.move_clip(from, to));
+            }
+        });
+        on!(on_select_clip, |e, index| {
+            let span = usize::try_from(index)
+                .ok()
+                .and_then(|i| e.layout().clip_span(i));
+            if let Some((a, b)) = span {
+                let d = e.duration().max(1) as f64;
+                e.ui.set_sel_start((a as f64 / d) as f32);
+                e.ui.set_sel_end((b as f64 / d) as f32);
+                e.ui.set_kept_label(e.kept_label().into());
+            }
+        });
+        let w = weak.clone();
+        ui.on_clip_slot(move |f| {
+            w.upgrade().map_or(0, |e| {
+                let layout = e.layout();
+                let at = f64::from(f) * layout.duration() as f64;
+                // Before the first clip whose middle is past the pointer,
+                // counting what was removed next to it, which moves with it.
+                let n = e.project.borrow().edit.ranges().len();
+                (0..n)
+                    .find(|&i| {
+                        layout
+                            .block_span(i)
+                            .is_some_and(|(a, b)| (a + b) as f64 / 2.0 > at)
+                    })
+                    .unwrap_or(n) as i32
+            })
         });
         // Back from a preview, which may be inside a cut, to a kept frame.
         on!(on_drag_ended, |e| {
             let pos = e.player.borrow().position();
             e.control().seek(pos);
         });
-        on!(on_cut_edge_moved, |e, index, end, f| {
-            let t = e.nearest_frame(f);
-            e.move_cut_edge(index as usize, end, t, false);
+        on!(on_clip_edge_moved, |e, index, end, f| {
+            let index = index as usize;
+            if let Some(t) = e.clip_edge_time(index, end, f) {
+                e.move_clip_edge(index, end, t, false);
+            }
         });
         on!(on_nudge_edge, |e, frames, repeat| {
             let Some((index, end, at)) = e.picked_edge() else {
                 return;
             };
-            let Some(&cut) = e.cuts().get(index) else {
+            let Some(&clip) = e.project.borrow().edit.ranges().get(index) else {
                 return;
             };
             let to = e.frames_from(at, frames);
-            // Nudging shrinks a cut to a frame at least, never away.
-            if (end && to <= cut.0) || (!end && to >= cut.1) {
+            // Nudging shrinks a clip to a frame at least, never away.
+            if (end && to <= clip.0) || (!end && to >= clip.1) {
                 return;
             }
             // Held down, the nudges of one edge are one step to undo.
             let edit = e.project.borrow().edit.clone();
             let again = repeat && e.nudged.borrow().as_ref() == Some(&(edit, end, at));
-            e.move_cut_edge(index, end, to, again);
+            e.move_clip_edge(index, end, to, again);
             let nudged = e
                 .picked_edge()
                 .map(|(_, end, t)| (e.project.borrow().edit.clone(), end, t));
@@ -333,13 +382,13 @@ impl EditorWindow {
         on!(on_blur_to_selection, |e, i| e.blur_to_selection(i as usize));
         on!(on_blur_moved, |e, done| e.blur_moved(done));
         on!(on_blur_edge_dragged, |e, end, f| {
-            if let Some((blurs, shown)) = e.blur_edge_moved(end, e.nearest_frame(f)) {
+            if let Some((blurs, shown)) = e.blur_edge_moved(end, e.blur_edge_at(end, f)) {
                 e.control().set_blurs(blurs);
                 e.control().preview(shown);
             }
         });
         on!(on_blur_edge_moved, |e, end, f| {
-            e.move_blur_edge(end, e.nearest_frame(f), false);
+            e.move_blur_edge(end, e.blur_edge_at(end, f), false);
         });
         on!(on_show_blur_edge, |e, end| e.show_blur_edge(end));
         on!(on_nudge_blur_edge, |e, frames, repeat| {
@@ -509,17 +558,26 @@ impl EditorWindow {
     /// and shows its box to place it.
     fn add_blur(&self) {
         let duration = self.project.borrow().duration_us;
-        let (start_us, end_us) = self.selection().unwrap_or((0, duration));
+        // One for each part of the recording the selection plays, as moved
+        // clips can make it several.
+        let pieces = self.selection_pieces();
+        let pieces = if pieces.is_empty() {
+            vec![visor_core::Range(0, duration)]
+        } else {
+            pieces
+        };
         let index = self.project.borrow().blurs.len();
         self.change_blurs(|blurs| {
-            blurs.push(Blur {
-                start_us,
-                end_us,
-                x: 0.35,
-                y: 0.4,
-                width: 0.3,
-                height: 0.2,
-            });
+            for p in pieces {
+                blurs.push(Blur {
+                    start_us: p.0,
+                    end_us: p.1,
+                    x: 0.35,
+                    y: 0.4,
+                    width: 0.3,
+                    height: 0.2,
+                });
+            }
         });
         self.ui.set_blur_open(true);
         self.pick_blur(index as i32);
@@ -565,17 +623,19 @@ impl EditorWindow {
         });
     }
 
-    /// Makes a blur cover the selection instead.
+    /// Makes a blur cover the selection instead: one blur for each part of
+    /// the recording it plays, as moved clips can make it several.
     fn blur_to_selection(&self, index: usize) {
-        let Some((start, end)) = self.selection() else {
+        let pieces = self.selection_pieces();
+        let Some(blur) = self.project.borrow().blurs.get(index).cloned() else {
             return;
         };
-        if index < self.project.borrow().blurs.len() {
-            self.change_blurs(|blurs| {
-                blurs[index].start_us = start;
-                blurs[index].end_us = end;
-            });
+        if pieces.is_empty() {
+            return;
         }
+        self.change_blurs(|blurs| {
+            blurs.splice(index..=index, blur_over(&blur, &pieces));
+        });
     }
 
     /// The picked blur's box moved: the preview follows as it's dragged,
@@ -682,17 +742,92 @@ impl EditorWindow {
         self.refresh_edit_ui();
     }
 
-    fn position_fraction(&self) -> f32 {
-        (self.player.borrow().position() as f64 / self.duration() as f64) as f32
+    /// The timeline: the whole recording, clip by clip, with what was
+    /// removed next to the clip it would come back at.
+    fn layout(&self) -> Layout {
+        let p = self.project.borrow();
+        Layout::new(&p.edit, p.duration_us)
     }
 
-    /// The selection in source time, if any.
+    /// Where on the timeline (0..1) source time `t` is.
+    fn timeline_pos(&self, t: Micros) -> f32 {
+        let layout = self.layout();
+        (layout.display(t) as f64 / layout.duration().max(1) as f64) as f32
+    }
+
+    fn position_fraction(&self) -> f32 {
+        self.timeline_pos(self.player.borrow().position())
+    }
+
+    /// Timeline position `f` (0..1) in timeline time.
+    fn display_at(&self, f: f32) -> Micros {
+        (f64::from(f.clamp(0.0, 1.0)) * self.duration() as f64) as Micros
+    }
+
+    /// The source time that plays at timeline position `f` (0..1), or
+    /// next after it if that was removed.
+    fn source_at(&self, f: f32) -> Micros {
+        self.layout().playing_at(self.display_at(f))
+    }
+
+    /// Where a blur's start (or `end`) dragged to timeline position `f`
+    /// goes in the recording, at the nearest frame. An end goes after the
+    /// frame just before it on the timeline, which may be the last of a
+    /// clip that some other part of the recording follows.
+    fn blur_edge_at(&self, end: bool, f: f32) -> Micros {
+        let layout = self.layout();
+        let d = self.display_at(f);
+        let t = if end {
+            layout.source(d.saturating_sub(1)).0 + 1
+        } else {
+            layout.source(d).0
+        };
+        self.frame_time(self.frames_at(t as f64).round())
+    }
+
+    /// The selection in timeline time, if any.
+    /// Within half a frame of a clip's edge, it's that edge: no flash of
+    /// the next clip is left by deleting, nor kept by a trim.
     fn selection(&self) -> Option<(Micros, Micros)> {
         let (a, b) = (self.ui.get_sel_start(), self.ui.get_sel_end());
         (a >= 0.0 && b > a).then(|| {
-            let d = self.duration() as f64;
-            ((f64::from(a) * d) as Micros, (f64::from(b) * d) as Micros)
+            let half_frame = (500_000.0 / self.fps()) as Micros;
+            let layout = self.layout();
+            let at = |f: f32| snap_to_clip_edge(&layout, self.display_at(f), half_frame);
+            (at(a), at(b))
         })
+    }
+
+    /// The parts of the recording the selection plays, in order, those of
+    /// clips split but not moved apart joined.
+    fn selection_pieces(&self) -> Vec<visor_core::Range> {
+        self.selection()
+            .map(|(a, b)| EditList::joined(self.layout().kept_pieces(a, b)))
+            .unwrap_or_default()
+    }
+
+    /// Where ← → (`frames` frames) takes the playhead: frame by frame in
+    /// its clip, and on into the clip that plays before or after it.
+    fn stepped(&self, frames: i32) -> Micros {
+        let pos = self.player.borrow().position();
+        let to = self.frames_from(pos, frames);
+        let edit = self.project.borrow().edit.clone();
+        let clip = edit.clip_at(pos);
+        if clip.is_some() && edit.clip_at(to) == clip {
+            return to;
+        }
+        let out = edit.kept_before(pos) as i64 + to as i64 - pos as i64;
+        let out = out.clamp(0, edit.duration().saturating_sub(1) as i64) as Micros;
+        edit.to_source(out).unwrap_or(to)
+    }
+
+    /// Splits the clip under the playhead there, at the nearest frame.
+    fn cut_at_playhead(&self) {
+        let pos = self.player.borrow().position();
+        let t = self.frame_time(self.frames_at(pos as f64).round());
+        self.apply(|edit| {
+            edit.split(t);
+        });
     }
 
     /// The screen recording's frame rate.
@@ -717,12 +852,6 @@ impl EditorWindow {
         (n.max(0.0) * 1_000_000.0 / self.fps()).round() as Micros
     }
 
-    /// The frame nearest timeline position `f` (0..1).
-    fn nearest_frame(&self, f: f32) -> Micros {
-        let t = f64::from(f) * self.duration() as f64;
-        self.frame_time(self.frames_at(t).round())
-    }
-
     /// `frames` frames on from `t`, from frame to frame even when `t` is
     /// between frames.
     fn frames_from(&self, t: Micros, frames: i32) -> Micros {
@@ -735,70 +864,85 @@ impl EditorWindow {
         self.frame_time(from + f64::from(frames))
     }
 
-    /// The cut stretches, as the timeline shows them.
-    fn cuts(&self) -> Vec<visor_core::Range> {
-        let project = self.project.borrow();
-        project.edit.cuts(project.duration_us)
+    /// The source time clip `index`'s start (or `end`) goes to, dragged to
+    /// timeline position `f`: as far along the recording as it moved on
+    /// the timeline, at the nearest frame.
+    fn clip_edge_time(&self, index: usize, end: bool, f: f32) -> Option<Micros> {
+        let layout = self.layout();
+        let at = (f64::from(f) * layout.duration() as f64) as i64;
+        let t = clip_edge_source(&self.project.borrow().edit, &layout, index, end, at)? as f64;
+        Some(self.frame_time(self.frames_at(t).round()))
     }
 
-    /// The edit with one edge of a cut moved to `t` (see
-    /// `EditList::with_cut_edge_moved`), where the edge then is, and the
-    /// frame to show for it: the first kept after the cut, or the last kept
-    /// before it.
-    fn cut_edge_moved(
+    /// The edit with one edge of a clip moved to `t` (see
+    /// `EditList::with_clip_edge_moved`), where the edge then is, and the
+    /// frame to show for it: the clip's first, or its last.
+    fn clip_edge_moved(
         &self,
         index: usize,
         end: bool,
         t: Micros,
     ) -> Option<(EditList, Micros, Micros)> {
         let d = self.duration();
-        let cuts = self.cuts();
-        // Less than a frame from the cut it comes to (or either end of the
-        // recording) would leave a flash frame: take it all.
+        let current = self.project.borrow().edit.clone();
+        let r = *current.ranges().get(index)?;
+        // Less than a frame from another clip's part of the recording (or
+        // either end of it), or from its own other edge, would leave a
+        // flash frame: take it all, or none of it.
+        let others = current
+            .ranges()
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != index);
         let mut t = t.min(d);
+        let near = |a: Micros, b: Micros| self.frames_at(a.abs_diff(b) as f64) < 1.0;
         if end {
-            let next = cuts.iter().map(|c| c.0).filter(|&s| s >= t).min();
+            let next = others.map(|(_, o)| o.0).filter(|&s| s >= r.1).min();
             let next = next.unwrap_or(d);
-            if self.frames_at((next - t) as f64) < 1.0 {
+            if t < next && near(t, next) {
                 t = next;
+            } else if near(t, r.0) {
+                t = r.0;
             }
         } else {
-            let prev = cuts.iter().map(|c| c.1).filter(|&e| e <= t).max();
+            let prev = others.map(|(_, o)| o.1).filter(|&e| e <= r.0).max();
             let prev = prev.unwrap_or(0);
-            if self.frames_at((t - prev) as f64) < 1.0 {
+            if t > prev && near(t, prev) {
                 t = prev;
+            } else if near(t, r.1) {
+                t = r.1;
             }
         }
-        let edit = self
-            .project
-            .borrow()
-            .edit
-            .with_cut_edge_moved(d, index, end, t)?;
-        let ranges = edit.ranges();
-        let shown = if end {
-            ranges.iter().find(|r| r.1 > t).map(|r| r.0.max(t))
-        } else {
-            ranges
-                .iter()
-                .rev()
-                .find(|r| r.0 < t)
-                .map(|r| self.frames_from(r.1.min(t), -1).max(r.0))
+        let edit = current.with_clip_edge_moved(d, index, end, t)?;
+        // Where the edge ended up, and the frame by it, in its clip.
+        let shown = match edit.ranges().get(index) {
+            Some(c) if edit.ranges().len() == current.ranges().len() => {
+                t = if end { c.1 } else { c.0 };
+                if end {
+                    self.frames_from(c.1, -1).max(c.0)
+                } else {
+                    c.0
+                }
+            }
+            // Gone: where the video goes on.
+            _ => edit
+                .ranges()
+                .get(index)
+                .or(edit.ranges().last())
+                .map_or(0, |c| c.0),
         };
-        // Nothing kept on that side: the frame by the edge on the other.
-        let shown = shown.unwrap_or_else(|| ranges.first().map_or(0, |r| r.0));
         Some((edit, t, shown))
     }
 
-    /// Moves one edge of a cut to `t` and shows the frame by it (see
-    /// `cut_edge_moved`). `merge` makes it part of the last step to undo.
-    fn move_cut_edge(&self, index: usize, end: bool, t: Micros, merge: bool) {
+    /// Moves one edge of a clip to `t` and shows the frame by it (see
+    /// `clip_edge_moved`). `merge` makes it part of the last step to undo.
+    fn move_clip_edge(&self, index: usize, end: bool, t: Micros, merge: bool) {
         let steps = self.undo.borrow().len();
-        let moved = self.cut_edge_moved(index, end, t);
+        let moved = self.clip_edge_moved(index, end, t);
         if let Some((edit, _, _)) = &moved {
             self.apply(|e| *e = edit.clone());
         }
-        // Not moved, or refused (it would remove everything): back from
-        // the drag's preview to a kept frame, leaving the rest as it was.
+        // Not moved: back from the drag's preview to where it was.
         let Some((_, t, shown)) = moved.filter(|(edit, ..)| self.project.borrow().edit == *edit)
         else {
             let pos = self.player.borrow().position();
@@ -808,34 +952,33 @@ impl EditorWindow {
         if merge && self.undo.borrow().len() > steps {
             self.undo.borrow_mut().pop();
         }
-        // Still picked where it now is, unless it went away or joined
-        // another cut.
+        // Still picked where it now is, unless its clip went away.
         self.pick_edge(Some((end, t)));
         self.control().seek(shown);
     }
 
-    /// The cut edge picked for nudging: its cut's index, whether it's the
-    /// end, and where it is.
+    /// The clip edge picked for nudging: its clip's index, whether it's
+    /// the end, and where it is in the recording.
     fn picked_edge(&self) -> Option<(usize, bool, Micros)> {
         let edge = usize::try_from(self.ui.get_active_edge()).ok()?;
         let (index, end) = (edge / 2, edge % 2 == 1);
-        let cut = *self.cuts().get(index)?;
-        Some((index, end, if end { cut.1 } else { cut.0 }))
+        let clip = *self.project.borrow().edit.ranges().get(index)?;
+        Some((index, end, if end { clip.1 } else { clip.0 }))
     }
 
-    /// Picks the cut edge at `t` (an end, or a start), if there is one the
-    /// timeline shows: not at either end of the recording.
+    /// Picks the clip edge at source time `t` (an end, or a start), if a
+    /// clip has one there.
     fn pick_edge(&self, edge: Option<(bool, Micros)>) {
-        let d = self.duration();
-        let index = edge
-            .filter(|&(end, t)| if end { t < d } else { t > 0 })
-            .and_then(|(end, t)| {
-                let i = self
-                    .cuts()
-                    .iter()
-                    .position(|c| if end { c.1 == t } else { c.0 == t })?;
-                i32::try_from(i * 2 + usize::from(end)).ok()
-            });
+        let index = edge.and_then(|(end, t)| {
+            let i = self
+                .project
+                .borrow()
+                .edit
+                .ranges()
+                .iter()
+                .position(|c| if end { c.1 == t } else { c.0 == t })?;
+            i32::try_from(i * 2 + usize::from(end)).ok()
+        });
         self.ui.set_active_edge(index.unwrap_or(-1));
     }
 
@@ -918,12 +1061,16 @@ impl EditorWindow {
     }
 
     fn set_edit(&self, edit: EditList) {
-        // The cuts may be renumbered: keep the picked edge by where it is,
-        // and end a drag, whose cut may now be another.
+        // The clips may be renumbered: keep the picked edge by where it is,
+        // and end a drag, whose clip may now be another. The timeline
+        // changes under the selection: it goes.
         let picked = self.picked_edge().map(|(_, end, t)| (end, t));
         self.project.borrow_mut().edit = edit.clone();
         self.pick_edge(picked);
-        self.ui.set_drag_cut(-1);
+        self.ui.set_drag_clip(-1);
+        self.ui.set_moving_clip(-1);
+        self.ui.set_sel_start(-1.0);
+        self.ui.set_sel_end(-1.0);
         self.control().set_edit(edit);
         self.save();
         self.refresh_edit_ui();
@@ -939,16 +1086,57 @@ impl EditorWindow {
     fn refresh_edit_ui(&self) {
         let project = self.project.borrow();
         let d = project.duration_us.max(1) as f64;
-        let cuts: Vec<Region> = project
-            .edit
-            .cuts(project.duration_us)
-            .iter()
-            .map(|c| Region {
-                start: (c.0 as f64 / d) as f32,
-                end: (c.1 as f64 / d) as f32,
+        let edit = &project.edit;
+        // The timeline shows the whole recording, clip after clip, each
+        // with what was removed next to it.
+        let layout = Layout::new(edit, project.duration_us);
+        let pos = |t: Micros| (layout.display(t) as f64 / d) as f32;
+        let frac = |t: Micros| (t as f64 / d) as f32;
+        let clips: Vec<Clip> = (0..edit.ranges().len())
+            .filter_map(|i| {
+                let (a, b) = layout.clip_span(i)?;
+                let (ba, bb) = layout.block_span(i)?;
+                Some(Clip {
+                    start: frac(a),
+                    end: frac(b),
+                    block_start: frac(ba),
+                    block_end: frac(bb),
+                    src_start: frac(edit.ranges()[i].0),
+                    // As long as it lasts in the video, after speed.
+                    label: util::clock_tenths(((b - a) as f64 / project.speed()).round() as Micros)
+                        .into(),
+                })
             })
             .collect();
-        self.ui.set_cuts(ModelRc::new(VecModel::from(cuts)));
+        self.ui.set_clips(ModelRc::new(VecModel::from(clips)));
+        let removed: Vec<Gone> = layout
+            .segments()
+            .iter()
+            .filter(|s| !s.kept)
+            .map(|s| {
+                let len = (s.range.len() as f64 / project.speed()).round() as Micros;
+                Gone {
+                    start: frac(s.at),
+                    end: frac(s.at + s.range.len()),
+                    src_start: frac(s.range.0),
+                    clip: s.clip as i32,
+                    label: format!("{} deleted", util::clock_tenths(len)).into(),
+                }
+            })
+            .collect();
+        self.ui.set_removed(ModelRc::new(VecModel::from(removed)));
+        // Times in the video, where they play.
+        let ticks: Vec<Tick> = ruler_ticks(project.output_duration())
+            .into_iter()
+            .filter_map(|t| {
+                let src = edit.to_source((t as f64 * project.speed()).round() as Micros)?;
+                Some(Tick {
+                    pos: pos(src),
+                    label: util::clock(t).into(),
+                })
+            })
+            .collect();
+        self.ui.set_ticks(ModelRc::new(VecModel::from(ticks)));
         // Marked where they were recorded, at the time the clock shows there.
         let markers: Vec<MarkerMark> = project
             .markers
@@ -956,7 +1144,7 @@ impl EditorWindow {
             .map(|m| {
                 let time = util::clock(project.output_time(m.at_us));
                 MarkerMark {
-                    pos: (m.at_us as f64 / d).clamp(0.0, 1.0) as f32,
+                    pos: pos(m.at_us),
                     label: marker_label(&time, &m.text).into(),
                     time: time.into(),
                     text: m.text.clone().into(),
@@ -979,17 +1167,37 @@ impl EditorWindow {
             }
             _ => self.ui.set_markers(ModelRc::new(VecModel::from(markers))),
         }
-        // Blurs, and the picked one's box where it now is.
+        // Blurs: where each starts and ends on the timeline, if it does
+        // there, and the parts of it that play; and the picked one's box
+        // where it now is.
         let blurs: Vec<BlurRow> = project
             .blurs
             .iter()
-            .map(|b| BlurRow {
-                start: (b.start_us as f64 / d).clamp(0.0, 1.0) as f32,
-                end: (b.end_us as f64 / d).clamp(0.0, 1.0) as f32,
-                time: blur_label(&project, b).into(),
+            .map(|b| {
+                let last = b.end_us.saturating_sub(1).max(b.start_us);
+                BlurRow {
+                    start: pos(b.start_us),
+                    end: frac(layout.display(last) + 1),
+                    time: blur_label(&project, b).into(),
+                }
             })
             .collect();
         self.ui.set_blurs(ModelRc::new(VecModel::from(blurs)));
+        let mut bands = Vec::new();
+        for (i, b) in project.blurs.iter().enumerate() {
+            for seg in layout.segments().iter().filter(|s| s.kept) {
+                let r = seg.range;
+                let (s, e) = (b.start_us.max(r.0), b.end_us.min(r.1));
+                if e > s {
+                    bands.push(BlurBand {
+                        blur: i as i32,
+                        start: frac(seg.at + s - r.0),
+                        end: frac(seg.at + e - r.0),
+                    });
+                }
+            }
+        }
+        self.ui.set_blur_bands(ModelRc::new(VecModel::from(bands)));
         match usize::try_from(self.ui.get_picked_blur()) {
             Ok(i) if i < project.blurs.len() => self.show_blur_box(&project.blurs[i]),
             _ => {
@@ -1014,11 +1222,8 @@ impl EditorWindow {
         self.ui.set_speed_label(speed_label.into());
         let thumbnail = visor_media::export::thumbnail_time(&project);
         let chosen = project.thumbnail_us == Some(thumbnail);
-        self.ui.set_thumbnail_pos(if chosen {
-            (thumbnail as f64 / d) as f32
-        } else {
-            -1.0
-        });
+        self.ui
+            .set_thumbnail_pos(if chosen { pos(thumbnail) } else { -1.0 });
         self.ui.set_thumbnail_label(
             if chosen {
                 format!(
@@ -1046,8 +1251,13 @@ impl EditorWindow {
                 util::clock(p.duration_us)
             )
         };
-        if let Some((a, b)) = self.selection() {
-            label.push_str(&format!(" · Selected {}", util::clock_tenths(b - a)));
+        let clips = p.edit.ranges().len();
+        if clips > 1 {
+            label.push_str(&format!(" in {clips} clips"));
+        }
+        if self.selection().is_some() {
+            let kept: Micros = self.selection_pieces().iter().map(|p| p.len()).sum();
+            label.push_str(&format!(" · Selected {}", util::clock_tenths(kept)));
         }
         label
     }
@@ -1067,8 +1277,7 @@ impl EditorWindow {
             (p.position(), p.is_playing())
         };
         self.ui.set_playing(playing);
-        self.ui
-            .set_position((pos as f64 / self.duration() as f64) as f32);
+        self.ui.set_position(self.timeline_pos(pos));
         // Times as they will be in the export, after cuts and speed.
         let label = {
             let p = self.project.borrow();
@@ -1276,7 +1485,7 @@ impl EditorWindow {
 
     /// Looks for dead time (see `visor_media::dead_time`) off the UI
     /// thread, then cuts it all as one step to undo.
-    fn cut_pauses(&self) {
+    fn remove_pauses(&self) {
         if self.ui.get_finding_pauses() {
             return;
         }
@@ -1320,11 +1529,11 @@ impl EditorWindow {
                     edit.cut(p.0, p.1);
                 }
                 if !self.apply(|e| *e = edit) {
-                    "Nothing happens in what's kept, so nothing was cut.".into()
+                    "Nothing happens in what's kept, so nothing was removed.".into()
                 } else {
                     let total: Micros = pauses.iter().map(|p| p.len()).sum();
                     format!(
-                        "Cut {} pause{}, {} in all. ⌘Z undoes it.",
+                        "Removed {} pause{}, {} in all. ⌘Z undoes it.",
                         pauses.len(),
                         if pauses.len() == 1 { "" } else { "s" },
                         util::clock_tenths(total)
@@ -1392,11 +1601,13 @@ fn kept_frame(edit: &EditList, t: Micros) -> Micros {
         return t;
     }
     let ranges = edit.ranges();
+    // The latest part recorded before it, wherever it plays.
     ranges
         .iter()
-        .rev()
-        .find(|r| r.1 <= t)
-        .map(|r| r.1 - 1)
+        .map(|r| r.1)
+        .filter(|&e| e <= t)
+        .max()
+        .map(|e| e - 1)
         .or_else(|| ranges.first().map(|r| r.0))
         .unwrap_or(0)
 }
@@ -1422,21 +1633,98 @@ fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 /// When a blur is in the video: the whole of it, a stretch in the video's
 /// time (after cuts and speed), or nothing if that was cut.
 fn blur_label(project: &Project, blur: &Blur) -> String {
-    let (start, end) = (
-        project.output_time(blur.start_us),
-        project.output_time(blur.end_us),
-    );
     if blur.start_us == 0 && blur.end_us >= project.duration_us {
-        "Whole video".to_string()
-    } else if end <= start {
-        "Cut from the video".to_string()
-    } else {
-        format!(
-            "{} – {}",
-            util::clock_tenths(start),
-            util::clock_tenths(end)
-        )
+        return "Whole video".to_string();
     }
+    // The stretches of the video it plays in, after moves, cuts and speed;
+    // parts of it that play one after the other are one.
+    let mut parts: Vec<(Micros, Micros)> = Vec::new();
+    let mut at = 0;
+    for r in project.edit.ranges() {
+        let (s, e) = (blur.start_us.max(r.0), blur.end_us.min(r.1));
+        if e > s {
+            let part = (at + s - r.0, at + e - r.0);
+            match parts.last_mut() {
+                Some(last) if last.1 == part.0 => last.1 = part.1,
+                _ => parts.push(part),
+            }
+        }
+        at += r.len();
+    }
+    let Some(&(start, end)) = parts.first() else {
+        return "Deleted from the video".to_string();
+    };
+    let time = |t: Micros| util::clock_tenths((t as f64 / project.speed()).round() as Micros);
+    let range = format!("{} – {}", time(start), time(end));
+    match parts.len() {
+        1 => range,
+        2 => format!("{range} and 1 more part"),
+        n => format!("{range} and {} more parts", n - 1),
+    }
+}
+
+/// Brings back the `index`th dimmed part on the timeline, in the order the
+/// timeline shows them (`refresh_edit_ui` lists them that way).
+fn bring_back_shown(edit: &mut EditList, duration: Micros, index: usize) -> bool {
+    let range = Layout::new(edit, duration)
+        .segments()
+        .iter()
+        .filter(|s| !s.kept)
+        .nth(index)
+        .map(|s| s.range);
+    range.is_some_and(|r| edit.bring_back(duration, r))
+}
+
+/// Times to mark on the ruler of a video `duration` long: every second, or
+/// every 2, 5, 10… so there are a dozen at most, from 0.
+fn ruler_ticks(duration: Micros) -> Vec<Micros> {
+    const STEPS: [Micros; 10] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    let secs = duration / 1_000_000;
+    let step = STEPS.into_iter().find(|s| secs / s <= 12).unwrap_or(1_200) * 1_000_000;
+    (0..duration).step_by(step as usize).collect()
+}
+
+/// Output time `t` moved onto the nearest clip edge (or either end of the
+/// video) if it's within `tolerance` of one, so a selection made from a
+/// clip's span, which comes back from the UI a few µs off, covers it
+/// exactly.
+fn snap_to_clip_edge(layout: &Layout, t: Micros, tolerance: Micros) -> Micros {
+    layout
+        .segments()
+        .iter()
+        .flat_map(|s| [s.at, s.at + s.range.len()])
+        .chain([0])
+        .min_by_key(|e| e.abs_diff(t))
+        .filter(|e| e.abs_diff(t) <= tolerance)
+        .unwrap_or(t)
+}
+
+/// The source time clip `index`'s start (or `end`) goes to when dragged to
+/// timeline time `at`: as far along the recording as it moved on the
+/// timeline, over what was removed next to it.
+fn clip_edge_source(
+    edit: &EditList,
+    layout: &Layout,
+    index: usize,
+    end: bool,
+    at: i64,
+) -> Option<Micros> {
+    let r = *edit.ranges().get(index)?;
+    let (a, b) = layout.clip_span(index)?;
+    let (edge, shown) = if end { (r.1, b) } else { (r.0, a) };
+    Some((edge as i64 + at - shown as i64).max(0) as Micros)
+}
+
+/// `blur` as one blur for each of `pieces`, the same area in each.
+fn blur_over(blur: &Blur, pieces: &[visor_core::Range]) -> Vec<Blur> {
+    pieces
+        .iter()
+        .map(|p| Blur {
+            start_us: p.0,
+            end_us: p.1,
+            ..blur.clone()
+        })
+        .collect()
 }
 
 /// A marker as the timeline shows it: its time, and its text if any.
@@ -1450,6 +1738,36 @@ fn marker_label(time: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use visor_core::Range;
+
+    #[test]
+    fn bring_back_restores_the_dimmed_part_shown_there() {
+        let mut edit = EditList::full(100);
+        edit.cut(0, 10);
+        edit.split(50);
+        edit.cut(60, 70);
+        edit.cut(90, 100);
+        edit.move_clip(0, 3);
+        // On the timeline: [50, 60) dimmed [60, 70), [70, 90) dimmed
+        // [90, 100), dimmed [0, 10) [10, 50).
+        assert!(bring_back_shown(&mut edit, 100, 0));
+        assert_eq!(edit.ranges(), [Range(50, 70), Range(70, 90), Range(10, 50)]);
+        assert!(bring_back_shown(&mut edit, 100, 1));
+        // Now dimmed: [90, 100), then [0, 10).
+        assert_eq!(edit.ranges(), [Range(50, 70), Range(70, 90), Range(0, 50)]);
+        assert!(!bring_back_shown(&mut edit, 100, 1));
+    }
+
+    #[test]
+    fn the_ruler_marks_a_dozen_times_at_most() {
+        const S: Micros = 1_000_000;
+        assert_eq!(ruler_ticks(4 * S + S / 2), [0, S, 2 * S, 3 * S, 4 * S]);
+        assert_eq!(ruler_ticks(16 * S).len(), 8, "every 2 s");
+        let hour = ruler_ticks(3_600 * S);
+        assert_eq!(hour[1], 300 * S);
+        assert!(hour.len() <= 13);
+        assert!(ruler_ticks(0).is_empty());
+    }
 
     #[test]
     fn blurs_are_labelled_with_their_time_in_the_video() {
@@ -1472,8 +1790,99 @@ mod tests {
         );
         assert_eq!(
             blur_label(&project, &blur(500_000, 1_500_000)),
-            "Cut from the video"
+            "Deleted from the video"
         );
+    }
+
+    #[test]
+    fn blurs_over_moved_clips_are_labelled_by_when_they_play() {
+        let mut project = Project::new("Demo", "2026-10-30T00:00:00Z", 100_000_000);
+        project.edit.split(50_000_000);
+        project.edit.move_clip(1, 0);
+        // [50, 100) plays first, then [0, 50): source 10–60 s plays at
+        // 0–10 s and 60–100 s.
+        let blur = Blur {
+            start_us: 10_000_000,
+            end_us: 60_000_000,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        assert_eq!(
+            blur_label(&project, &blur),
+            "0:00.0 – 0:10.0 and 1 more part"
+        );
+        let inside = Blur {
+            start_us: 60_000_000,
+            end_us: 70_000_000,
+            ..blur.clone()
+        };
+        assert_eq!(blur_label(&project, &inside), "0:10.0 – 0:20.0");
+    }
+
+    #[test]
+    fn selected_clips_snap_to_their_edges() {
+        let mut edit = EditList::full(123_456_789);
+        edit.split(61_000_001);
+        edit.cut(70_000_000, 80_000_000);
+        let l = Layout::new(&edit, 123_456_789);
+        // A few µs off, as a clip's span is after a trip through f32.
+        assert_eq!(snap_to_clip_edge(&l, 61_000_004, 1_000), 61_000_001);
+        assert_eq!(snap_to_clip_edge(&l, 123_456_780, 1_000), 123_456_789);
+        assert_eq!(snap_to_clip_edge(&l, 9, 1_000), 0);
+        assert_eq!(snap_to_clip_edge(&l, 61_500_000, 1_000), 61_500_000);
+        // And to what was removed.
+        assert_eq!(snap_to_clip_edge(&l, 79_999_500, 1_000), 80_000_000);
+    }
+
+    #[test]
+    fn clip_edges_drag_over_what_was_removed_next_to_them() {
+        let mut edit = EditList::full(100);
+        edit.trim(10, 90);
+        edit.split(50);
+        edit.move_clip(1, 0);
+        // [50, 90) then [10, 50): what was trimmed off either end shows
+        // by the clip it would come back at.
+        let l = Layout::new(&edit, 100);
+        assert_eq!(l.clip_span(0), Some((0, 40)));
+        assert_eq!(l.clip_span(1), Some((60, 100)));
+        // The first clip's end over the 10 trimmed after it.
+        assert_eq!(clip_edge_source(&edit, &l, 0, true, 46), Some(96));
+        // The second's start over the 10 trimmed before it.
+        assert_eq!(clip_edge_source(&edit, &l, 1, false, 55), Some(5));
+        assert_eq!(clip_edge_source(&edit, &l, 1, false, -50), Some(0));
+        assert_eq!(clip_edge_source(&edit, &l, 2, false, 0), None);
+    }
+
+    #[test]
+    fn a_blur_limited_to_a_selection_over_moved_clips_covers_only_it() {
+        let blur = Blur {
+            start_us: 0,
+            end_us: 100,
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+        };
+        let parts = blur_over(
+            &blur,
+            &[visor_core::Range(90, 100), visor_core::Range(0, 10)],
+        );
+        assert_eq!(parts.len(), 2);
+        assert_eq!((parts[0].start_us, parts[0].end_us), (90, 100));
+        assert_eq!((parts[1].start_us, parts[1].end_us), (0, 10));
+        assert!(parts.iter().all(|p| p.x == 0.1 && p.height == 0.4));
+    }
+
+    #[test]
+    fn thumbnails_snap_to_kept_frames_of_moved_clips() {
+        let mut edit = EditList::full(10_000_000);
+        edit.cut(4_000_000, 6_000_000);
+        edit.trim(0, 8_000_000);
+        edit.move_clip(1, 0);
+        // Past everything: the last frame of the latest part recorded.
+        assert_eq!(kept_frame(&edit, 9_000_000), 7_999_999);
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub struct AgentRun {
 
 #[derive(Debug, Clone, Copy)]
 enum EditKind {
-    Cut,
+    Remove,
     Trim,
     Restore,
 }
@@ -227,7 +227,7 @@ impl App {
             "add_marker" => self.agent_mark(&command),
             "stop_recording" => return self.agent_stop(&command, reply, false),
             "discard_recording" => return self.agent_stop(&command, reply, true),
-            "cut_recording" => self.agent_edit(&command, EditKind::Cut),
+            "remove_from_recording" => self.agent_edit(&command, EditKind::Remove),
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
@@ -681,7 +681,7 @@ impl App {
         let dir = self.agent_recording(args)?;
         let range = match kind {
             EditKind::Restore => None,
-            EditKind::Cut | EditKind::Trim => {
+            EditKind::Remove | EditKind::Trim => {
                 let (start, end) = (
                     time_arg(args, "start_seconds")?,
                     time_arg(args, "end_seconds")?,
@@ -701,7 +701,7 @@ impl App {
         }
         let mut edit = current.edit.clone();
         match (kind, range) {
-            (EditKind::Cut, Some((a, b))) => edit.cut_joining(a, b, SLIVER),
+            (EditKind::Remove, Some((a, b))) => edit.cut_joining(a, b, SLIVER),
             (EditKind::Trim, Some((a, b))) => edit.trim_joining(a, b, SLIVER),
             _ => edit = EditList::full(duration),
         }
@@ -766,7 +766,7 @@ impl App {
                     let mut reply = json!({
                         "folder": dir.display().to_string(),
                         "seconds": seconds(t),
-                        "cut": project.edit.to_output(t).is_none(),
+                        "removed": project.edit.to_output(t).is_none(),
                     });
                     reply[crate::cli::IMAGE] = BASE64_STANDARD.encode(jpeg).into();
                     reply
