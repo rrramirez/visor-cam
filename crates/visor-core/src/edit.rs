@@ -24,6 +24,15 @@ impl Range {
     }
 }
 
+/// A stretch removed from the recording, and the edge of the clip it would
+/// come back at: the end of clip `clip`, or its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removed {
+    pub range: Range,
+    pub clip: usize,
+    pub end: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditList {
     keep: Vec<Range>,
@@ -166,7 +175,7 @@ impl EditList {
     }
 
     /// Removes output time `[start, end)`, which may span several clips.
-    pub fn cut_output(&mut self, start: Micros, end: Micros) {
+    pub fn delete_output(&mut self, start: Micros, end: Micros) {
         for p in self.pieces(start, end) {
             self.cut(p.0, p.1);
         }
@@ -269,6 +278,63 @@ impl EditList {
         cuts
     }
 
+    /// The stretches removed from a recording of `duration` (as [`cuts`]),
+    /// each with where it would come back: at the end of the clip it was
+    /// cut from, the one before it in the recording, or at the start of
+    /// the clip after it if nothing is before it.
+    ///
+    /// [`cuts`]: Self::cuts
+    pub fn removed(&self, duration: Micros) -> Vec<Removed> {
+        self.cuts(duration)
+            .into_iter()
+            .filter_map(|range| {
+                let before = self.keep.iter().position(|r| r.1 == range.0);
+                let after = || self.keep.iter().position(|r| r.0 == range.1);
+                match before {
+                    Some(clip) => Some(Removed {
+                        range,
+                        clip,
+                        end: true,
+                    }),
+                    None => after().map(|clip| Removed {
+                        range,
+                        clip,
+                        end: false,
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// Output time where `removed` would come back.
+    pub fn removed_at(&self, removed: &Removed) -> Option<Micros> {
+        let (start, end) = self.clip_span(removed.clip)?;
+        Some(if removed.end { end } else { start })
+    }
+
+    /// Puts back the stretch `range` removed from a recording of
+    /// `duration`, joined to its clip (see [`removed`]). False if it isn't
+    /// one removed.
+    ///
+    /// [`removed`]: Self::removed
+    pub fn bring_back(&mut self, duration: Micros, range: Range) -> bool {
+        let Some(r) = self
+            .removed(duration)
+            .into_iter()
+            .find(|r| r.range == range)
+        else {
+            return false;
+        };
+        let to = if r.end { range.1 } else { range.0 };
+        match self.with_clip_edge_moved(duration, r.clip, r.end, to) {
+            Some(edit) => {
+                *self = edit;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Keep only `[start, end)` (source time), dropping everything outside it.
     pub fn trim(&mut self, start: Micros, end: Micros) {
         self.cut(0, start);
@@ -366,6 +432,54 @@ mod tests {
     }
 
     #[test]
+    fn deleted_parts_come_back_where_their_clip_is() {
+        let mut e = EditList::full(100);
+        e.cut(0, 10);
+        e.split(50);
+        e.cut(60, 70);
+        e.cut(90, 100);
+        e.move_clip(0, 3);
+        // Plays [50, 60) [70, 90) then [10, 50).
+        assert_eq!(e.ranges(), [Range(50, 60), Range(70, 90), Range(10, 50)]);
+        let removed = e.removed(100);
+        assert_eq!(
+            removed,
+            [
+                // Trimmed off the start: at the start of the clip after it.
+                Removed {
+                    range: Range(0, 10),
+                    clip: 2,
+                    end: false
+                },
+                // Otherwise at the end of the clip it was cut from.
+                Removed {
+                    range: Range(60, 70),
+                    clip: 0,
+                    end: true
+                },
+                Removed {
+                    range: Range(90, 100),
+                    clip: 1,
+                    end: true
+                },
+            ]
+        );
+        // Where each one shows on the timeline.
+        let at: Vec<_> = removed.iter().map(|r| e.removed_at(r)).collect();
+        assert_eq!(at, [Some(30), Some(10), Some(30)]);
+
+        let mut back = e.clone();
+        assert!(back.bring_back(100, Range(60, 70)));
+        assert_eq!(back.ranges(), [Range(50, 70), Range(70, 90), Range(10, 50)]);
+        assert!(back.bring_back(100, Range(0, 10)));
+        assert_eq!(back.ranges(), [Range(50, 70), Range(70, 90), Range(0, 50)]);
+        // Only what was deleted.
+        assert!(!back.bring_back(100, Range(60, 70)));
+        assert!(!back.bring_back(100, Range(92, 100)));
+        assert_eq!(back.removed(100).len(), 1);
+    }
+
+    #[test]
     fn pieces_that_go_on_from_each_other_join() {
         let mut e = EditList::full(100);
         e.split(50);
@@ -415,7 +529,7 @@ mod tests {
         // Plays 50–100, then 0–50: output 40–60 is 90–100 and 0–10.
         assert_eq!(e.pieces(40, 60), [Range(90, 100), Range(0, 10)]);
         let mut cut = e.clone();
-        cut.cut_output(40, 60);
+        cut.delete_output(40, 60);
         assert_eq!(cut.ranges(), [Range(50, 90), Range(10, 50)]);
         e.trim_output(40, 60);
         assert_eq!(e.ranges(), [Range(90, 100), Range(0, 10)]);
