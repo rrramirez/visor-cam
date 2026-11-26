@@ -30,6 +30,8 @@ Control the running Visor (turn on agent control in Preferences first):
       --mic MIC|none          a microphone by name or id
       --system-audio on|off   record what the computer plays
       --system-audio-app APP  record only this app's sound
+      --folder FOLDER         record more onto that stopped recording, at its
+                              end, from what it was recorded from
   pause | resume
   mark [TEXT]                 note this moment, shown on the editor's timeline
   stop [--open-editor]        stop and save; prints the recording's folder
@@ -175,6 +177,7 @@ fn start_args(args: &[String]) -> Result<Value, String> {
                 command["area"] = json!({"x": x, "y": y, "width": width, "height": height});
             }
             "--name" => command["name"] = value!()?.into(),
+            "--folder" => command["folder"] = value!()?.into(),
             "--display" => command["display"] = value!()?.into(),
             "--camera" => command["camera"] = value!()?.into(),
             "--mic" => command["mic"] = value!()?.into(),
@@ -597,5 +600,9 @@ mod tests {
         assert!(start_args(&args("--area 1,2,3")).is_err());
         assert!(start_args(&args("--window")).is_err());
         assert!(start_args(&args("--bogus")).is_err());
+        // Recording more onto a stopped recording.
+        let c = start_args(&args("--folder Demo --camera none")).unwrap();
+        assert_eq!(c["folder"], "Demo");
+        assert!(start_args(&args("--folder")).is_err());
     }
 }

@@ -60,6 +60,21 @@ enum Step {
     Blurs(Vec<Blur>),
 }
 
+/// Puts a take just recorded (`clip`, and the `markers` made in it) into
+/// every step to undo or redo, so going back never takes it out again.
+fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Marker]) {
+    for step in steps {
+        match step {
+            Step::Edit(edit) => edit.append(clip),
+            Step::Markers(m) => {
+                m.extend(markers.iter().cloned());
+                m.sort_by_key(|m| m.at_us);
+            }
+            Step::Blurs(_) => {}
+        }
+    }
+}
+
 /// Counts running background jobs; each holds a [`JobGuard`].
 #[derive(Clone, Default)]
 pub struct Jobs(Arc<AtomicU32>);
@@ -183,6 +198,83 @@ impl EditorWindow {
         let _ = self.ui.show();
     }
 
+    /// Whether an export is running (nothing else may write the recording).
+    pub fn is_exporting(&self) -> bool {
+        self.export.borrow().is_some()
+    }
+
+    /// Hides the editor to record more onto its recording.
+    fn record_more(&self) {
+        if self.is_exporting() {
+            return;
+        }
+        self.control().pause();
+        let _ = self.ui.hide();
+        app().record_more(self.dir.clone());
+    }
+
+    /// Hides the editor while an agent records more onto its recording.
+    pub fn hide_for_take(&self) {
+        self.control().pause();
+        let _ = self.ui.hide();
+    }
+
+    /// Back from recording more: the recording, as saved with the take,
+    /// replaces the one shown, the take is the last clip, selected, with
+    /// the playhead at its start; what there was to undo still is.
+    pub fn take_added(&self) {
+        let project = match Project::load(&self.dir) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("could not reload {}: {e}", self.dir.display());
+                return self.show();
+            }
+        };
+        let old_duration = self.project.borrow().duration_us;
+        let clip = project
+            .edit
+            .ranges()
+            .last()
+            .copied()
+            .filter(|r| r.0 >= old_duration);
+        if let Some(clip) = clip {
+            let markers: Vec<Marker> = {
+                let old = self.project.borrow();
+                project
+                    .markers
+                    .iter()
+                    .filter(|m| m.at_us >= old_duration && !old.markers.contains(m))
+                    .cloned()
+                    .collect()
+            };
+            add_take_to_steps(&mut self.undo.borrow_mut(), clip, &markers);
+            add_take_to_steps(&mut self.redo.borrow_mut(), clip, &markers);
+        }
+        match Player::open(&self.dir, &project, (1920, 1200), 360) {
+            Ok(player) => *self.player.borrow_mut() = player,
+            Err(e) => tracing::error!("could not reopen the player: {e:#}"),
+        }
+        self.ui.set_has_camera(project.has_track(TrackKind::Camera));
+        self.ui.set_has_audio(
+            project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System),
+        );
+        let clips = project.edit.ranges().len();
+        *self.project.borrow_mut() = project;
+        *self.nudged.borrow_mut() = None;
+        self.refresh_edit_ui();
+        self.load_previews();
+        if let Some(clip) = clip {
+            if let Some((a, b)) = self.layout().clip_span(clips - 1) {
+                let d = self.duration() as f64;
+                self.ui.set_sel_start((a as f64 / d) as f32);
+                self.ui.set_sel_end((b as f64 / d) as f32);
+                self.ui.set_kept_label(self.kept_label().into());
+            }
+            self.control().seek(clip.0);
+        }
+        self.show();
+    }
+
     fn wire(&self, weak: Weak<EditorWindow>) {
         let ui = &self.ui;
         macro_rules! on {
@@ -226,6 +318,7 @@ impl EditorWindow {
             }
         });
         on!(on_remove_pauses, |e| e.remove_pauses());
+        on!(on_record_more, |e| e.record_more());
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
                 let pieces = e.layout().kept_pieces(a, b);
@@ -1739,6 +1832,32 @@ fn marker_label(time: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use visor_core::Range;
+
+    #[test]
+    fn a_take_is_in_every_step_to_undo_or_redo() {
+        let marker = |at_us| Marker {
+            at_us,
+            text: String::new(),
+        };
+        let mut cut = EditList::full(20);
+        cut.cut(5, 8);
+        let mut steps = vec![
+            Step::Edit(EditList::full(20)),
+            Step::Markers(vec![marker(3)]),
+            Step::Blurs(Vec::new()),
+            Step::Edit(cut),
+        ];
+        add_take_to_steps(&mut steps, Range(20, 25), &[marker(22)]);
+        let Step::Edit(e) = &steps[0] else { panic!() };
+        assert_eq!(e.ranges(), [Range(0, 20), Range(20, 25)]);
+        let Step::Markers(m) = &steps[1] else {
+            panic!()
+        };
+        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [3, 22]);
+        let Step::Edit(e) = &steps[3] else { panic!() };
+        assert_eq!(e.ranges(), [Range(0, 5), Range(8, 20), Range(20, 25)]);
+        assert!(e.is_valid(25));
+    }
 
     #[test]
     fn bring_back_restores_the_dimmed_part_shown_there() {
