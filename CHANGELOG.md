@@ -7,7 +7,11 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
-- **Clips:** split the video into clips with **S** (*Split at playhead*) and drag a clip by its top bar to play it somewhere else; blurs and markers go with it, and chapters follow the new order. The timeline now shows the video as it plays, without the parts that were cut. To bring some of a cut part back, drag the edge of the clip next to it; *Restore the whole recording* puts everything back as it was recorded.
+- **Clips:** cut the video into clips with **C** or **⌘B** (*Cut at playhead*) and drag a clip to play it somewhere else, while the others make room; blurs and markers go with it, and chapters follow the new order. Above the clips, a ruler is where you click to seek and drag to select. The timeline shows the video as it plays, with nothing blank between clips.
+- **Bring back what you deleted:** each deleted part leaves a ▼ on the ruler. Hover it to see how long it was and its first frame, and click *Bring back* to put just that part back, without undoing everything you did since. You can still drag a clip's edge to bring back some of it, and *Restore the whole recording* puts everything back as it was recorded.
+
+### Changed
+- The editor's words: *Cut selection* is now *Delete selection*, and *Cut pauses* is now *Remove pauses*. For agents, `cut_recording` is now `remove_from_recording`, and on the command line `visor cut` is now `visor remove`.
 
 ### Fixed
 - The sound wave under the timeline was squeezed into its middle; it spans the timeline again.

@@ -32,10 +32,19 @@ in the exported file, which clocks, labels and chapters show.
 `cut_joining` / `trim_joining`, which also drop what's left next to the cut
 if it plays for less than `SLIVER` (0.25 s), counting the clips it plays
 straight on with (split but not moved apart) as one. In output time, for the editor's selection:
-`cut_output`, `trim_output`. `with_clip_edge_moved` moves one edge of a clip:
+`delete_output`, `trim_output`. `with_clip_edge_moved` moves one edge of a clip:
 out as far as the nearest other clip's part of the recording (or either end of
-it), in until the clip is gone. Nothing merges clips, so a cut inside a clip
-leaves a clip on each side.
+it), in until the clip is gone. Nothing merges clips, so deleting inside a
+clip leaves a clip on each side. Every operation closes up: clips always play
+back to back.
+
+**Bringing back.** `removed` lists each stretch taken out (the `cuts`, in
+recording order) with the clip edge it would come back at: the end of the
+clip it was deleted from (the one ending where it starts), or, if it was
+trimmed off the start of the recording, the start of the clip after it.
+`removed_at` is where that is on the timeline, and `bring_back` moves that
+edge out over the whole stretch. The stretch stays with its clip however the
+clips move.
 
 **Chapters.** `Project::chapters` starts one at each marker, at its output
 time, sorted by when it plays, so moved clips reorder them.
@@ -63,7 +72,7 @@ time, sorted by when it plays, so moved clips reorder them.
 
 ## Tests
 
-Unit tests in `edit.rs` cover split and move, clip edges, output-time cuts
+Unit tests in `edit.rs` cover split and move, bringing back, clip edges, output-time cuts
 and trims, and joins on reordered clips. `visor-media/tests/export.rs`
 (`moved_clips_export_in_their_order`) checks frames and chapters of an export
 with a moved clip.

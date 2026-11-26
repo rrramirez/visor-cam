@@ -39,14 +39,18 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    editor closes, the recording's folder is renamed to match.
    In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
-     timeline to seek, drag on it to select. The timeline shows the video
-     as it plays: what's cut is gone from it.
-   - **I / O** set the selection from the playhead, **⌫** cut the selection,
+     ruler above the clips to seek, drag along it to select. The timeline
+     shows the video as it plays, clip after clip, with nothing blank between.
+   - **I / O** set the selection from the playhead, **⌫** *Delete selection*,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore the whole recording*
      to start over.
-   - **Clips**: **S** (*Split at playhead*) splits the video in two clips
-     there; cutting also leaves one either side. Drag a clip by the bar along
-     its top to play it somewhere else, or click the bar to select the clip.
+   - **Clips**: **C** or **⌘B** (*Cut at playhead*) cuts the video in two
+     clips there; deleting also leaves one either side. Drag a clip to play
+     it somewhere else (the others make room), or click it to select it.
+   - **Bring back what you deleted**: a ▼ on the ruler marks each deleted
+     part, at the clip it was deleted from. Hover it to see how long it was
+     and its first frame, and click *Bring back* to put just that part back,
+     without undoing what you did since.
    - **Markers**: *Add marker* (**M**) marks the playhead. Name each one in
      the sidebar, click its time to jump there, or delete it.
    - **Blur**: *Blur an area* (**B**) hides part of the screen, like a
@@ -61,11 +65,11 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      at once. It's heavy enough that text under it can't be read, fades out
      at its edges, and the camera bubble stays on top.
    - Drag either edge of a clip to show less of the recording, or more of
-     what was cut next to it; the preview shows the clip's first or last
+     what was deleted next to it; the preview shows the clip's first or last
      frame. Click an edge, then **← →** move it a frame at a time (**⇧** for
      10). Dragging an edge onto the clip's other edge removes the clip.
-   - *Cut pauses* finds every stretch of 2 seconds or more where the screen
-     stays still and nothing is heard, and cuts them all in one step. It
+   - *Remove pauses* finds every stretch of 2 seconds or more where the screen
+     stays still and nothing is heard, and removes them all in one step. It
      leaves a moment around what happens, and ignores a spinner or a clock
      ticking on screen.
    - **Speed** (0.5×–2×) speeds up or slows down the whole video; speech
@@ -95,7 +99,7 @@ that many seconds of recorded time.
 
 Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
 you: name the recording, start it, mark each step, pause while they set
-something up or retry a step, stop, look at what was recorded, and cut what
+something up or retry a step, stop, look at what was recorded, and remove what
 went wrong before handing it to you in the editor. Turn on **Let AI agents control recording** in Preferences (it's off
 until you do). Recordings an agent starts say *Agent* on the control bar,
 and your own controls and shortcuts keep working.
@@ -118,18 +122,18 @@ visor pause; visor resume
 visor stop                                   # prints the folder and markers
 visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
-visor cut 12 19.5                            # remove 0:12–0:19.5 (recorded time)
+visor remove 12 19.5                         # remove 0:12–0:19.5 (recorded time)
 visor trim 2 1:05                            # keep only 0:02–1:05
-visor restore                                # undo all cuts and clip moves
+visor restore                                # bring everything back, in recorded order
 visor open                                   # open it in the editor
 visor frame 15                               # save the frame at 0:15 as a JPEG
-visor dead-time                              # where nothing happens, to cut
+visor dead-time                              # where nothing happens, to remove
 visor help                                   # every option
 ```
 
 Edits apply to the recording the agent last stopped (or `--folder`), in
 recorded time, so they line up with marker times. If the recording is open
-in the editor, an agent's cut shows there and **⌘Z** undoes it. Either way
+in the editor, what an agent removes shows there and **⌘Z** undoes it. Either way
 Visor starts in the background if it isn't running. Replies are
 JSON. Commands reach Visor through a local port that only your user account
 can use (its token is in your settings folder).
