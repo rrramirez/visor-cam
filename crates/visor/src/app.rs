@@ -1314,6 +1314,7 @@ impl App {
             camera,
             exclude_self: true,
             start_paused: true,
+            append: false,
         };
         let id = self.next_start_id.get();
         self.next_start_id.set(id + 1);
