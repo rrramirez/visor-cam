@@ -66,6 +66,10 @@ fn tool_list() -> Value {
                         "type": "string",
                         "description": "The recording's name, e.g. \"Creating a GitHub repository\". Its folder and exports are named after it. Left out: the date and time, and the user is asked for a name when it opens in the editor.",
                     },
+                    "folder": {
+                        "type": "string",
+                        "description": "Record more onto this stopped recording (its folder, as stop_recording returns it) instead of starting a new one: what's recorded is added at its end as another clip, from what it was recorded from unless other arguments say otherwise. stop_recording then returns the whole recording.",
+                    },
                     "target": {
                         "type": "string",
                         "enum": ["screen", "window", "app", "area"],

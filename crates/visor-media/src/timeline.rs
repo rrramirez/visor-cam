@@ -91,8 +91,18 @@ impl FrameCursor {
 
     /// The frame shown at `t` and its source time. The time only changes
     /// when the frame does.
+    /// None in a take recorded without the track: an earlier take's last
+    /// frame isn't carried into it.
     pub fn at(&mut self, t: Micros) -> anyhow::Result<Option<(Micros, &mut frame::Video)>> {
-        let behind = self.current.as_ref().is_some_and(|(pts, _)| t < *pts);
+        if !self.reader.shows(t) {
+            return Ok(None);
+        }
+        // A frame from another take never shows for this one.
+        let elsewhere = self
+            .current
+            .as_ref()
+            .is_some_and(|(pts, _)| self.reader.piece(*pts) != self.reader.piece(t));
+        let behind = self.current.as_ref().is_some_and(|(pts, _)| t < *pts) || elsewhere;
         let far = self
             .current
             .as_ref()

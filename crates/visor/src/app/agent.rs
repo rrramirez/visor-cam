@@ -284,12 +284,70 @@ impl App {
         if self.quit_after_start.get().is_some() {
             return send(reply, Err("Visor is quitting.".into()));
         }
+        // Recording more onto a stopped recording.
+        let more = match arg(args, "folder") {
+            Some(_) => match self.agent_recording(args) {
+                Ok(dir) => Some(dir),
+                Err(e) => return send(reply, Err(e)),
+            },
+            None => None,
+        };
+        if let Some(dir) = &more
+            && self.editor_for(dir).is_some_and(|e| e.is_busy())
+        {
+            return send(
+                reply,
+                Err("That recording is being exported or searched for pauses; \
+                     try again once that's done."
+                    .into()),
+            );
+        }
+        // A new recording, not more of one the user was about to record
+        // more onto from the panel.
+        let pending = self.more.borrow_mut().take();
+        if let Some(dir) = pending
+            && more.as_ref() != Some(&dir)
+        {
+            self.show_hidden_editor(&dir);
+        }
         // Cleared first: opening the panel reopens the user's devices and
         // says if one of those fails.
         self.set_panel_error("");
         self.open_panel();
+        // The user's own choices, put back if this start fails.
+        let users = self.panel_choices();
+        if let Some(dir) = &more {
+            // Its own sources, unless the arguments say otherwise.
+            if let Err((e, missing)) = self.choose_saved_sources(dir)
+                && !replaces_missing(&missing, args)
+            {
+                if let Some(users) = users {
+                    self.restore_choices(users);
+                }
+                return send(
+                    reply,
+                    Err(format!(
+                        "{e} Say what to record instead (list_sources shows what there is)."
+                    )),
+                );
+            }
+        }
         if let Err(e) = self.apply_agent_choices(args) {
+            if more.is_some()
+                && let Some(users) = users
+            {
+                self.restore_choices(users);
+            }
             return send(reply, Err(e));
+        }
+        if more.is_some() {
+            self.agent.borrow_mut().undo = users;
+        }
+        if let Some(dir) = more {
+            if let Some(editor) = self.editor_for(&dir) {
+                editor.hide_for_take();
+            }
+            *self.more.borrow_mut() = Some(dir);
         }
         let name: Option<String> = arg(args, "name")
             .and_then(Value::as_str)
@@ -321,6 +379,13 @@ impl App {
         let Some((reply, guard)) = waiting else {
             return;
         };
+        // Not recording more after all: its editor comes back.
+        if result.is_err()
+            && matches!(*self.session.borrow(), Session::Idle)
+            && let Some(dir) = self.take_more()
+        {
+            self.show_hidden_editor(&dir);
+        }
         // A start that failed leaves the user's choices as they were.
         if result.is_err()
             && let Some(before) = undo
@@ -615,6 +680,51 @@ impl App {
         format!("{why} To record without it, pass {arg} \"none\".")
     }
 
+    /// Sets the panel to record more onto the recording in `dir` with what
+    /// it was recorded from. Err says what is gone (the rest is chosen), or
+    /// that it never saved what it was recorded from.
+    pub(super) fn choose_saved_sources(
+        &self,
+        dir: &Path,
+    ) -> Result<(), (String, Vec<&'static str>)> {
+        // What a recording that saved nothing has gone missing.
+        const ALL: [&str; 3] = ["the display", "the camera", "the microphone"];
+        let project = visor_core::Project::load(dir).map_err(|e| (e.to_string(), ALL.to_vec()))?;
+        let Some(saved) = &project.sources else {
+            return Err((
+                "This recording was made before Visor kept what it recorded from: \
+                 choose what to record more from."
+                    .into(),
+                ALL.to_vec(),
+            ));
+        };
+        let (choices, missing) = {
+            let panel = self.panel.borrow();
+            let p = panel
+                .as_ref()
+                .ok_or(("The recorder panel didn't open.".to_string(), ALL.to_vec()))?;
+            let cameras: Vec<&str> = p.cameras.iter().map(|c| c.id.as_str()).collect();
+            let mics: Vec<&str> = p.mics.iter().map(|m| m.id.as_str()).collect();
+            saved_choices(saved, &p.sources, &cameras, &mics)
+        };
+        self.set_choices(&choices);
+        let opened = self.open_chosen_devices(&choices);
+        self.update_hint();
+        self.update_screen_highlight();
+        if !missing.is_empty() {
+            let gone = missing.join(" and ");
+            let mut gone = gone.chars();
+            let first = gone.next().map(|c| c.to_uppercase().to_string());
+            let e = format!(
+                "{}{} it was recorded from isn't there any more: choose what to record more from.",
+                first.unwrap_or_default(),
+                gone.as_str()
+            );
+            return Err((e, missing));
+        }
+        opened.map_err(|e| (e, Vec::new()))
+    }
+
     /// The recording an edit or open command is about: its `folder`, or
     /// the one the agent last stopped. Only recordings directly in the
     /// recordings folder, and not one being recorded.
@@ -652,6 +762,22 @@ impl App {
                 return Err("That recording is still going; stop it first.".into());
             }
             _ => {}
+        }
+        // Being recorded more onto (from the countdown on): the take's save
+        // would overwrite an edit made now. Only waiting in the panel, the
+        // recorder hasn't read it yet.
+        if self.more_cancelled.borrow().as_ref() == Some(&dir) {
+            return Err(
+                "That recording is being put back after a cancelled take; try again in a moment."
+                    .into(),
+            );
+        }
+        if self.more.borrow().as_ref() == Some(&dir)
+            && !matches!(*self.session.borrow(), Session::Idle)
+        {
+            return Err(
+                "Visor is recording more onto that recording; stop or discard that first.".into(),
+            );
         }
         Ok(dir)
     }
@@ -826,6 +952,15 @@ impl App {
     /// Opens a recording in the editor for the user.
     fn agent_open(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
+        // Its editor is hidden while the user picks what to record more
+        // onto it from the recorder panel.
+        if self.more.borrow().as_ref() == Some(&dir) {
+            return Err(
+                "The user is about to record more onto that recording from the \
+                 recorder panel; it opens again once they record or close the panel."
+                    .into(),
+            );
+        }
         self.open_editor(dir.clone());
         Ok(json!({"folder": dir.display().to_string()}))
     }
@@ -946,9 +1081,81 @@ impl App {
     }
 }
 
+/// Whether a start command's `args` pick something else for everything in
+/// `missing` (as `saved_choices` lists it): only then may recording more go
+/// on without what's gone.
+fn replaces_missing(missing: &[&str], args: &Value) -> bool {
+    let has = |keys: &[&str]| keys.iter().any(|k| arg(args, k).is_some());
+    missing.iter().all(|m| match *m {
+        "the window" | "the app" | "the display" => {
+            has(&["target", "display", "window", "app", "area"])
+        }
+        "the camera" => has(&["camera"]),
+        "the microphone" => has(&["mic"]),
+        _ => has(&["system_audio", "system_audio_app"]),
+    })
+}
+
+/// The panel choices that record from `saved` again (a recording's
+/// sources, to record more), given what can be recorded now and the ids of
+/// the cameras and mics listed in the panel; and what of it is gone, as
+/// words for the user ("the window").
+fn saved_choices(
+    saved: &RecordingConfig,
+    sources: &Shareable,
+    cameras: &[&str],
+    mics: &[&str],
+) -> (Choices, Vec<&'static str>) {
+    let mut c = Choices::default();
+    let mut missing = Vec::new();
+    let display = |id: u32| sources.displays.iter().position(|d| d.id == id);
+    match &saved.target {
+        CaptureTarget::Display { id } => match display(*id) {
+            Some(i) => (c.mode, c.display) = (Some(0), Some(i)),
+            None => missing.push("the display"),
+        },
+        CaptureTarget::Window { id } => match sources.windows.iter().position(|w| w.id == *id) {
+            Some(i) => (c.mode, c.window) = (Some(1), Some(i)),
+            None => missing.push("the window"),
+        },
+        CaptureTarget::App { pid } => match sources.apps.iter().position(|a| a.pid == *pid) {
+            Some(i) => (c.mode, c.app) = (Some(2), Some(i)),
+            None => missing.push("the app"),
+        },
+        CaptureTarget::Area { display_id, rect } => match display(*display_id) {
+            Some(i) => {
+                (c.mode, c.display) = (Some(3), Some(i));
+                c.area = Some((*display_id, *rect));
+            }
+            None => missing.push("the display"),
+        },
+    }
+    c.system_audio = Some(saved.audio.system || saved.audio.app_pid.is_some());
+    if let Some(pid) = saved.audio.app_pid {
+        match sources.apps.iter().position(|a| a.pid == pid) {
+            Some(i) => c.audio_app = Some(i),
+            None => missing.push("the app whose sound was recorded"),
+        }
+    }
+    // Panel indexes, where 0 is none.
+    let device = |id: &Option<String>, ids: &[&str], what, missing: &mut Vec<_>| match id {
+        None => Some(0),
+        Some(id) => match ids.iter().position(|d| d == id) {
+            Some(i) => Some(i + 1),
+            None => {
+                missing.push(what);
+                None
+            }
+        },
+    };
+    c.camera = device(&saved.camera, cameras, "the camera", &mut missing);
+    c.mic = device(&saved.audio.mic, mics, "the microphone", &mut missing);
+    (c, missing)
+}
+
 /// A start command's choices, checked against the panel's lists before
 /// any is applied: indexes into them, and the panel mode to record with.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Choices {
     display: Option<usize>,
     mode: Option<i32>,
@@ -1061,6 +1268,99 @@ fn area_arg(args: &Value, display: &DisplayInfo) -> Result<Rect, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_arguments_that_replace_what_is_gone_do() {
+        let window_gone = ["the window"];
+        assert!(!replaces_missing(&window_gone, &json!({"camera": "none"})));
+        assert!(replaces_missing(&window_gone, &json!({"target": "screen"})));
+        assert!(replaces_missing(&window_gone, &json!({"display": 2})));
+        let both = ["the window", "the camera"];
+        assert!(!replaces_missing(&both, &json!({"window": 3})));
+        assert!(replaces_missing(
+            &both,
+            &json!({"window": 3, "camera": "none"})
+        ));
+        assert!(!replaces_missing(
+            &["the microphone"],
+            &json!({"camera": true})
+        ));
+        assert!(replaces_missing(
+            &["the microphone"],
+            &json!({"mic": "none"})
+        ));
+        let sound = ["the app whose sound was recorded"];
+        assert!(replaces_missing(&sound, &json!({"system_audio": false})));
+        assert!(replaces_missing(&[], &json!({})));
+    }
+
+    #[test]
+    fn saved_sources_come_back_as_panel_choices() {
+        use visor_capture::{AppInfo, DisplayInfo, WindowInfo};
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let sources = Shareable {
+            displays: [7, 9]
+                .map(|id| DisplayInfo {
+                    id,
+                    name: format!("Display {id}"),
+                    frame: rect,
+                    scale: 2.0,
+                })
+                .into(),
+            windows: vec![WindowInfo {
+                id: 42,
+                title: "Notes".into(),
+                app: "Notes".into(),
+                pid: 5,
+            }],
+            apps: vec![AppInfo {
+                pid: 5,
+                name: "Notes".into(),
+            }],
+        };
+        let (cameras, mics) = (["cam-a", "cam-b"], ["mic-a"]);
+        let mut saved = RecordingConfig::display(9);
+        saved.camera = Some("cam-b".into());
+        saved.audio.mic = Some("mic-a".into());
+        let (c, missing) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert!(missing.is_empty());
+        assert_eq!((c.mode, c.display), (Some(0), Some(1)));
+        // Panel device indexes count "None" as 0.
+        assert_eq!((c.camera, c.mic), (Some(2), Some(1)));
+        assert_eq!((c.system_audio, c.audio_app), (Some(false), None));
+
+        saved.target = CaptureTarget::Window { id: 42 };
+        saved.camera = None;
+        saved.audio.app_pid = Some(5);
+        let (c, _) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!((c.mode, c.window, c.camera), (Some(1), Some(0), Some(0)));
+        assert_eq!(c.audio_app, Some(0));
+
+        saved.target = CaptureTarget::Area {
+            display_id: 7,
+            rect,
+        };
+        let (c, _) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!(
+            (c.mode, c.display, c.area),
+            (Some(3), Some(0), Some((7, rect)))
+        );
+
+        // What's gone is said, and the rest still chosen.
+        saved.target = CaptureTarget::Window { id: 43 };
+        saved.camera = Some("cam-c".into());
+        let (c, missing) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!(missing, ["the window", "the camera"]);
+        assert_eq!(
+            (c.mode, c.window, c.camera, c.mic),
+            (None, None, None, Some(1))
+        );
+    }
 
     #[test]
     fn finds_by_id_name_or_part_of_a_name() {

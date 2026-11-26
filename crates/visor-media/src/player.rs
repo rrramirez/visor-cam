@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ffmpeg_next::{format, frame, software::scaling};
-use visor_core::{Blur, EditList, Micros, Project};
+use visor_core::{Blur, EditList, Micros, Project, TrackKind};
 
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
@@ -82,6 +82,9 @@ struct Shared {
     /// Frames published since the UI last took them.
     screen: Mutex<Option<Arc<PreviewFrame>>>,
     camera: Mutex<Option<Arc<PreviewFrame>>>,
+    /// Whether the camera has a frame where the player is: not in a take
+    /// recorded without it.
+    camera_shown: AtomicBool,
 }
 
 pub struct Player {
@@ -104,34 +107,32 @@ impl Player {
         max_size: (u32, u32),
         camera_height: u32,
     ) -> anyhow::Result<Self> {
-        let screen_track = project
-            .tracks
-            .screen
-            .as_ref()
-            .context("project has no screen track")?;
-        let screen_path = dir.join(&screen_track.file);
-        let (sw, sh) = VideoReader::open(&screen_path, None)?.size();
+        if !project.has_track(TrackKind::Screen) {
+            bail!("project has no screen track");
+        }
+        let screen_parts = project.parts(TrackKind::Screen);
+        let (sw, sh) = VideoReader::open_parts(dir, &screen_parts, None)?.size();
         let (pw, ph) = fit(sw, sh, max_size);
         let mut screen_reader =
-            VideoReader::open(&screen_path, Some((format::Pixel::RGBA, pw, ph)))?;
+            VideoReader::open_parts(dir, &screen_parts, Some((format::Pixel::RGBA, pw, ph)))?;
         screen_reader.set_scaling(PREVIEW_SCALING, 1);
         let screen = FrameCursor::new(screen_reader);
-        let camera = match &project.tracks.camera {
-            Some(t) => {
-                let path = dir.join(&t.file);
-                let (cw, ch) = VideoReader::open(&path, None)?.size();
-                let h = camera_height.min(ch).max(2) & !1;
-                let w = ((u64::from(cw) * u64::from(h) / u64::from(ch.max(1))) as u32 + 1) & !1;
-                let mut reader = VideoReader::open(&path, Some((format::Pixel::RGBA, w, h)))?;
-                reader.set_scaling(PREVIEW_SCALING, 1);
-                Some(FrameCursor::new(reader))
-            }
-            None => None,
+        let camera = if project.has_track(TrackKind::Camera) {
+            let parts = project.parts(TrackKind::Camera);
+            let (cw, ch) = VideoReader::open_parts(dir, &parts, None)?.size();
+            let h = camera_height.min(ch).max(2) & !1;
+            let w = ((u64::from(cw) * u64::from(h) / u64::from(ch.max(1))) as u32 + 1) & !1;
+            let mut reader =
+                VideoReader::open_parts(dir, &parts, Some((format::Pixel::RGBA, w, h)))?;
+            reader.set_scaling(PREVIEW_SCALING, 1);
+            Some(FrameCursor::new(reader))
+        } else {
+            None
         };
-        let audio_paths: Vec<_> = [&project.tracks.mic, &project.tracks.system]
+        let audio_parts: Vec<_> = [TrackKind::Mic, TrackKind::System]
             .into_iter()
-            .flatten()
-            .map(|t| dir.join(&t.file))
+            .filter(|&k| project.has_track(k))
+            .map(|k| project.parts(k))
             .collect();
 
         let shared = Arc::new(Shared::default());
@@ -147,12 +148,12 @@ impl Player {
                 .name("visor-player-video".into())
                 .spawn(move || video_loop(screen, camera, edit, blurs, shared, clock, video_rx))?;
         }
-        let audio_tx = if audio_paths.is_empty() {
+        let audio_tx = if audio_parts.is_empty() {
             None
         } else {
-            let readers = audio_paths
+            let readers = audio_parts
                 .iter()
-                .map(|p| AudioReader::open(p))
+                .map(|p| AudioReader::open_parts(dir, p))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let (tx, rx) = unbounded();
             let edit = edit.clone();
@@ -293,6 +294,12 @@ impl Player {
         let screen = self.shared.screen.lock().unwrap().take();
         let camera = self.shared.camera.lock().unwrap().take();
         Some((screen, camera))
+    }
+
+    /// Whether a camera frame is shown where the player is (false in a take
+    /// recorded without the camera, or with none at all).
+    pub fn camera_shown(&self) -> bool {
+        self.shared.camera_shown.load(Ordering::Relaxed)
     }
 
     fn send(&self, cmd: Cmd) {
@@ -495,14 +502,22 @@ fn video_loop(
             Ok(_) => {}
             Err(e) => tracing::warn!("preview decode failed: {e:#}"),
         }
-        if let Some(cam) = &mut camera
-            && let Ok(Some((pts, f))) = cam.at(target)
-            && shown_camera != Some(pts)
-        {
-            let frame = Arc::new(PreviewFrame::from_frame(f));
-            *shared.camera.lock().unwrap() = Some(frame);
-            shown_camera = Some(pts);
-            changed = true;
+        if let Some(cam) = &mut camera {
+            match cam.at(target) {
+                Ok(Some((pts, f))) if shown_camera != Some(pts) => {
+                    let frame = Arc::new(PreviewFrame::from_frame(f));
+                    *shared.camera.lock().unwrap() = Some(frame);
+                    shown_camera = Some(pts);
+                    shared.camera_shown.store(true, Ordering::Relaxed);
+                    changed = true;
+                }
+                Ok(None) if shown_camera.is_some() => {
+                    shown_camera = None;
+                    shared.camera_shown.store(false, Ordering::Relaxed);
+                    changed = true;
+                }
+                _ => {}
+            }
         }
         if changed {
             shared.generation.fetch_add(1, Ordering::Release);

@@ -178,6 +178,7 @@ fn record(backend: &dyn Backend, args: RecordArgs) -> anyhow::Result<()> {
             camera,
             exclude_self: false,
             start_paused: false,
+            append: false,
         },
     )?;
 

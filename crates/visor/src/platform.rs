@@ -99,6 +99,19 @@ pub fn activate() {
     macos::activate();
 }
 
+/// Gives `window` the keyboard if Visor is the active app, so its keys
+/// work, without taking the keyboard from another app the user is in.
+/// Returns whether it did. macOS only for now; elsewhere it does nothing.
+pub fn focus_if_active(window: &slint::Window) -> bool {
+    #[cfg(target_os = "macos")]
+    if macos::is_active() {
+        window.with_winit_window(|w: &winit::window::Window| w.focus_window());
+        return true;
+    }
+    let _ = window;
+    false
+}
+
 /// Opens the file manager with `path` selected.
 pub fn reveal(path: &Path) {
     #[cfg(target_os = "macos")]
@@ -301,5 +314,9 @@ mod macos {
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
         }
+    }
+
+    pub fn is_active() -> bool {
+        app().is_some_and(|app| app.isActive())
     }
 }

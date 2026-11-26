@@ -124,6 +124,7 @@ portal + GStreamer).
   camera.mp4        # optional
   mic.m4a           # optional
   system.m4a        # optional
+  screen-2.mp4 …    # a take recorded onto it later (Record more), likewise
   exports/
     Untitled.mp4
 ```
@@ -246,4 +247,7 @@ again after rebuilding.
   the app.
 - Linux per-app audio links PipeWire nodes outside the portal, which needs
   direct PipeWire access (not available in a strict Flatpak sandbox).
+- Recordings with a take (*Record more*) play only their first piece in
+  Visor 0.8.0 and earlier, and an edit saved there forgets the takes (their
+  files stay in the folder).
 - No global hotkeys and no per-track volume in the editor yet (not chosen for v1).

@@ -49,7 +49,8 @@ part shows, and clips the rest.
 **Shortcuts.** Space play/pause, ← → step (into the next or previous clip at
 a clip's end), I / O selection, ⌫ delete the selection, T trim, C or ⌘B cut
 at the playhead (as Premiere's razor and Final Cut's blade), M marker, B blur,
-⌘Z / ⇧⌘Z undo / redo, Esc lets go of what's picked.
+⌘Z / ⇧⌘Z undo / redo, R record more (see [recording.md](recording.md)), Esc
+lets go of what's picked.
 
 **Words.** *Cut* only means cutting a clip in two. Taking video out is
 *Delete* in the editor (leaving it dimmed, to bring back) and *Remove* for pauses

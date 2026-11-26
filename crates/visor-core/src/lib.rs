@@ -13,7 +13,9 @@ pub use config::{AudioConfig, CaptureTarget, RecordingConfig, Rect};
 pub use edit::{EditList, Range, Removed};
 pub use layout::{Layout, Segment};
 pub use media::{AudioBuffer, PixelFormat, Plane, PlaneData, VideoFrame};
-pub use project::{Blur, CameraOverlay, Chapter, Marker, Project, Track, Tracks};
+pub use project::{
+    Blur, CameraOverlay, Chapter, Marker, Part, Project, Take, Track, TrackKind, Tracks,
+};
 
 /// Microseconds. Every timestamp and duration in Visor uses this unit.
 pub type Micros = u64;

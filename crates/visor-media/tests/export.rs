@@ -157,6 +157,63 @@ fn moved_clips_export_in_their_order() {
 }
 
 #[test]
+fn takes_export_in_place_fitted_into_the_frame() {
+    // 2 s, then a square take of 1 s with no camera, moved first.
+    let (dir, mut project) = project("export-takes", 2);
+    add_take(&dir, &mut project, 1, (360, 360), false);
+    assert_eq!(project.edit.ranges().len(), 2);
+    project.edit.move_clip(1, 0);
+    let out = dir.join("out.mp4");
+    export(
+        &dir,
+        &project,
+        &out,
+        &ExportOptions::new(ExportFormat::Mp4),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let (duration, _) = probe(&out);
+    assert!((duration - 3.0).abs() < 0.08, "duration {duration}");
+    let mut reader =
+        VideoReader::open(&out, Some((ffmpeg::format::Pixel::YUV420P, 640, 360))).unwrap();
+    // Output 0.5 s is frame 15 of the take, in the middle with bars.
+    reader.seek(500_000).unwrap();
+    let (_, f) = reader.frame_at(500_000).unwrap().unwrap();
+    let column = |x0: usize, x1: usize| {
+        let (h, stride) = (f.height() as usize / 2, f.stride(0));
+        let sum: u64 = (0..h)
+            .flat_map(|y| f.data(0)[y * stride + x0..y * stride + x1].iter())
+            .map(|&v| u64::from(v))
+            .sum();
+        sum as f64 / ((x1 - x0) * h) as f64
+    };
+    assert!(
+        (column(280, 360) - f64::from(luma(15))).abs() < 8.0,
+        "{}",
+        column(280, 360)
+    );
+    assert!(column(0, 100) < 22.0, "bar {}", column(0, 100));
+    // No camera bubble in the take, but in the first piece after it.
+    let u = |f: &ffmpeg::frame::Video, x: usize, y: usize| f.data(1)[y * f.stride(1) + x];
+    assert!(u(&f, 50, 155) < 140, "bubble chroma {}", u(&f, 50, 155));
+    reader.seek(2_000_000).unwrap();
+    let (_, f) = reader.frame_at(2_000_000).unwrap().unwrap();
+    assert!((top_luma(&f) - f64::from(luma(30))).abs() < 8.0);
+    assert!(u(&f, 50, 155) > 180, "bubble chroma {}", u(&f, 50, 155));
+    // The take's sound is there.
+    let mut audio = AudioReader::open(&out).unwrap();
+    let mut peak = 0f32;
+    while let Some((at, chunk)) = audio.next_chunk().unwrap() {
+        if (200_000..800_000).contains(&at) {
+            peak = chunk.iter().fold(peak, |m, s| m.max(s.abs()));
+        }
+    }
+    assert!(peak > 0.2, "peak {peak}");
+    common::cleanup(&dir);
+}
+
+#[test]
 fn exports_webm_vp9_and_av1() {
     let (dir, mut project) = project("export-webm", 3);
     project.edit.trim(500_000, 2_500_000);

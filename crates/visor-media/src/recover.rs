@@ -15,13 +15,14 @@ use visor_core::project::{CAMERA_FILE, MIC_FILE, PROJECT_FILE, SCREEN_FILE, SYST
 use visor_core::{EditList, Micros, Project};
 
 /// Whether `dir` holds a recording that was never finished: a screen track
-/// with no project file, or a project file without a duration.
+/// with no project file, a project file without a duration, or one with a
+/// take still being recorded onto it.
 pub fn is_interrupted(dir: &Path) -> bool {
     if !dir.join(SCREEN_FILE).is_file() {
         return false;
     }
     match Project::load(dir) {
-        Ok(p) => p.duration_us == 0,
+        Ok(p) => p.duration_us == 0 || p.recording_take().is_some(),
         Err(_) => !dir.join(PROJECT_FILE).exists(),
     }
 }
@@ -65,6 +66,12 @@ pub fn recover_all(root: &Path) -> Vec<PathBuf> {
 /// Rebuilds and saves the project for an interrupted recording in `dir`.
 pub fn recover(dir: &Path) -> anyhow::Result<Project> {
     crate::init()?;
+    if let Ok(project) = Project::load(dir)
+        && project.duration_us > 0
+        && project.recording_take().is_some()
+    {
+        return recover_take(dir, project);
+    }
     let mut project = Project::load(dir).unwrap_or_else(|_| {
         let title = dir
             .file_name()
@@ -120,6 +127,53 @@ pub fn recover(dir: &Path) -> anyhow::Result<Project> {
         dir = %dir.display(),
         duration_ms = duration / 1000,
         "recovered an interrupted recording"
+    );
+    Ok(project)
+}
+
+/// Finishes the take that was being recorded onto `project` from what its
+/// tracks hold, as a clip at the end; drops it if its screen track has
+/// nothing readable.
+fn recover_take(dir: &Path, mut project: Project) -> anyhow::Result<Project> {
+    let take = project.takes.last_mut().expect("a take being recorded");
+    let readable = |track: &Option<Track>| {
+        let t = track.as_ref()?;
+        let info = probe(&dir.join(&t.file)).ok().filter(|i| i.duration > 0)?;
+        Some((t.clone(), info))
+    };
+    let tracks = &mut take.tracks;
+    let screen = readable(&tracks.screen);
+    let mut duration = 0;
+    if let Some((_, info)) = &screen {
+        for track in [&mut tracks.camera, &mut tracks.mic, &mut tracks.system] {
+            match readable(track) {
+                Some((_, i)) => duration = duration.max(i.duration),
+                None => *track = None,
+            }
+        }
+        duration = duration.max(info.duration);
+    }
+    match screen {
+        Some((t, info)) => {
+            tracks.screen = Some(Track {
+                width: info.size.map(|s| s.0),
+                height: info.size.map(|s| s.1),
+                ..t
+            });
+            project.finish_take(duration, Vec::new());
+        }
+        None => {
+            project.drop_take();
+        }
+    }
+    // Markers made in what was lost.
+    let end = project.duration_us;
+    project.markers.retain(|m| m.at_us <= end);
+    project.save(dir)?;
+    tracing::info!(
+        dir = %dir.display(),
+        duration_ms = duration / 1000,
+        "recovered a take cut short"
     );
     Ok(project)
 }

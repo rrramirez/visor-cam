@@ -99,6 +99,13 @@ impl EditList {
         &self.keep
     }
 
+    /// Adds `range`, recorded after everything else, as the last clip.
+    pub fn append(&mut self, range: Range) {
+        if !range.is_empty() {
+            self.keep.push(range);
+        }
+    }
+
     /// Whether the ranges are non-overlapping, non-empty and end by
     /// `duration`, as the edit operations keep them. Lists loaded from disk
     /// are checked with this.

@@ -88,6 +88,14 @@ pub struct App {
     /// Quit once this start (cancelled by quitting) has resolved.
     quit_after_start: std::cell::Cell<Option<u64>>,
     agent: RefCell<agent::AgentState>,
+    /// The stopped recording that the next start records more onto, or
+    /// that is being recorded onto (see `record_more`). Its editor is
+    /// hidden meanwhile.
+    more: RefCell<Option<PathBuf>>,
+    /// A cancelled take's recording, until its recorder is discarded and
+    /// the project put back (agents may not edit it meanwhile); its editor
+    /// comes back then.
+    more_cancelled: RefCell<Option<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -178,6 +186,8 @@ impl App {
             quit_pending: std::cell::Cell::new(false),
             quit_after_start: std::cell::Cell::new(None),
             agent: RefCell::default(),
+            more: RefCell::default(),
+            more_cancelled: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });
@@ -685,6 +695,10 @@ impl App {
             app.abandon_pending_start();
             if matches!(*app.session.borrow(), Session::Idle) {
                 app.release_devices();
+                // Not recording more after all.
+                if let Some(dir) = app.take_more() {
+                    app.show_hidden_editor(&dir);
+                }
             }
             // Runs after the panel is hidden.
             slint::Timer::single_shot(Duration::ZERO, || {
@@ -1274,9 +1288,12 @@ impl App {
         }
         // The folder is created now, which claims its name.
         let name = run.as_ref().and_then(|r| r.name.clone());
-        let created = match &name {
-            Some(name) => named_project_dir(&save_dir, name),
-            None => new_project_dir(&save_dir, "Recording"),
+        let more = self.more.borrow().clone();
+        let append = more.is_some();
+        let created = match (more, &name) {
+            (Some(dir), _) => Ok(dir),
+            (None, Some(name)) => named_project_dir(&save_dir, name),
+            (None, None) => new_project_dir(&save_dir, "Recording"),
         };
         let dir = match created {
             Ok(dir) => dir,
@@ -1314,13 +1331,14 @@ impl App {
             camera,
             exclude_self: true,
             start_paused: true,
+            append,
         };
         let id = self.next_start_id.get();
         self.next_start_id.set(id + 1);
         std::thread::spawn(move || {
             let dir = options.dir.clone();
             let result = Recorder::start(backend.as_ref(), options);
-            if result.is_err() {
+            if result.is_err() && !append {
                 // Don't leave the folder created for it behind.
                 let _ = std::fs::remove_dir_all(&dir);
             }
@@ -1447,8 +1465,11 @@ impl App {
             (display.frame.y + (display.frame.height - 180.0) / 2.0) as f32,
         ));
         ui.on_skip(|| app().countdown_tick(true));
+        // As the bar's stop does during the countdown.
+        ui.on_cancel(|| app().stop_recording(false));
         let _ = ui.show();
         platform::configure_overlay(&ui, Overlay::Shield);
+        ui.set_can_cancel(platform::focus_if_active(ui.window()));
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_secs(1), || {
             app().countdown_tick(false)
@@ -1497,8 +1518,15 @@ impl App {
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
         if !current {
             // This start was cancelled; throw away what it created.
-            if let Ok(r) = result {
-                discard_in_background(r);
+            let more = self.more_cancelled.borrow().clone();
+            match (result, more) {
+                (Ok(r), Some(dir)) => discard_take_then_show(r, dir),
+                (Ok(r), None) => discard_in_background(r),
+                (Err(_), Some(dir)) => {
+                    self.more_cancelled.borrow_mut().take();
+                    self.show_hidden_editor(&dir);
+                }
+                (Err(_), None) => {}
             }
             return;
         }
@@ -1675,9 +1703,13 @@ impl App {
                 ..
             } => {
                 let _ = bar.hide();
+                // Recording more keeps the recording's own bubble.
+                let more = self.more.borrow().is_some();
                 (
                     recorder,
-                    captured.and_then(|c| self.bubble_overlay(c)),
+                    captured
+                        .filter(|_| !more)
+                        .and_then(|c| self.bubble_overlay(c)),
                     agent,
                 )
             }
@@ -1689,6 +1721,21 @@ impl App {
                 // Nothing has been recorded yet: cancel and go back to the panel.
                 if let Some((ui, _)) = countdown {
                     let _ = ui.hide();
+                }
+                if let Some(dir) = self.take_more() {
+                    // Back to the editor it was recording more from, once
+                    // the take is gone and the project put back as it was,
+                    // so nothing overwrites an edit made meanwhile.
+                    *self.session.borrow_mut() = Session::Idle;
+                    self.release_devices();
+                    self.refresh_tray();
+                    self.agent_start_finished(Err("The recording was cancelled.".into()));
+                    *self.more_cancelled.borrow_mut() = Some(dir.clone());
+                    // Still starting: on_recorder_ready discards it.
+                    if let Some(r) = recorder {
+                        discard_take_then_show(r, dir);
+                    }
+                    return;
                 }
                 if let Some(r) = recorder {
                     discard_in_background(r);
@@ -1731,6 +1778,7 @@ impl App {
         run: Option<agent::AgentRun>,
     ) {
         *self.session.borrow_mut() = Session::Idle;
+        let more = self.more.borrow_mut().take();
         let after = self.agent_stopped(&result, run);
         let open_editor = after != agent::AfterStop::Nothing;
         if self.quit_pending.get() {
@@ -1740,6 +1788,27 @@ impl App {
             return self.quit();
         }
         self.refresh_tray();
+        if let Some(more) = more {
+            // Its editor comes back with the take, or opens if it wasn't.
+            match self.editor_for(&more) {
+                Some(editor) => {
+                    editor.take_added();
+                    platform::activate();
+                }
+                None if result.is_ok() && after != agent::AfterStop::Nothing => {
+                    self.open_editor(more)
+                }
+                None => {}
+            }
+            if let Err(e) = &result {
+                tracing::error!("finishing the take failed: {e:#}");
+                let _ = rfd::MessageDialog::new()
+                    .set_title("Visor")
+                    .set_description(format!("Recording more failed: {e:#}"))
+                    .show();
+            }
+            return;
+        }
         match result {
             Ok((dir, _)) => match after {
                 agent::AfterStop::Name => self.open_new_recording(dir),
@@ -1766,6 +1835,12 @@ impl App {
             *self.session.borrow_mut() = Session::Idle;
             return self.quit();
         }
+        if let Some(dir) = self.take_more() {
+            // Only the take went: back to the recording as it was.
+            *self.session.borrow_mut() = Session::Idle;
+            self.refresh_tray();
+            return self.show_hidden_editor(&dir);
+        }
         if show_panel {
             self.return_to_panel(None);
         } else {
@@ -1785,10 +1860,54 @@ impl App {
         self.show_editor(dir, true);
     }
 
+    /// Records more onto the stopped recording in `dir` with what it was
+    /// recorded from: straight to the countdown, or to the recorder panel
+    /// when some of it is gone (or it never saved that). Its editor is
+    /// hidden meanwhile, and comes back with the take as its last clip.
+    pub fn record_more(&self, dir: PathBuf) {
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let busy = !matches!(*self.session.borrow(), Session::Idle)
+            || self.pending_start.borrow().is_some()
+            || self.more_cancelled.borrow().as_ref() == Some(&dir);
+        if busy {
+            return self.show_hidden_editor(&dir);
+        }
+        *self.more.borrow_mut() = Some(dir.clone());
+        self.set_panel_error("");
+        self.open_panel();
+        match self.choose_saved_sources(&dir) {
+            Ok(()) => self.record_when_ready(None),
+            Err((e, _)) => self.set_panel_error(&e),
+        }
+    }
+
+    /// Takes the recording being recorded more onto. A method, so the
+    /// borrow ends here: in `if let`, a `borrow_mut()` would be held
+    /// through the block, and what it calls may look at `more` again.
+    fn take_more(&self) -> Option<PathBuf> {
+        self.more.borrow_mut().take()
+    }
+
+    /// Shows the editor of `dir` again, if one is open (hidden while
+    /// recording more).
+    fn show_hidden_editor(&self, dir: &std::path::Path) {
+        if let Some(editor) = self.editor_for(dir) {
+            editor.show();
+            platform::activate();
+        }
+    }
+
     fn show_editor(&self, dir: PathBuf, name_first: bool) {
         // One path per folder, however it was reached (symlinks, /var vs
         // /private/var), so a recording never has two editors.
         let dir = dir.canonicalize().unwrap_or(dir);
+        // Not while recording more onto it, or putting it back after a
+        // cancelled take: its editor is waiting for that.
+        if self.more.borrow().as_ref() == Some(&dir)
+            || self.more_cancelled.borrow().as_ref() == Some(&dir)
+        {
+            return;
+        }
         if let Some(existing) = self.editors.borrow().iter().find(|e| e.dir() == dir) {
             existing.show();
             platform::activate();
@@ -1986,6 +2105,23 @@ fn is_transient(e: &std::io::Error) -> bool {
         e.kind(),
         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ResourceBusy
     ) || (cfg!(windows) && e.raw_os_error() == Some(32))
+}
+
+/// Discards a take being recorded more onto the recording in `dir`, then
+/// shows its editor again.
+fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
+    std::thread::spawn(move || {
+        if let Err(e) = recorder.discard() {
+            tracing::warn!("discarding a cancelled take failed: {e:#}");
+        }
+        post(move |app| {
+            // Unless another take has been cancelled since.
+            if app.more_cancelled.borrow().as_ref() == Some(&dir) {
+                app.more_cancelled.borrow_mut().take();
+            }
+            app.show_hidden_editor(&dir);
+        });
+    });
 }
 
 /// Discards a recorder without blocking the UI thread on its writer threads.

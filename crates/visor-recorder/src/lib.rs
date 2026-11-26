@@ -13,7 +13,10 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, select};
 use visor_capture::camera::CameraStream;
 use visor_capture::mic::MicStream;
 use visor_capture::{Backend, ScreenRequest, ScreenSession, SystemAudio, host_now};
-use visor_core::{AudioBuffer, MediaClock, Micros, Project, RecordingConfig, Track, VideoFrame};
+use visor_core::project::take_file;
+use visor_core::{
+    AudioBuffer, MediaClock, Micros, Project, RecordingConfig, Track, Tracks, VideoFrame,
+};
 use visor_media::{AudioWriter, VideoWriter};
 
 pub use visor_core::project::{CAMERA_FILE, MIC_FILE, SCREEN_FILE, SYSTEM_FILE};
@@ -38,6 +41,9 @@ pub struct RecorderOptions {
     /// Start paused; call [`Recorder::resume`] to begin. Lets capture warm up
     /// (during a countdown) so recording starts the instant it's resumed.
     pub start_paused: bool,
+    /// Record more onto the stopped recording in `dir`, as a take played
+    /// after the rest (`title` is then unused).
+    pub append: bool,
 }
 
 type ClockRef = Arc<Mutex<MediaClock>>;
@@ -64,6 +70,11 @@ pub struct Recorder {
     workers: Vec<Worker>,
     dir: PathBuf,
     project: Project,
+    /// Recording more: the project as it was before.
+    original: Option<Project>,
+    /// Where this recording's time starts in the project: the recording's
+    /// length before the take.
+    base: Micros,
     saves: Arc<Mutex<Saves>>,
     // Keep the shared streams alive for as long as we record from them.
     _mic: Option<Arc<MicStream>>,
@@ -80,8 +91,22 @@ impl Recorder {
             camera,
             exclude_self,
             start_paused,
+            append,
         } = opts;
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let original = if append {
+            let project = Project::load(&dir)
+                .with_context(|| format!("opening the recording in {}", dir.display()))?;
+            if project.recording_take().is_some() {
+                return Err(anyhow!("the recording is still being recorded onto"));
+            }
+            Some(project)
+        } else {
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            None
+        };
+        // A take's files are numbered: screen-2.mp4…
+        let take = original.as_ref().map(|p| p.takes.len() + 2);
+        let file = |base: &str| take.map_or_else(|| base.to_string(), |n| take_file(base, n));
 
         let system_audio = match (config.audio.system, config.audio.app_pid) {
             (_, Some(pid)) => SystemAudio::App { pid },
@@ -96,10 +121,10 @@ impl Recorder {
             exclude_self,
         })?;
 
-        let mut project = Project::new(title, visor_core::time::rfc3339_now(), 0);
+        let mut tracks = Tracks::default();
         let (width, height) = session.size;
-        project.tracks.screen = Some(Track {
-            file: SCREEN_FILE.into(),
+        tracks.screen = Some(Track {
+            file: file(SCREEN_FILE),
             width: Some(width),
             height: Some(height),
             fps: Some(config.fps),
@@ -107,44 +132,57 @@ impl Recorder {
 
         // Writers are created before the clock starts so their setup time
         // isn't recorded as blank video.
-        let screen_writer = VideoWriter::create(&dir.join(SCREEN_FILE), width, height, config.fps)?;
+        let screen_writer =
+            VideoWriter::create(&dir.join(file(SCREEN_FILE)), width, height, config.fps)?;
         let camera_writer = match &camera {
             Some(cam) => {
                 let (w, h) = cam.size();
-                project.tracks.camera = Some(Track {
-                    file: CAMERA_FILE.into(),
+                tracks.camera = Some(Track {
+                    file: file(CAMERA_FILE),
                     width: Some(w),
                     height: Some(h),
                     fps: Some(30),
                 });
-                Some(VideoWriter::create(&dir.join(CAMERA_FILE), w, h, 30)?)
+                Some(VideoWriter::create(&dir.join(file(CAMERA_FILE)), w, h, 30)?)
             }
             None => None,
         };
         let mic_writer = match &mic {
             Some(_) => {
-                project.tracks.mic = Some(Track {
-                    file: MIC_FILE.into(),
+                tracks.mic = Some(Track {
+                    file: file(MIC_FILE),
                     width: None,
                     height: None,
                     fps: None,
                 });
-                Some(AudioWriter::create(&dir.join(MIC_FILE))?)
+                Some(AudioWriter::create(&dir.join(file(MIC_FILE)))?)
             }
             None => None,
         };
         let system_writer = match &session.audio {
             Some(_) => {
-                project.tracks.system = Some(Track {
-                    file: SYSTEM_FILE.into(),
+                tracks.system = Some(Track {
+                    file: file(SYSTEM_FILE),
                     width: None,
                     height: None,
                     fps: None,
                 });
-                Some(AudioWriter::create(&dir.join(SYSTEM_FILE))?)
+                Some(AudioWriter::create(&dir.join(file(SYSTEM_FILE)))?)
             }
             None => None,
         };
+
+        let mut project = match &original {
+            Some(p) => p.clone(),
+            None => Project::new(title, visor_core::time::rfc3339_now(), 0),
+        };
+        let base = project.duration_us;
+        project.sources = Some(config.clone());
+        if original.is_some() {
+            project.begin_take(tracks);
+        } else {
+            project.tracks = tracks;
+        }
 
         let mut start_clock = MediaClock::start(host_now());
         if start_paused {
@@ -171,7 +209,7 @@ impl Recorder {
         if let (Some(rx), Some(writer)) = (session.audio.clone(), system_writer) {
             workers.push(spawn_audio("system", rx, writer, clock.clone())?);
         }
-        // Written now with no duration, so a recording interrupted by a crash
+        // Written now with no duration (or the take's), so a recording interrupted by a crash
         // can be found and recovered (see visor_media::recover).
         if let Err(e) = project.save(&dir) {
             tracing::warn!("could not write the project file: {e}");
@@ -184,6 +222,8 @@ impl Recorder {
             workers,
             dir,
             project,
+            original,
+            base,
             saves: Arc::default(),
             _mic: mic,
             _camera: camera,
@@ -208,9 +248,9 @@ impl Recorder {
     }
 
     /// Notes this moment of the recording. Returns the recorded time it
-    /// marks.
+    /// marks (in the whole recording, when recording more).
     pub fn mark(&mut self, text: impl Into<String>) -> Micros {
-        let at_us = self.elapsed();
+        let at_us = self.base + self.elapsed();
         self.project.markers.push(visor_core::Marker {
             at_us,
             text: text.into(),
@@ -242,17 +282,33 @@ impl Recorder {
         let stop_at = host_now();
         let duration = self.clock.lock().unwrap().elapsed(stop_at);
         let failed = self.join_workers(stop_at)?;
+        if failed.contains(&"screen") {
+            if self.original.is_some() {
+                self.forget_take()?;
+            }
+            return Err(anyhow!("the screen track failed to record"));
+        }
+        let tracks = match self.project.takes.last_mut() {
+            Some(take) if self.original.is_some() => &mut take.tracks,
+            _ => &mut self.project.tracks,
+        };
         for track in failed {
             match track {
-                "screen" => return Err(anyhow!("the screen track failed to record")),
-                "camera" => self.project.tracks.camera = None,
-                "mic" => self.project.tracks.mic = None,
-                "system" => self.project.tracks.system = None,
+                "camera" => tracks.camera = None,
+                "mic" => tracks.mic = None,
+                "system" => tracks.system = None,
                 _ => {}
             }
         }
-        self.project.duration_us = duration;
-        self.project.edit = visor_core::EditList::full(duration);
+        if self.original.is_some() {
+            if duration == 0 {
+                self.remove_take_files();
+            }
+            self.project.finish_take(duration, Vec::new());
+        } else {
+            self.project.duration_us = duration;
+            self.project.edit = visor_core::EditList::full(duration);
+        }
         {
             let mut saves = self.saves.lock().unwrap_or_else(|e| e.into_inner());
             saves.done = true;
@@ -262,12 +318,46 @@ impl Recorder {
         Ok((std::mem::take(&mut self.dir), self.project.clone()))
     }
 
-    /// Stops recording and deletes the project folder.
+    /// Stops recording and deletes the project folder, or when recording
+    /// more, only the take: the recording is left as it was.
     pub fn discard(mut self) -> anyhow::Result<()> {
         self.saves.lock().unwrap_or_else(|e| e.into_inner()).done = true;
         self.join_workers(host_now())?;
+        if self.original.is_some() {
+            return self.forget_take();
+        }
         std::fs::remove_dir_all(&self.dir)
             .with_context(|| format!("removing {}", self.dir.display()))
+    }
+
+    /// Recording more: puts the project back as it was and deletes the
+    /// take's files.
+    fn forget_take(&mut self) -> anyhow::Result<()> {
+        self.saves.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+        self.remove_take_files();
+        if let Some(original) = &self.original {
+            original.save(&self.dir)?;
+            self.project = original.clone();
+        }
+        Ok(())
+    }
+
+    fn remove_take_files(&self) {
+        let Some(take) = self.project.recording_take() else {
+            return;
+        };
+        let t = &take.tracks;
+        for track in [&t.screen, &t.camera, &t.mic, &t.system]
+            .into_iter()
+            .flatten()
+        {
+            let path = self.dir.join(&track.file);
+            if let Err(e) = std::fs::remove_file(&path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("could not remove {}: {e}", path.display());
+            }
+        }
     }
 
     /// Signals every worker, stops capture and waits. Returns failed tracks.
@@ -450,6 +540,106 @@ fn run_until_stopped<T, W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screen that sends a frame every 20 ms until stopped.
+    struct FakeScreen((u32, u32));
+
+    impl Backend for FakeScreen {
+        fn shareable(&self) -> anyhow::Result<visor_capture::Shareable> {
+            Ok(visor_capture::Shareable::default())
+        }
+
+        fn start(&self, _: &ScreenRequest) -> anyhow::Result<ScreenSession> {
+            let (w, h) = self.0;
+            let (tx, rx) = bounded(64);
+            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let on = running.clone();
+            thread::spawn(move || {
+                while on.load(std::sync::atomic::Ordering::Relaxed) {
+                    let frame = VideoFrame {
+                        host_ts: host_now(),
+                        width: w,
+                        height: h,
+                        format: visor_core::PixelFormat::Nv12,
+                        planes: vec![
+                            visor_core::Plane {
+                                data: vec![100u8; (w * h) as usize].into(),
+                                stride: w as usize,
+                            },
+                            visor_core::Plane {
+                                data: vec![128u8; (w * h / 2) as usize].into(),
+                                stride: w as usize,
+                            },
+                        ],
+                    };
+                    if tx.send(frame).is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            });
+            Ok(ScreenSession::new(rx, (w, h), None, move || {
+                running.store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }))
+        }
+    }
+
+    fn options(dir: &Path, append: bool) -> RecorderOptions {
+        RecorderOptions {
+            config: RecordingConfig::display(1),
+            dir: dir.to_path_buf(),
+            title: "Demo".into(),
+            mic: None,
+            camera: None,
+            exclude_self: false,
+            start_paused: false,
+            append,
+        }
+    }
+
+    #[test]
+    fn records_more_onto_a_recording_as_a_clip_at_the_end() {
+        let dir = std::env::temp_dir().join(format!("visor-more-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = Recorder::start(&FakeScreen((64, 64)), options(&dir, false)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let (_, first) = rec.stop().unwrap();
+        assert_eq!(first.sources, Some(RecordingConfig::display(1)));
+        let d1 = first.duration_us;
+
+        // Discarded: only the take goes.
+        let rec = Recorder::start(&FakeScreen((48, 32)), options(&dir, true)).unwrap();
+        assert!(Project::load(&dir).unwrap().recording_take().is_some());
+        thread::sleep(Duration::from_millis(200));
+        rec.discard().unwrap();
+        assert_eq!(Project::load(&dir).unwrap(), first);
+        assert!(!dir.join("screen-2.mp4").exists());
+
+        let mut rec = Recorder::start(&FakeScreen((48, 32)), options(&dir, true)).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let at = rec.mark("In the take");
+        thread::sleep(Duration::from_millis(200));
+        let (_, p) = rec.stop().unwrap();
+        assert_eq!(Project::load(&dir).unwrap(), p);
+        assert_eq!(p.takes.len(), 1);
+        let take = &p.takes[0];
+        assert_eq!(take.start_us, d1);
+        assert_eq!(take.tracks.screen.as_ref().unwrap().file, "screen-2.mp4");
+        assert_eq!(take.tracks.screen.as_ref().unwrap().width, Some(48));
+        assert!(dir.join("screen-2.mp4").is_file());
+        assert_eq!(p.duration_us, d1 + take.duration_us);
+        assert_eq!(
+            p.edit.ranges().last(),
+            Some(&visor_core::Range(d1, p.duration_us))
+        );
+        // Markers are in the recording's time.
+        assert!(at > d1);
+        assert_eq!(p.markers.last().map(|m| m.at_us), Some(at));
+        // The first piece is untouched.
+        assert_eq!(p.tracks, first.tracks);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn idle_tracks_are_flushed() {

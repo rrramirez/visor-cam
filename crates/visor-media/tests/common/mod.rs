@@ -150,3 +150,34 @@ pub fn mean_luma(f: &ffmpeg_next::frame::Video) -> f64 {
         .sum();
     sum as f64 / (w * h) as f64
 }
+
+/// Records a take onto `project` in `dir`: `seconds` of a `w` x `h` screen
+/// (chroma `uv`), a mic tone, and a camera if `camera`. Frame `i` of the
+/// take has luma `luma(i)`, as in the first piece.
+pub fn add_take(dir: &Path, project: &mut Project, seconds: u64, (w, h): (u32, u32), camera: bool) {
+    use visor_core::project::{CAMERA_FILE, MIC_FILE, SCREEN_FILE, take_file};
+    let n = project.takes.len() + 2;
+    let frames = seconds * FPS;
+    let duration = frames * FRAME_US;
+    let track = |file: String, size: Option<(u32, u32)>| Track {
+        file,
+        width: size.map(|s| s.0),
+        height: size.map(|s| s.1),
+        fps: size.map(|_| FPS as u32),
+    };
+    let mut tracks = visor_core::Tracks::default();
+    let screen = take_file(SCREEN_FILE, n);
+    write_video(&dir.join(&screen), w, h, frames, 128);
+    tracks.screen = Some(track(screen, Some((w, h))));
+    if camera {
+        let file = take_file(CAMERA_FILE, n);
+        write_video(&dir.join(&file), 320, 240, frames, 200);
+        tracks.camera = Some(track(file, Some((320, 240))));
+    }
+    let mic = take_file(MIC_FILE, n);
+    write_tone(&dir.join(&mic), duration, 0.4);
+    tracks.mic = Some(track(mic, None));
+    project.begin_take(tracks);
+    project.finish_take(duration, Vec::new());
+    project.save(dir).unwrap();
+}

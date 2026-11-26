@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ffmpeg_next::format;
-use visor_core::Micros;
+use visor_core::{Micros, Part};
 
 use crate::decode::{AudioReader, VideoReader};
 use crate::player::PreviewFrame;
@@ -13,16 +13,18 @@ use crate::timeline::FrameCursor;
 /// times. Slow-ish (decodes from the previous keyframe, or straight through
 /// when thumbnails are close together), so run it off the UI thread.
 pub fn thumbnails(
-    path: &Path,
+    dir: &Path,
+    parts: &[Part],
     duration: Micros,
     count: usize,
     height: u32,
 ) -> anyhow::Result<Vec<(Micros, PreviewFrame)>> {
-    let (w, h) = VideoReader::open(path, None)?.size();
+    let (w, h) = VideoReader::open_parts(dir, parts, None)?.size();
     let th = height.max(2) & !1;
     let tw = ((u64::from(w) * u64::from(th) / u64::from(h.max(1))) as u32 + 1) & !1;
-    let mut cursor = FrameCursor::new(VideoReader::open(
-        path,
+    let mut cursor = FrameCursor::new(VideoReader::open_parts(
+        dir,
+        parts,
         Some((format::Pixel::RGBA, tw, th)),
     )?);
     let mut out = Vec::with_capacity(count);
@@ -35,15 +37,20 @@ pub fn thumbnails(
     Ok(out)
 }
 
-/// Peak level (0.0–1.0) per bucket across all `paths`, over `duration` of
-/// source time.
-pub fn waveform(paths: &[&Path], duration: Micros, buckets: usize) -> anyhow::Result<Vec<f32>> {
+/// Peak level (0.0–1.0) per bucket across all `tracks` (each a track's
+/// parts, files in `dir`), over `duration` of source time.
+pub fn waveform(
+    dir: &Path,
+    tracks: &[Vec<Part>],
+    duration: Micros,
+    buckets: usize,
+) -> anyhow::Result<Vec<f32>> {
     let mut peaks = vec![0f32; buckets];
     if buckets == 0 || duration == 0 {
         return Ok(peaks);
     }
-    for path in paths {
-        let mut reader = AudioReader::open(path)?;
+    for parts in tracks {
+        let mut reader = AudioReader::open_parts(dir, parts)?;
         while let Some((at, samples)) = reader.next_chunk()? {
             for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
                 let t = at + (i as u64 * 1_000_000 / 48_000);
