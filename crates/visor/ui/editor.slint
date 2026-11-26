@@ -38,6 +38,21 @@ export struct BlurRow {
     time: string,
 }
 
+// A stretch deleted from the recording: where it would come back on the
+// timeline, where it starts in the recording (a fraction of it), and how
+// long it is.
+export struct Gone {
+    pos: float,
+    src: float,
+    label: string,
+}
+
+// A time on the ruler.
+export struct Tick {
+    pos: float,
+    label: string,
+}
+
 export struct Thumb {
     image: image,
     start: float,
@@ -209,6 +224,32 @@ export component Editor inherits Window {
     // Where a dragged clip would go, given the timeline position under the
     // pointer: before the clip of that index.
     pure callback clip-slot(float) -> int;
+    // Where the moved clip is drawn (its start), and where in it it was
+    // grabbed, as timeline fractions.
+    property <float> moving-x;
+    property <float> moving-grab;
+    property <float> moving-len: root.moving-clip >= 0 ? root.clips[root.moving-clip].end - root.clips[root.moving-clip].start : 0;
+    // Where the moved clip would start once let go, the others closed up
+    // behind it.
+    property <float> landing: root.landing-at();
+    pure function landing-at() -> float {
+        if (root.moving-clip < 0) { return 0; }
+        if (root.moving-slot >= root.clips.length) { return 1 - root.moving-len; }
+        let at = root.clips[root.moving-slot].start;
+        return root.moving-slot > root.moving-clip ? at - root.moving-len : at;
+    }
+    // Where clip `j` shows: while one is moved, the others slide out of
+    // the way to make room where it would go.
+    pure function shown-start(j: int) -> float {
+        let s = root.clips[j].start;
+        if (root.moving-clip < 0 || j == root.moving-clip) { return s; }
+        let closed = s > root.clips[root.moving-clip].start ? s - root.moving-len : s;
+        return closed >= root.landing ? closed + root.moving-len : closed;
+    }
+    in property <[Gone]> removed;
+    in property <[Tick]> ticks;
+    // Puts back deleted stretch `removed[i]`.
+    callback bring-back(int);
 
     function grab-edge(clip: int, end: bool, pos: float) {
         root.drag-clip = clip;
@@ -336,8 +377,8 @@ export component Editor inherits Window {
     callback drag-ended();
     callback clip-edge-moved(int, bool, float);
     callback nudge-edge(int, bool);
-    // Splits the clip under the playhead there.
-    callback split();
+    // Cuts the clip under the playhead in two there.
+    callback cut-at-playhead();
     // Moves a clip to play before another (the clip count for last).
     callback move-clip(int, int);
     // Selects the whole of a clip.
@@ -345,10 +386,10 @@ export component Editor inherits Window {
     callback selection-changed(float, float);
     callback set-in();
     callback set-out();
-    callback cut-selection();
+    callback delete-selection();
     callback trim-to-selection();
-    // Looks for stretches where nothing happens and cuts them.
-    callback cut-pauses();
+    // Looks for stretches where nothing happens and removes them.
+    callback remove-pauses();
     callback add-marker();
     callback rename-marker(int, string);
     callback delete-marker(int);
@@ -404,8 +445,13 @@ export component Editor inherits Window {
             if (event.text == "i") { root.set-in(); return accept; }
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
-            if ((event.text == "s" || event.text == "S") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
-                if (!event.repeat) { root.split(); }
+            // C, or ⌘B as in other editors (B alone blurs).
+            if ((event.text == "c" || event.text == "C") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
+                if (!event.repeat) { root.cut-at-playhead(); }
+                return accept;
+            }
+            if ((event.text == "b" || event.text == "B") && (event.modifiers.control || event.modifiers.meta) && !event.modifiers.alt) {
+                if (!event.repeat) { root.cut-at-playhead(); }
                 return accept;
             }
             if ((event.text == "m" || event.text == "M") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
@@ -419,7 +465,7 @@ export component Editor inherits Window {
                 if (!event.repeat) { root.add-blur(); }
                 return accept;
             }
-            if (event.text == Key.Backspace || event.text == Key.Delete) { root.cut-selection(); return accept; }
+            if (event.text == Key.Backspace || event.text == Key.Delete) { root.delete-selection(); return accept; }
             if (event.text == Key.LeftArrow && root.blur-edge >= 0) { root.nudge-blur-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
             if (event.text == Key.RightArrow && root.blur-edge >= 0) { root.nudge-blur-edge(event.modifiers.shift ? 10 : 1, event.repeat); return accept; }
             if (event.text == Key.LeftArrow && root.active-edge >= 0) { root.nudge-edge(event.modifiers.shift ? -10 : -1, event.repeat); return accept; }
@@ -656,13 +702,13 @@ export component Editor inherits Window {
                                         clicked => { root.set-out(); keys.focus(); }
                                     }
                                     SideButton {
-                                        text: "Split at playhead"; icon: Icons.split; shortcut: "S";
-                                        clicked => { root.split(); keys.focus(); }
+                                        text: "Cut at playhead"; icon: Icons.scissors; shortcut: "C";
+                                        clicked => { root.cut-at-playhead(); keys.focus(); }
                                     }
                                     SideButton {
-                                        text: "Cut selection"; icon: Icons.scissors; shortcut: "⌫";
+                                        text: "Delete selection"; icon: Icons.trash; shortcut: "⌫";
                                         enabled: root.has-selection;
-                                        clicked => { root.cut-selection(); keys.focus(); }
+                                        clicked => { root.delete-selection(); keys.focus(); }
                                     }
                                     SideButton {
                                         text: "Trim to selection"; icon: Icons.area; shortcut: "T";
@@ -670,9 +716,9 @@ export component Editor inherits Window {
                                         clicked => { root.trim-to-selection(); keys.focus(); }
                                     }
                                     SideButton {
-                                        text: root.finding-pauses ? "Finding pauses…" : "Cut pauses"; icon: Icons.skip;
+                                        text: root.finding-pauses ? "Finding pauses…" : "Remove pauses"; icon: Icons.skip;
                                         enabled: !root.finding-pauses;
-                                        clicked => { root.cut-pauses(); keys.focus(); }
+                                        clicked => { root.remove-pauses(); keys.focus(); }
                                     }
                                     SideButton {
                                         text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";
@@ -1025,7 +1071,7 @@ export component Editor inherits Window {
                 Text {
                     text: root.active-edge >= 0 || root.blur-edge >= 0
                         ? "← → move this edge a frame (⇧ for 10) · Esc to stop"
-                        : "Drag to select · Drag a clip's bar to move it, its edge to trim it · S splits · ← → step";
+                        : "Drag the ruler to select · Drag a clip to move it, an edge to trim it · C cuts · Hover ▼ to bring back";
                     color: Theme.faint;
                     font-size: Theme.font-small;
                     vertical-alignment: center;
@@ -1033,9 +1079,9 @@ export component Editor inherits Window {
             }
         }
 
-        // Timeline
+        // Timeline: a ruler to select on, and the clips below it.
         timeline := Rectangle {
-            height: 128px;
+            height: 150px;
             background: Theme.bg;
             property <length> track-x: 14px;
             property <length> track-w: self.width - 28px;
@@ -1048,69 +1094,37 @@ export component Editor inherits Window {
                 border-radius: Theme.radius-small;
                 clip: true;
                 background: Theme.surface;
+                property <length> ruler: 18px;
 
-                // Each clip shows its part of the recording's thumbnails and
-                // waveform, drawn at the recording's length and shifted.
-                for c[i] in root.clips: Rectangle {
-                    property <length> content-w: track.width * root.zoom;
-                    property <length> content-x: -c.src-start * self.content-w;
-                    x: c.start * track.width;
-                    width: (c.end - c.start) * track.width;
-                    height: track.height;
-                    clip: true;
-                    opacity: root.moving-clip == i ? 0.4 : 1;
-                    for t in root.thumbs: Image {
-                        x: parent.content-x + t.start * parent.content-w;
-                        y: 16px;
-                        width: (t.end - t.start) * parent.content-w;
-                        height: 48px;
-                        source: t.image;
-                        image-fit: cover;
-                        opacity: 0.85;
-                    }
-                    Path {
-                        x: parent.content-x;
-                        y: 66px;
-                        width: parent.content-w;
-                        height: track.height - 68px;
-                        viewbox-width: 1000;
-                        viewbox-height: 100;
-                        // Stretched to the clip, not kept in proportion.
-                        fit: fill;
-                        commands: root.wave-path;
-                        fill: #5b9cff66;
-                        stroke: transparent;
-                    }
-                    // A gap from the clip before.
-                    if i > 0: Rectangle {
+                // Drag along the ruler to select; click it to go there.
+                Rectangle {
+                    height: track.ruler;
+                    y: 0;
+                    background: Theme.surface-2;
+                }
+                for t in root.ticks: Rectangle {
+                    x: t.pos * track.width;
+                    y: 0;
+                    width: 40px;
+                    height: track.ruler;
+                    Rectangle {
                         x: 0;
-                        width: 2px;
-                        height: track.height;
-                        background: Theme.bg;
+                        y: parent.height - 5px;
+                        width: 1px;
+                        height: 5px;
+                        background: Theme.faint;
+                    }
+                    Text {
+                        x: 3px;
+                        y: 1px;
+                        text: t.label;
+                        color: Theme.faint;
+                        font-size: 9px;
                     }
                 }
-
-                // Blurred stretches: bands along the bottom, stacked so
-                // overlapping ones show.
-                for b in root.blur-bands: Rectangle {
-                    property <bool> picked: root.picked-blur == b.blur;
-                    x: b.start * track.width;
-                    y: track.height - 5px - mod(b.blur, 3) * 7px;
-                    width: max(2px, (b.end - b.start) * track.width);
-                    height: 5px;
-                    background: self.picked ? Theme.warning : Theme.warning.transparentize(50%);
-                }
-
-                if root.has-selection: Rectangle {
-                    x: root.sel-start * track.width;
-                    width: (root.sel-end - root.sel-start) * track.width;
-                    height: track.height;
-                    background: #5b9cff33;
-                    border-width: 2px;
-                    border-color: Theme.accent;
-                }
-
-                scrub := TouchArea {
+                ruler-touch := TouchArea {
+                    y: 0;
+                    height: track.ruler;
                     mouse-cursor: pointer;
                     property <bool> dragging;
                     property <float> anchor;
@@ -1142,24 +1156,74 @@ export component Editor inherits Window {
                     }
                 }
 
-                // Each clip's bar: drag it to move the clip, or click it to
-                // select the clip.
+                // Where a moved clip would go.
+                if root.moving-clip >= 0: Rectangle {
+                    x: root.landing * track.width;
+                    y: track.ruler;
+                    width: root.moving-len * track.width;
+                    height: track.height - track.ruler;
+                    background: Theme.accent.transparentize(80%);
+                    border-width: 2px;
+                    border-color: Theme.accent;
+                }
+
+                // Each clip shows its part of the recording's thumbnails and
+                // waveform, drawn at the recording's length and shifted. Drag
+                // one to move it (the others make room), or click it to
+                // select it.
                 for c[i] in root.clips: Rectangle {
-                    x: c.start * track.width + (i > 0 ? 2px : 0);
-                    y: 0;
-                    width: max(0px, (c.end - c.start) * track.width - (i > 0 ? 2px : 0));
-                    height: 14px;
-                    background: bar-touch.has-hover || root.moving-clip == i ? Theme.surface-3 : Theme.surface-2;
-                    Text {
-                        x: 6px;
-                        text: c.label;
-                        color: Theme.muted;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                        visible: parent.width > self.preferred-width + 12px;
+                    property <bool> moving: root.moving-clip == i;
+                    property <length> content-w: track.width * root.zoom;
+                    property <length> content-x: -c.src-start * self.content-w;
+                    // A gap from the clip before.
+                    property <length> gap: i > 0 && !self.moving ? 2px : 0;
+                    x: (self.moving ? root.moving-x : root.shown-start(i)) * track.width + self.gap;
+                    y: track.ruler;
+                    z: self.moving ? 1 : 0;
+                    width: max(0px, (c.end - c.start) * track.width - self.gap);
+                    height: track.height - track.ruler;
+                    clip: true;
+                    background: Theme.surface;
+                    border-width: self.moving ? 2px : 0;
+                    border-color: Theme.accent;
+                    opacity: self.moving ? 0.9 : 1;
+                    Rectangle {
+                        y: 0;
+                        height: 14px;
+                        background: clip-touch.has-hover || parent.moving ? Theme.surface-3 : Theme.surface-2;
+                        Text {
+                            x: 6px;
+                            text: c.label;
+                            color: Theme.muted;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            visible: parent.width > self.preferred-width + 12px;
+                        }
                     }
-                    bar-touch := TouchArea {
-                        mouse-cursor: root.clips.length > 1 ? (root.moving-clip == i ? grabbing : grab) : pointer;
+                    for t in root.thumbs: Image {
+                        x: parent.content-x - parent.gap + t.start * parent.content-w;
+                        y: 16px;
+                        width: (t.end - t.start) * parent.content-w;
+                        height: 46px;
+                        source: t.image;
+                        image-fit: cover;
+                        opacity: 0.85;
+                    }
+                    Path {
+                        x: parent.content-x - parent.gap;
+                        y: 64px;
+                        width: parent.content-w;
+                        height: parent.height - 66px;
+                        viewbox-width: 1000;
+                        viewbox-height: 100;
+                        // Stretched to the clip, not kept in proportion.
+                        fit: fill;
+                        commands: root.wave-path;
+                        fill: #5b9cff66;
+                        stroke: transparent;
+                    }
+                    clip-touch := TouchArea {
+                        mouse-cursor: root.clips.length > 1 ? (parent.moving ? grabbing : grab) : pointer;
                         property <bool> dragged;
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
@@ -1168,10 +1232,11 @@ export component Editor inherits Window {
                                 root.blur-edge = -1;
                             }
                             if (event.kind == PointerEventKind.up) {
-                                if (self.dragged && root.moving-clip == i) {
+                                if (self.dragged && parent.moving) {
                                     root.moving-clip = -1;
                                     root.move-clip(i, root.moving-slot);
                                 } else if (!self.dragged) {
+                                    root.seek(max(0, min(1, (parent.x + self.mouse-x) / track.width)));
                                     root.select-clip(i);
                                 }
                                 keys.focus();
@@ -1179,40 +1244,40 @@ export component Editor inherits Window {
                             if (event.kind == PointerEventKind.cancel) { root.moving-clip = -1; }
                         }
                         moved => {
-                            if (root.clips.length > 1 && abs(self.mouse-x - self.pressed-x) > 4px) {
-                                if (!self.dragged) { root.moving-clip = i; }
+                            if (root.clips.length > 1 && !self.dragged && abs(self.mouse-x - self.pressed-x) > 4px) {
                                 self.dragged = true;
+                                root.moving-grab = (self.pressed-x + parent.gap) / track.width;
+                                root.moving-x = c.start;
+                                root.moving-slot = i;
+                                root.moving-clip = i;
                             }
-                            if (self.dragged && root.moving-clip == i) {
-                                root.moving-pos = max(0, min(1, (parent.x + self.mouse-x) / track.width));
-                                root.moving-slot = root.clip-slot(root.moving-pos);
+                            if (self.dragged && parent.moving) {
+                                root.moving-x = max(0, min(1 - root.moving-len, (parent.x + self.mouse-x) / track.width - root.moving-grab));
+                                root.moving-slot = root.clip-slot(root.moving-x + root.moving-len / 2);
                             }
                         }
                     }
                 }
 
-                // Where a moved clip would go, and the clip under the pointer.
-                if root.moving-clip >= 0: Rectangle {
-                    property <float> at: root.moving-slot < root.clips.length ? root.clips[root.moving-slot].start : 1;
-                    x: max(0px, min(track.width - self.width, self.at * track.width - 2px));
-                    width: 4px;
-                    height: track.height;
-                    border-radius: 2px;
-                    background: Theme.accent;
+                // Blurred stretches: bands along the bottom, stacked so
+                // overlapping ones show.
+                for b in root.blur-bands: Rectangle {
+                    property <bool> picked: root.picked-blur == b.blur;
+                    visible: root.moving-clip < 0;
+                    x: b.start * track.width;
+                    y: track.height - 5px - mod(b.blur, 3) * 7px;
+                    width: max(2px, (b.end - b.start) * track.width);
+                    height: 5px;
+                    background: self.picked ? Theme.warning : Theme.warning.transparentize(50%);
                 }
-                if root.moving-clip >= 0: Rectangle {
-                    property <Clip> c: root.clips[root.moving-clip];
-                    width: min(160px, max(24px, (self.c.end - self.c.start) * track.width));
-                    x: max(0px, min(track.width - self.width, root.moving-pos * track.width - self.width / 2));
-                    y: 0;
-                    height: 14px;
-                    border-radius: 3px;
-                    background: Theme.accent;
-                    Text {
-                        text: parent.c.label;
-                        color: white;
-                        font-size: 10px;
-                    }
+
+                if root.has-selection: Rectangle {
+                    x: root.sel-start * track.width;
+                    width: (root.sel-end - root.sel-start) * track.width;
+                    height: track.height;
+                    background: #5b9cff33;
+                    border-width: 2px;
+                    border-color: Theme.accent;
                 }
 
                 // Selection edge handles.
@@ -1253,6 +1318,9 @@ export component Editor inherits Window {
                 // An edge at either end of the video can be pulled past the
                 // track, to bring back what was trimmed there.
                 for c[i] in root.clips: CutEdge {
+                    visible: root.moving-clip < 0;
+                    y: track.ruler;
+                    height: track.height - track.ruler;
                     pos: root.drag-clip == i && !root.drag-end ? max(0, root.drag-pos) : c.start;
                     track-width: track.width;
                     inside: true;
@@ -1264,6 +1332,9 @@ export component Editor inherits Window {
                     cancel => { root.cancel-edge(); }
                 }
                 for c[i] in root.clips: CutEdge {
+                    visible: root.moving-clip < 0;
+                    y: track.ruler;
+                    height: track.height - track.ruler;
                     end: true;
                     pos: root.drag-clip == i && root.drag-end ? min(1, root.drag-pos) : c.end;
                     track-width: track.width;
@@ -1366,6 +1437,80 @@ export component Editor inherits Window {
                         height: 10px;
                         border-radius: 5px;
                         background: white;
+                    }
+                }
+
+                // Deleted stretches: a notch on the ruler where each would
+                // come back. Hover it to see what it was, and bring it back.
+                // Over the playhead, which often sits at a clip's edge.
+                for g[k] in root.removed: gone := Rectangle {
+                    property <bool> open: gone-touch.has-hover;
+                    property <length> card-w: 132px;
+                    property <length> at: g.pos * track.width;
+                    visible: root.moving-clip < 0;
+                    x: self.open ? max(0px, min(track.width - self.card-w, self.at - self.card-w / 2)) : self.at - 6px;
+                    y: 3px;
+                    width: self.open ? self.card-w : 12px;
+                    height: self.open ? 110px : 12px;
+                    border-radius: 6px;
+                    background: self.open ? #141518f2 : transparent;
+                    // The notch, pointing at where it comes back.
+                    Path {
+                        x: gone.at - gone.x - 6px;
+                        y: 0;
+                        width: 12px;
+                        height: 12px;
+                        viewbox-width: 12;
+                        viewbox-height: 12;
+                        commands: "M 0 0 L 12 0 L 6 10 Z";
+                        fill: Theme.record;
+                        stroke: transparent;
+                    }
+                    if gone.open: Rectangle {
+                        x: 6px;
+                        y: 14px;
+                        width: parent.width - 12px;
+                        height: 50px;
+                        border-radius: 3px;
+                        clip: true;
+                        background: Theme.surface-2;
+                        for t in root.thumbs: Image {
+                            visible: t.start <= g.src && g.src < t.end;
+                            width: parent.width;
+                            height: parent.height;
+                            source: t.image;
+                            image-fit: cover;
+                        }
+                    }
+                    if gone.open: Text {
+                        x: 6px;
+                        y: 66px;
+                        text: g.label;
+                        color: Theme.text;
+                        font-size: Theme.font-small;
+                    }
+                    if gone.open: Rectangle {
+                        x: 6px;
+                        y: 84px;
+                        width: parent.width - 12px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: gone.over-button ? Theme.accent : Theme.surface-3;
+                        Text {
+                            text: "Bring back";
+                            color: Theme.text;
+                            font-size: Theme.font-small;
+                        }
+                    }
+                    property <bool> over-button: self.open && gone-touch.mouse-y >= 84px && gone-touch.mouse-y < 104px;
+                    gone-touch := TouchArea {
+                        mouse-cursor: gone.over-button ? pointer : default;
+                        clicked => {
+                            if (gone.over-button) {
+                                root.bring-back(k);
+                                keys.focus();
+                            }
+                        }
                     }
                 }
             }

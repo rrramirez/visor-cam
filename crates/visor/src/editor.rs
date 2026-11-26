@@ -18,7 +18,7 @@ use visor_media::{ExportFormat, ExportOptions};
 use crate::app::app;
 use crate::platform;
 use crate::util;
-use crate::{BlurBand, BlurRow, Clip, Editor, MarkerMark, Thumb};
+use crate::{BlurBand, BlurRow, Clip, Editor, Gone, MarkerMark, Thumb, Tick};
 
 const THUMBNAILS: usize = 24;
 const WAVE_BUCKETS: usize = 600;
@@ -219,12 +219,12 @@ impl EditorWindow {
             e.ui.set_sel_end(p);
             e.ui.set_kept_label(e.kept_label().into());
         });
-        on!(on_cut_selection, |e| {
+        on!(on_delete_selection, |e| {
             if let Some((a, b)) = e.selection() {
-                e.apply(|edit| edit.cut_output(a, b));
+                e.apply(|edit| edit.delete_output(a, b));
             }
         });
-        on!(on_cut_pauses, |e| e.cut_pauses());
+        on!(on_remove_pauses, |e| e.remove_pauses());
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
                 e.apply(|edit| edit.trim_output(a, b));
@@ -250,7 +250,17 @@ impl EditorWindow {
                 e.control().preview(shown);
             }
         });
-        on!(on_split, |e| e.split());
+        on!(on_cut_at_playhead, |e| e.cut_at_playhead());
+        on!(on_bring_back, |e, index| {
+            let d = e.duration();
+            let removed = e.project.borrow().edit.removed(d);
+            if let Some(r) = usize::try_from(index).ok().and_then(|i| removed.get(i)) {
+                let range = r.range;
+                e.apply(|edit| {
+                    edit.bring_back(d, range);
+                });
+            }
+        });
         on!(on_move_clip, |e, from, to| {
             if let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) {
                 e.ui.set_active_edge(-1);
@@ -807,7 +817,7 @@ impl EditorWindow {
     }
 
     /// Splits the clip under the playhead there, at the nearest frame.
-    fn split(&self) {
+    fn cut_at_playhead(&self) {
         let pos = self.player.borrow().position();
         let t = self.frame_time(self.frames_at(pos as f64).round());
         self.apply(|edit| {
@@ -1090,6 +1100,29 @@ impl EditorWindow {
             .collect();
         self.ui.set_clips(ModelRc::new(VecModel::from(clips)));
         self.ui.set_zoom((d / out) as f32);
+        // What was deleted, where it would come back.
+        let removed: Vec<Gone> = edit
+            .removed(project.duration_us)
+            .iter()
+            .filter_map(|r| {
+                let at = edit.removed_at(r)?;
+                let len = (r.range.len() as f64 / project.speed()).round() as Micros;
+                Some(Gone {
+                    pos: (at as f64 / out) as f32,
+                    src: (r.range.0 as f64 / d) as f32,
+                    label: format!("{} deleted", util::clock_tenths(len)).into(),
+                })
+            })
+            .collect();
+        self.ui.set_removed(ModelRc::new(VecModel::from(removed)));
+        let ticks: Vec<Tick> = ruler_ticks(project.output_duration())
+            .into_iter()
+            .map(|t| Tick {
+                pos: (t as f64 * project.speed() / out) as f32,
+                label: util::clock(t).into(),
+            })
+            .collect();
+        self.ui.set_ticks(ModelRc::new(VecModel::from(ticks)));
         // Marked where they were recorded, at the time the clock shows there.
         let markers: Vec<MarkerMark> = project
             .markers
@@ -1444,7 +1477,7 @@ impl EditorWindow {
 
     /// Looks for dead time (see `visor_media::dead_time`) off the UI
     /// thread, then cuts it all as one step to undo.
-    fn cut_pauses(&self) {
+    fn remove_pauses(&self) {
         if self.ui.get_finding_pauses() {
             return;
         }
@@ -1488,11 +1521,11 @@ impl EditorWindow {
                     edit.cut(p.0, p.1);
                 }
                 if !self.apply(|e| *e = edit) {
-                    "Nothing happens in what's kept, so nothing was cut.".into()
+                    "Nothing happens in what's kept, so nothing was removed.".into()
                 } else {
                     let total: Micros = pauses.iter().map(|p| p.len()).sum();
                     format!(
-                        "Cut {} pause{}, {} in all. ⌘Z undoes it.",
+                        "Removed {} pause{}, {} in all. ⌘Z undoes it.",
                         pauses.len(),
                         if pauses.len() == 1 { "" } else { "s" },
                         util::clock_tenths(total)
@@ -1611,7 +1644,7 @@ fn blur_label(project: &Project, blur: &Blur) -> String {
         at += r.len();
     }
     let Some(&(start, end)) = parts.first() else {
-        return "Cut from the video".to_string();
+        return "Deleted from the video".to_string();
     };
     let time = |t: Micros| util::clock_tenths((t as f64 / project.speed()).round() as Micros);
     let range = format!("{} – {}", time(start), time(end));
@@ -1620,6 +1653,15 @@ fn blur_label(project: &Project, blur: &Blur) -> String {
         2 => format!("{range} and 1 more part"),
         n => format!("{range} and {} more parts", n - 1),
     }
+}
+
+/// Times to mark on the ruler of a video `duration` long: every second, or
+/// every 2, 5, 10… so there are a dozen at most, from 0.
+fn ruler_ticks(duration: Micros) -> Vec<Micros> {
+    const STEPS: [Micros; 10] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    let secs = duration / 1_000_000;
+    let step = STEPS.into_iter().find(|s| secs / s <= 12).unwrap_or(1_200) * 1_000_000;
+    (0..duration).step_by(step as usize).collect()
 }
 
 /// Output time `t` moved onto the nearest clip edge (or either end of the
@@ -1671,6 +1713,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_ruler_marks_a_dozen_times_at_most() {
+        const S: Micros = 1_000_000;
+        assert_eq!(ruler_ticks(4 * S + S / 2), [0, S, 2 * S, 3 * S, 4 * S]);
+        assert_eq!(ruler_ticks(16 * S).len(), 8, "every 2 s");
+        let hour = ruler_ticks(3_600 * S);
+        assert_eq!(hour[1], 300 * S);
+        assert!(hour.len() <= 13);
+        assert!(ruler_ticks(0).is_empty());
+    }
+
+    #[test]
     fn blurs_are_labelled_with_their_time_in_the_video() {
         let mut project = Project::new("Demo", "2026-10-30T00:00:00Z", 20_000_000);
         let blur = |start_us, end_us| Blur {
@@ -1691,7 +1744,7 @@ mod tests {
         );
         assert_eq!(
             blur_label(&project, &blur(500_000, 1_500_000)),
-            "Cut from the video"
+            "Deleted from the video"
         );
     }
 
