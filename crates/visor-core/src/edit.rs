@@ -84,6 +84,10 @@ impl EditList {
             } else {
                 0
             };
+            // No more than what's now removed before it: a clip before it
+            // in the recording may have been pulled out over some.
+            let prev_end = self.keep.iter().map(|m| m.1).filter(|&e| e <= n.0).max();
+            let l = l.min(n.0 - prev_end.unwrap_or(0));
             if l > 0 {
                 lead.insert(n.0, l);
             }
@@ -276,6 +280,14 @@ impl EditList {
     ///
     /// [`cut`]: Self::cut
     pub fn cut_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        let before = self.clone();
+        self.cut_joining_pieces(start, end, min);
+        // As one change: a piece dropped after the cut takes what was
+        // trimmed off its clip's start to what's left of the clip.
+        self.carry_lead(&before);
+    }
+
+    fn cut_joining_pieces(&mut self, start: Micros, end: Micros, min: Micros) {
         let kept = self.duration();
         self.cut(start, end);
         if self.duration() == kept || self.keep.len() < 2 {
@@ -407,6 +419,12 @@ impl EditList {
     /// [`trim`]: Self::trim
     /// [`cut_joining`]: Self::cut_joining
     pub fn trim_joining(&mut self, start: Micros, end: Micros, min: Micros) {
+        let before = self.clone();
+        self.trim_joining_pieces(start, end, min);
+        self.carry_lead(&before);
+    }
+
+    fn trim_joining_pieces(&mut self, start: Micros, end: Micros, min: Micros) {
         let (first, last) = match (
             self.keep.iter().map(|r| r.0).min(),
             self.keep.iter().map(|r| r.1).max(),
@@ -546,6 +564,52 @@ mod tests {
             clip: 0,
             end: false
         }));
+    }
+
+    #[test]
+    fn a_clip_pulled_out_over_what_was_trimmed_off_another_takes_it() {
+        // [0, 40) and [50, 100): a selection across a cut deleted [40, 45)
+        // from the end of one and [45, 50) from the start of the other.
+        let mut e = EditList::full(100);
+        e.split(45);
+        e.cut(40, 50);
+        assert_eq!(e.ranges(), [Range(0, 40), Range(50, 100)]);
+        assert_eq!(e.removed(100)[1].range, Range(45, 50));
+        assert!(!e.removed(100)[1].end);
+        e.move_clip(1, 0);
+        // The first recorded pulled out over it, then its last 5 deleted:
+        // they show at its end.
+        let mut e = e.with_clip_edge_moved(100, 1, true, 50).unwrap();
+        assert_eq!(e.ranges(), [Range(50, 100), Range(0, 50)]);
+        e.delete(&[Range(45, 50)]);
+        assert_eq!(
+            e.removed(100),
+            [Removed {
+                range: Range(45, 50),
+                clip: 1,
+                end: true
+            }]
+        );
+    }
+
+    #[test]
+    fn an_agent_removal_keeps_what_was_trimmed_off_a_clip_at_it() {
+        // [45, 50) trimmed off the start of [50, 100), moved first.
+        let mut e = EditList::full(100);
+        e.split(45);
+        e.cut(45, 50);
+        e.move_clip(1, 0);
+        // Removing from just after its start drops the sliver left.
+        e.cut_joining(51, 70, 5);
+        assert_eq!(e.ranges(), [Range(70, 100), Range(0, 45)]);
+        assert_eq!(
+            e.removed(100),
+            [Removed {
+                range: Range(45, 70),
+                clip: 0,
+                end: false
+            }]
+        );
     }
 
     #[test]

@@ -45,8 +45,10 @@ is that clip's `lead`, kept by the clip's start time and shown at its start;
 the rest of a gap shows after the clip before it in the recording, and all
 of the gap before the first clip in the recording at that clip's start.
 Operations carry `lead` over (`carry_lead`): trimming a start in adds to it,
-pulling a start out takes from it first, and a clip cut in two gives its
-second part none. Without it, a part trimmed off a moved clip's start would
+pulling a start out takes from it first, a clip cut in two gives its
+second part none, and no clip keeps more than is removed before it now (a
+clip before it may have been pulled out over some). The agent operations
+carry it over once, from before the whole change. Without it, a part trimmed off a moved clip's start would
 show after whichever clip it follows in the recording, somewhere else on the
 timeline. `bring_back` moves that edge out over the whole stretch. A stretch
 stays with its clip however the clips move.
