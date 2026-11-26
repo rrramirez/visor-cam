@@ -766,10 +766,14 @@ impl App {
         // Being recorded more onto (from the countdown on): the take's save
         // would overwrite an edit made now. Only waiting in the panel, the
         // recorder hasn't read it yet.
-        let cancelled = self.more_cancelled.borrow().as_ref() == Some(&dir);
-        if cancelled
-            || (self.more.borrow().as_ref() == Some(&dir)
-                && !matches!(*self.session.borrow(), Session::Idle))
+        if self.more_cancelled.borrow().as_ref() == Some(&dir) {
+            return Err(
+                "That recording is being put back after a cancelled take; try again in a moment."
+                    .into(),
+            );
+        }
+        if self.more.borrow().as_ref() == Some(&dir)
+            && !matches!(*self.session.borrow(), Session::Idle)
         {
             return Err(
                 "Visor is recording more onto that recording; stop or discard that first.".into(),

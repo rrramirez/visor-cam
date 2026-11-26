@@ -1469,7 +1469,7 @@ impl App {
         ui.on_cancel(|| app().stop_recording(false));
         let _ = ui.show();
         platform::configure_overlay(&ui, Overlay::Shield);
-        platform::focus_if_active(ui.window());
+        ui.set_can_cancel(platform::focus_if_active(ui.window()));
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_secs(1), || {
             app().countdown_tick(false)
@@ -1867,7 +1867,8 @@ impl App {
     pub fn record_more(&self, dir: PathBuf) {
         let dir = dir.canonicalize().unwrap_or(dir);
         let busy = !matches!(*self.session.borrow(), Session::Idle)
-            || self.pending_start.borrow().is_some();
+            || self.pending_start.borrow().is_some()
+            || self.more_cancelled.borrow().as_ref() == Some(&dir);
         if busy {
             return self.show_hidden_editor(&dir);
         }
@@ -1900,8 +1901,11 @@ impl App {
         // One path per folder, however it was reached (symlinks, /var vs
         // /private/var), so a recording never has two editors.
         let dir = dir.canonicalize().unwrap_or(dir);
-        // Not while recording more onto it: its editor is waiting for that.
-        if self.more.borrow().as_ref() == Some(&dir) {
+        // Not while recording more onto it, or putting it back after a
+        // cancelled take: its editor is waiting for that.
+        if self.more.borrow().as_ref() == Some(&dir)
+            || self.more_cancelled.borrow().as_ref() == Some(&dir)
+        {
             return;
         }
         if let Some(existing) = self.editors.borrow().iter().find(|e| e.dir() == dir) {
@@ -2111,7 +2115,10 @@ fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
             tracing::warn!("discarding a cancelled take failed: {e:#}");
         }
         post(move |app| {
-            app.more_cancelled.borrow_mut().take();
+            // Unless another take has been cancelled since.
+            if app.more_cancelled.borrow().as_ref() == Some(&dir) {
+                app.more_cancelled.borrow_mut().take();
+            }
             app.show_hidden_editor(&dir);
         });
     });

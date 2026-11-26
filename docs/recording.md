@@ -60,9 +60,12 @@ Agents can't edit a recording while it is being recorded more onto.
 **The countdown** (`show_countdown`) is cancelled by Esc, as the stop
 shortcut does (`stop_recording(false)` while starting). It takes the
 keyboard only if Visor is already the active app
-(`platform::focus_if_active`, macOS only), so a recording started with the
-shortcut from another app doesn't pull the user out of it; its "esc to
-cancel" hint shows only while it has the keyboard.
+(`platform::focus_if_active`, macOS only), so it never pulls the user out
+of another app (opening the panel to start does activate Visor). Its "esc to
+cancel" hint (`can-cancel`) shows only when it took the keyboard: Slint's
+`has-focus` is true for a window that never became active, so it can't say.
+While a cancelled take is being put back (`more_cancelled`), its recording
+can't be opened, recorded more onto, or edited by agents.
 
 **Recovery.** `is_interrupted` is also true for a project whose last take has
 duration 0. `recover` then finishes it from what its files hold (the longest

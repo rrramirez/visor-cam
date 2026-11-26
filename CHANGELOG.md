@@ -12,7 +12,7 @@ is also what the update window shows.
 - **Bring back what you deleted:** hover a dimmed part and click *Bring back* to put just that part back, without undoing everything you did since. You can still drag a clip's edge to bring back some of it, and *Restore the whole recording* puts everything back as it was recorded.
 
 ### Improved
-- **Esc cancels the countdown** when you start from the recorder panel or the editor (macOS). Started from another app with the shortcut, **⌥⇧R** cancels it, as before.
+- **Esc cancels the countdown** on macOS, when the countdown says so: it doesn't take the keyboard from another app you're in, and there **⌥⇧R** cancels it, as before.
 
 ### Changed
 - The editor's words: *Cut selection* is now *Delete selection*, and *Cut pauses* is now *Remove pauses*. For agents, `cut_recording` is now `remove_from_recording`, and on the command line `visor cut` is now `visor remove`.

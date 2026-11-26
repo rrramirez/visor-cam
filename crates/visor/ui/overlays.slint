@@ -133,6 +133,8 @@ export component Countdown inherits Window {
     in property <int> value: 3;
     callback skip();
     callback cancel();
+    // Esc reaches it (see platform::focus_if_active).
+    in property <bool> can-cancel;
 
     forward-focus: keys;
     keys := FocusScope {
@@ -156,8 +158,7 @@ export component Countdown inherits Window {
             font-weight: 700;
             color: white;
         }
-        // Only when Esc reaches it (see platform::focus_if_active).
-        if keys.has-focus: Text {
+        if root.can-cancel: Text {
             y: 24px;
             text: "esc to cancel";
             font-size: Theme.font-small;
