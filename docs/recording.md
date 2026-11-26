@@ -50,7 +50,11 @@ take is saved, `EditorWindow::take_added` reloads the project, reopens the
 player and previews, appends the clip (and its markers) to every undo and
 redo step (`add_take_to_steps`), selects it and seeks to its start. A
 discard, a cancelled countdown or closing the panel shows the editor again
-as it was.
+as it was, only once the take's recorder has put the project back, so its
+save can't overwrite an edit. *Record more* waits while the editor exports
+or looks for pauses, which would act on the recording without the take.
+Blurs that lasted to the recording's end go on over the take
+(`stretch_blurs`), like the whole-video blur they usually are.
 
 **Recovery.** `is_interrupted` is also true for a project whose last take has
 duration 0. `recover` then finishes it from what its files hold (the longest
@@ -71,7 +75,8 @@ track is unreadable.
 ## Gotchas
 
 - Versions before takes read only the first piece's files: a recording with
-  takes opened there shows the take's time as the last frame held, silent.
+  takes opened there shows the take's time as the last frame held, silent,
+  and saving an edit there drops `takes` and `sources` (their files stay).
 - The last part of a track has no end, so a frame a little past the recorded
   length still shows; earlier parts cut off frames at their end.
 - A recording in progress (a take included) looks interrupted, so recovery
