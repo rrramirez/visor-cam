@@ -1465,8 +1465,11 @@ impl App {
             (display.frame.y + (display.frame.height - 180.0) / 2.0) as f32,
         ));
         ui.on_skip(|| app().countdown_tick(true));
+        // As the bar's stop does during the countdown.
+        ui.on_cancel(|| app().stop_recording(false));
         let _ = ui.show();
         platform::configure_overlay(&ui, Overlay::Shield);
+        platform::focus_if_active(ui.window());
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_secs(1), || {
             app().countdown_tick(false)

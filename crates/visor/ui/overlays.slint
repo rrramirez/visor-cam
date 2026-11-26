@@ -132,6 +132,18 @@ export component Countdown inherits Window {
     height: 180px;
     in property <int> value: 3;
     callback skip();
+    callback cancel();
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+    }
 
     Rectangle {
         border-radius: self.width / 2;
@@ -143,6 +155,13 @@ export component Countdown inherits Window {
             font-size: 84px;
             font-weight: 700;
             color: white;
+        }
+        // Only when Esc reaches it (see platform::focus_if_active).
+        if keys.has-focus: Text {
+            y: 24px;
+            text: "esc to cancel";
+            font-size: Theme.font-small;
+            color: Theme.faint;
         }
         Text {
             y: parent.height - 34px;

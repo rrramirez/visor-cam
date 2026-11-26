@@ -57,6 +57,13 @@ save can't overwrite an edit. *Record more* waits while the editor exports
 or looks for pauses, which would act on the recording without the take.
 Agents can't edit a recording while it is being recorded more onto.
 
+**The countdown** (`show_countdown`) is cancelled by Esc, as the stop
+shortcut does (`stop_recording(false)` while starting). It takes the
+keyboard only if Visor is already the active app
+(`platform::focus_if_active`, macOS only), so a recording started with the
+shortcut from another app doesn't pull the user out of it; its "esc to
+cancel" hint shows only while it has the keyboard.
+
 **Recovery.** `is_interrupted` is also true for a project whose last take has
 duration 0. `recover` then finishes it from what its files hold (the longest
 readable track), dropping unreadable tracks, or drops the take if its screen

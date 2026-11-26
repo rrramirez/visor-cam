@@ -25,7 +25,9 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    when you pick a device.
 3. Pick what to record (Screen / Window / App / Area), a camera, a microphone
    and optionally system audio (all apps or one app), then **Start recording**.
-   With several displays, the chosen one is outlined in red.
+   With several displays, the chosen one is outlined in red. Click the
+   countdown to skip it; **Esc** cancels it (on macOS, when you started from
+   Visor's panel or editor).
 4. Use the floating control bar (or the menu bar menu) to pause, resume, stop
    or discard. The control bar and camera bubble never appear in the recording.
    From any app, **⌥⇧R** starts a recording with your last choices (or stops
