@@ -2,14 +2,18 @@ import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView, LineEdit } fro
 import { Theme, Glyph, Icons } from "theme.slint";
 import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection } from "widgets.slint";
 
-// Positions on the timeline are fractions (0..1) of the edited video, as
-// it plays.
+// The timeline shows the whole recording, clip by clip in the order they
+// play, each with what was deleted next to it, dimmed. Positions on it are
+// fractions (0..1) of it.
 
-// A clip: where it plays, where its part of the recording starts (as a
+// A clip: where it plays, where it is with what was deleted next to it
+// (which moves with it), where its part of the recording starts (as a
 // fraction of the recording), and how long it is.
 export struct Clip {
     start: float,
     end: float,
+    block-start: float,
+    block-end: float,
     src-start: float,
     label: string,
 }
@@ -38,12 +42,14 @@ export struct BlurRow {
     time: string,
 }
 
-// A stretch deleted from the recording: where it would come back on the
-// timeline, where it starts in the recording (a fraction of it), and how
-// long it is.
+// A stretch deleted from the recording: where it is on the timeline, where
+// it starts in the recording (a fraction of it), the clip it would come
+// back at, and how long it is.
 export struct Gone {
-    pos: float,
-    src: float,
+    start: float,
+    end: float,
+    src-start: float,
+    clip: int,
     label: string,
 }
 
@@ -204,9 +210,6 @@ export component Editor inherits Window {
     in property <float> position;
     in property <string> time-label;
     in property <[Clip]> clips;
-    // How much longer the recording is than the edit: its thumbnails and
-    // waveform are drawn this much wider, so each clip shows its part.
-    in property <float> zoom: 1;
     // The clip edge picked for nudging with ← →: clip index * 2, + 1 for
     // its end; -1 for none.
     in-out property <int> active-edge: -1;
@@ -228,23 +231,25 @@ export component Editor inherits Window {
     // grabbed, as timeline fractions.
     property <float> moving-x;
     property <float> moving-grab;
-    property <float> moving-len: root.moving-clip >= 0 ? root.clips[root.moving-clip].end - root.clips[root.moving-clip].start : 0;
-    // Where the moved clip would start once let go, the others closed up
+    // A moved clip moves with what was deleted next to it: its block.
+    property <float> moving-len: root.moving-clip >= 0 ? root.clips[root.moving-clip].block-end - root.clips[root.moving-clip].block-start : 0;
+    // Where the moved block would start once let go, the others closed up
     // behind it.
     property <float> landing: root.landing-at();
     pure function landing-at() -> float {
         if (root.moving-clip < 0) { return 0; }
         if (root.moving-slot >= root.clips.length) { return 1 - root.moving-len; }
-        let at = root.clips[root.moving-slot].start;
+        let at = root.clips[root.moving-slot].block-start;
         return root.moving-slot > root.moving-clip ? at - root.moving-len : at;
     }
-    // Where clip `j` shows: while one is moved, the others slide out of
-    // the way to make room where it would go.
-    pure function shown-start(j: int) -> float {
-        let s = root.clips[j].start;
-        if (root.moving-clip < 0 || j == root.moving-clip) { return s; }
-        let closed = s > root.clips[root.moving-clip].start ? s - root.moving-len : s;
-        return closed >= root.landing ? closed + root.moving-len : closed;
+    // How far clip `j`'s block shows from where it is: the moved one under
+    // the pointer, and the others sliding out of its way.
+    pure function shift(j: int) -> float {
+        if (root.moving-clip < 0 || j < 0 || j >= root.clips.length) { return 0; }
+        let s = root.clips[j].block-start;
+        if (j == root.moving-clip) { return root.moving-x - s; }
+        let closed = s > root.clips[root.moving-clip].block-start ? s - root.moving-len : s;
+        return (closed >= root.landing ? closed + root.moving-len : closed) - s;
     }
     in property <[Gone]> removed;
     in property <[Tick]> ticks;
@@ -1071,7 +1076,7 @@ export component Editor inherits Window {
                 Text {
                     text: root.active-edge >= 0 || root.blur-edge >= 0
                         ? "← → move this edge a frame (⇧ for 10) · Esc to stop"
-                        : "Drag the ruler to select · Drag a clip to move it, an edge to trim it · C cuts · Hover ▼ to bring back";
+                        : "Drag the ruler to select · Drag a clip to move it, an edge to trim it · C cuts · Hover a dimmed part to bring it back";
                     color: Theme.faint;
                     font-size: Theme.font-small;
                     vertical-alignment: center;
@@ -1173,11 +1178,11 @@ export component Editor inherits Window {
                 // select it.
                 for c[i] in root.clips: Rectangle {
                     property <bool> moving: root.moving-clip == i;
-                    property <length> content-w: track.width * root.zoom;
+                    property <length> content-w: track.width;
                     property <length> content-x: -c.src-start * self.content-w;
                     // A gap from the clip before.
-                    property <length> gap: i > 0 && !self.moving ? 2px : 0;
-                    x: (self.moving ? root.moving-x : root.shown-start(i)) * track.width + self.gap;
+                    property <length> gap: c.start > 0 && !self.moving ? 2px : 0;
+                    x: (c.start + root.shift(i)) * track.width + self.gap;
                     y: track.ruler;
                     z: self.moving ? 1 : 0;
                     width: max(0px, (c.end - c.start) * track.width - self.gap);
@@ -1246,14 +1251,89 @@ export component Editor inherits Window {
                         moved => {
                             if (root.clips.length > 1 && !self.dragged && abs(self.mouse-x - self.pressed-x) > 4px) {
                                 self.dragged = true;
-                                root.moving-grab = (self.pressed-x + parent.gap) / track.width;
-                                root.moving-x = c.start;
+                                root.moving-grab = c.start - c.block-start + (self.pressed-x + parent.gap) / track.width;
+                                root.moving-x = c.block-start;
                                 root.moving-slot = i;
                                 root.moving-clip = i;
                             }
                             if (self.dragged && parent.moving) {
                                 root.moving-x = max(0, min(1 - root.moving-len, (parent.x + self.mouse-x) / track.width - root.moving-grab));
                                 root.moving-slot = root.clip-slot(root.moving-x + root.moving-len / 2);
+                            }
+                        }
+                    }
+                }
+
+                // What was deleted, dimmed by the clip it would come back at
+                // (it moves with it). Hover it to bring it back; click it to
+                // go to what plays after it.
+                for g[k] in root.removed: gone := Rectangle {
+                    property <bool> open: (gone-touch.has-hover || card-touch.has-hover) && root.moving-clip < 0 && root.drag-clip < 0;
+                    property <length> card-w: 132px;
+                    x: (g.start + root.shift(g.clip)) * track.width;
+                    y: track.ruler;
+                    z: self.open ? 2 : (root.moving-clip == g.clip ? 1 : 0);
+                    width: (g.end - g.start) * track.width;
+                    height: track.height - track.ruler;
+                    Rectangle {
+                        clip: true;
+                        background: Theme.bg;
+                        for t in root.thumbs: Image {
+                            x: -g.src-start * track.width + t.start * track.width;
+                            y: 16px;
+                            width: (t.end - t.start) * track.width;
+                            height: 46px;
+                            source: t.image;
+                            image-fit: cover;
+                            opacity: 0.25;
+                        }
+                        Rectangle {
+                            y: 0;
+                            height: 14px;
+                            background: gone.open ? Theme.surface-3 : transparent;
+                        }
+                    }
+                    gone-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.seek(max(0, min(1, (gone.x + self.mouse-x) / track.width)));
+                            keys.focus();
+                        }
+                    }
+                    // What it was, and a button to bring it back.
+                    Rectangle {
+                        visible: gone.open;
+                        x: max(0px, min(track.width - gone.card-w, gone.x + gone.width / 2 - gone.card-w / 2)) - gone.x;
+                        y: 18px;
+                        width: gone.card-w;
+                        height: 52px;
+                        border-radius: 6px;
+                        background: #141518f2;
+                        card-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.bring-back(k);
+                                keys.focus();
+                            }
+                        }
+                        Text {
+                            x: 8px;
+                            y: 5px;
+                            text: g.label;
+                            color: Theme.muted;
+                            font-size: Theme.font-small;
+                        }
+                        Rectangle {
+                            x: 6px;
+                            y: 25px;
+                            width: parent.width - 12px;
+                            height: 21px;
+                            border-radius: 4px;
+                            background: card-touch.has-hover ? Theme.accent : Theme.surface-3;
+                            Text {
+                                text: "Bring back";
+                                color: Theme.text;
+                                font-size: Theme.font-small;
                             }
                         }
                     }
@@ -1313,10 +1393,9 @@ export component Editor inherits Window {
                 }
 
                 // Clip edges: drag one to show more or less of the recording,
-                // seeing the clip's first or last frame; or click one and
-                // nudge it a frame at a time with ← →.
-                // An edge at either end of the video can be pulled past the
-                // track, to bring back what was trimmed there.
+                // over what was deleted next to it, seeing the clip's first
+                // or last frame; or click one and nudge it a frame at a time
+                // with ← →.
                 for c[i] in root.clips: CutEdge {
                     visible: root.moving-clip < 0;
                     y: track.ruler;
@@ -1437,80 +1516,6 @@ export component Editor inherits Window {
                         height: 10px;
                         border-radius: 5px;
                         background: white;
-                    }
-                }
-
-                // Deleted stretches: a notch on the ruler where each would
-                // come back. Hover it to see what it was, and bring it back.
-                // Over the playhead, which often sits at a clip's edge.
-                for g[k] in root.removed: gone := Rectangle {
-                    property <bool> open: gone-touch.has-hover;
-                    property <length> card-w: 132px;
-                    property <length> at: g.pos * track.width;
-                    visible: root.moving-clip < 0;
-                    x: self.open ? max(0px, min(track.width - self.card-w, self.at - self.card-w / 2)) : self.at - 6px;
-                    y: 3px;
-                    width: self.open ? self.card-w : 12px;
-                    height: self.open ? 110px : 12px;
-                    border-radius: 6px;
-                    background: self.open ? #141518f2 : transparent;
-                    // The notch, pointing at where it comes back.
-                    Path {
-                        x: gone.at - gone.x - 6px;
-                        y: 0;
-                        width: 12px;
-                        height: 12px;
-                        viewbox-width: 12;
-                        viewbox-height: 12;
-                        commands: "M 0 0 L 12 0 L 6 10 Z";
-                        fill: Theme.record;
-                        stroke: transparent;
-                    }
-                    if gone.open: Rectangle {
-                        x: 6px;
-                        y: 14px;
-                        width: parent.width - 12px;
-                        height: 50px;
-                        border-radius: 3px;
-                        clip: true;
-                        background: Theme.surface-2;
-                        for t in root.thumbs: Image {
-                            visible: t.start <= g.src && g.src < t.end;
-                            width: parent.width;
-                            height: parent.height;
-                            source: t.image;
-                            image-fit: cover;
-                        }
-                    }
-                    if gone.open: Text {
-                        x: 6px;
-                        y: 66px;
-                        text: g.label;
-                        color: Theme.text;
-                        font-size: Theme.font-small;
-                    }
-                    if gone.open: Rectangle {
-                        x: 6px;
-                        y: 84px;
-                        width: parent.width - 12px;
-                        height: 20px;
-                        border-radius: 4px;
-                        background: gone.over-button ? Theme.accent : Theme.surface-3;
-                        Text {
-                            text: "Bring back";
-                            color: Theme.text;
-                            font-size: Theme.font-small;
-                        }
-                    }
-                    property <bool> over-button: self.open && gone-touch.mouse-y >= 84px && gone-touch.mouse-y < 104px;
-                    gone-touch := TouchArea {
-                        mouse-cursor: gone.over-button ? pointer : default;
-                        clicked => {
-                            if (gone.over-button) {
-                                root.bring-back(k);
-                                keys.focus();
-                            }
-                        }
                     }
                 }
             }

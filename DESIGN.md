@@ -161,13 +161,14 @@ is no database: the recordings list is a directory scan.
   timeline, clip after clip.
 - The camera bubble is composited in the UI for the preview and can be dragged,
   resized, reshaped (circle / rounded square) or hidden.
-- The timeline shows the edit as it plays: clips (kept ranges, which can
-  be split and reordered), each with its part of the filmstrip and waveform
-  (mic + system), a ruler to seek and select on, and the playhead. Clips are
-  cut at the playhead (C) and dragged to move; Selection → Delete / Trim,
-  always closing up; each deleted part leaves a ▼ to bring it back; clip
-  edges trim or bring back part of it; Restore brings everything back in
-  recorded order.
+- The timeline shows the whole recording as clips in the order they play
+  (kept ranges, which can be split and reordered), each with its part of the
+  filmstrip and waveform (mic + system) and what was deleted next to it,
+  dimmed, plus a ruler to seek and select on and the playhead. Clips are cut
+  at the playhead (C) and dragged to move; Selection → Delete / Trim; a
+  dimmed part is skipped when playing and exporting, and *Bring back* on
+  hover restores it; clip edges trim or bring back part of it; Restore
+  brings everything back in recorded order.
 - Edits only mutate `EditList`. **Raw tracks are never modified.**
 - Undo/redo works through snapshots of the `EditList`.
 - More in [`docs/`](docs/README.md): the [edit model](docs/edit-model.md) and

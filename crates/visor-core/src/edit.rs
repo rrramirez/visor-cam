@@ -174,16 +174,23 @@ impl EditList {
         out
     }
 
-    /// Removes output time `[start, end)`, which may span several clips.
-    pub fn delete_output(&mut self, start: Micros, end: Micros) {
-        for p in self.pieces(start, end) {
+    /// Removes these parts of the recording.
+    pub fn delete(&mut self, pieces: &[Range]) {
+        for p in pieces {
             self.cut(p.0, p.1);
         }
     }
 
-    /// Keeps only output time `[start, end)`.
-    pub fn trim_output(&mut self, start: Micros, end: Micros) {
-        self.keep = self.pieces(start, end);
+    /// Keeps only these parts of the recording, which play now (as
+    /// [`pieces`] or [`Layout::kept_pieces`] give them), in this order.
+    ///
+    /// [`pieces`]: Self::pieces
+    /// [`Layout::kept_pieces`]: crate::Layout::kept_pieces
+    pub fn keep_only(&mut self, pieces: Vec<Range>) {
+        let pieces: Vec<Range> = pieces.into_iter().filter(|p| !p.is_empty()).collect();
+        if !pieces.is_empty() {
+            self.keep = pieces;
+        }
     }
 
     /// Length of the edited output.
@@ -304,12 +311,6 @@ impl EditList {
                 }
             })
             .collect()
-    }
-
-    /// Output time where `removed` would come back.
-    pub fn removed_at(&self, removed: &Removed) -> Option<Micros> {
-        let (start, end) = self.clip_span(removed.clip)?;
-        Some(if removed.end { end } else { start })
     }
 
     /// Puts back the stretch `range` removed from a recording of
@@ -464,9 +465,6 @@ mod tests {
                 },
             ]
         );
-        // Where each one shows on the timeline.
-        let at: Vec<_> = removed.iter().map(|r| e.removed_at(r)).collect();
-        assert_eq!(at, [Some(30), Some(10), Some(30)]);
 
         let mut back = e.clone();
         assert!(back.bring_back(100, Range(60, 70)));
@@ -529,9 +527,9 @@ mod tests {
         // Plays 50–100, then 0–50: output 40–60 is 90–100 and 0–10.
         assert_eq!(e.pieces(40, 60), [Range(90, 100), Range(0, 10)]);
         let mut cut = e.clone();
-        cut.delete_output(40, 60);
+        cut.delete(&e.pieces(40, 60));
         assert_eq!(cut.ranges(), [Range(50, 90), Range(10, 50)]);
-        e.trim_output(40, 60);
+        e.keep_only(e.pieces(40, 60));
         assert_eq!(e.ranges(), [Range(90, 100), Range(0, 10)]);
     }
 

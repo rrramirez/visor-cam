@@ -40,17 +40,17 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    In the editor:
    - **Space** play/pause, **← →** step a frame (**⇧** for 10), click the
      ruler above the clips to seek, drag along it to select. The timeline
-     shows the video as it plays, clip after clip, with nothing blank between.
+     shows the clips in the order they play, each with what was deleted next
+     to it, dimmed; playing and exporting skip what's dimmed.
    - **I / O** set the selection from the playhead, **⌫** *Delete selection*,
      **T** trim to it, **⌘Z / ⇧⌘Z** undo/redo, *Restore the whole recording*
      to start over.
    - **Clips**: **C** or **⌘B** (*Cut at playhead*) cuts the video in two
      clips there; deleting also leaves one either side. Drag a clip to play
      it somewhere else (the others make room), or click it to select it.
-   - **Bring back what you deleted**: a ▼ on the ruler marks each deleted
-     part, at the clip it was deleted from. Hover it to see how long it was
-     and its first frame, and click *Bring back* to put just that part back,
-     without undoing what you did since.
+   - **Bring back what you deleted**: hover a dimmed part and click *Bring
+     back* to put just that part back, without undoing what you did since. A
+     dimmed part moves with the clip it was deleted from.
    - **Markers**: *Add marker* (**M**) marks the playhead. Name each one in
      the sidebar, click its time to jump there, or delete it.
    - **Blur**: *Blur an area* (**B**) hides part of the screen, like a

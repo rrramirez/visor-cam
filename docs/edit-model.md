@@ -31,8 +31,8 @@ in the exported file, which clocks, labels and chapters show.
 **Operations.** In source time: `cut`, `trim`, and the agent variants
 `cut_joining` / `trim_joining`, which also drop what's left next to the cut
 if it plays for less than `SLIVER` (0.25 s), counting the clips it plays
-straight on with (split but not moved apart) as one. In output time, for the editor's selection:
-`delete_output`, `trim_output`. `with_clip_edge_moved` moves one edge of a clip:
+straight on with (split but not moved apart) as one. In output time:
+`pieces` gives the parts of the recording that play over an output stretch. `with_clip_edge_moved` moves one edge of a clip:
 out as far as the nearest other clip's part of the recording (or either end of
 it), in until the clip is gone. Nothing merges clips, so deleting inside a
 clip leaves a clip on each side. Every operation closes up: clips always play
@@ -42,9 +42,15 @@ back to back.
 recording order) with the clip edge it would come back at: the end of the
 clip it was deleted from (the one ending where it starts), or, if it was
 trimmed off the start of the recording, the start of the clip after it.
-`removed_at` is where that is on the timeline, and `bring_back` moves that
-edge out over the whole stretch. The stretch stays with its clip however the
-clips move.
+`bring_back` moves that edge out over the whole stretch. The stretch stays
+with its clip however the clips move.
+
+**Layout.** `Layout` (`layout.rs`) is the editor's timeline: each clip in
+play order with its removed stretches before or after it, so it covers the
+whole recording once. `display` and `source` map between timeline time and
+source time one to one; `kept_pieces` gives what plays over a stretch of the
+timeline, which the editor deletes (`EditList::delete`) or keeps
+(`EditList::keep_only`).
 
 **Chapters.** `Project::chapters` starts one at each marker, at its output
 time, sorted by when it plays, so moved clips reorder them.

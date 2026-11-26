@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{Blur, EditList, Marker, Micros, Project};
+use visor_core::{Blur, EditList, Layout, Marker, Micros, Project};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
@@ -221,13 +221,15 @@ impl EditorWindow {
         });
         on!(on_delete_selection, |e| {
             if let Some((a, b)) = e.selection() {
-                e.apply(|edit| edit.delete_output(a, b));
+                let pieces = e.layout().kept_pieces(a, b);
+                e.apply(|edit| edit.delete(&pieces));
             }
         });
         on!(on_remove_pauses, |e| e.remove_pauses());
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
-                e.apply(|edit| edit.trim_output(a, b));
+                let pieces = e.layout().kept_pieces(a, b);
+                e.apply(|edit| edit.keep_only(pieces));
             }
         });
         on!(on_restore, |e| {
@@ -270,9 +272,9 @@ impl EditorWindow {
         on!(on_select_clip, |e, index| {
             let span = usize::try_from(index)
                 .ok()
-                .and_then(|i| e.project.borrow().edit.clip_span(i));
+                .and_then(|i| e.layout().clip_span(i));
             if let Some((a, b)) = span {
-                let d = e.output_duration() as f64;
+                let d = e.duration().max(1) as f64;
                 e.ui.set_sel_start((a as f64 / d) as f32);
                 e.ui.set_sel_end((b as f64 / d) as f32);
                 e.ui.set_kept_label(e.kept_label().into());
@@ -281,13 +283,15 @@ impl EditorWindow {
         let w = weak.clone();
         ui.on_clip_slot(move |f| {
             w.upgrade().map_or(0, |e| {
-                let edit = &e.project.borrow().edit;
-                let at = f64::from(f) * edit.duration() as f64;
-                // Before the first clip whose middle is past the pointer.
-                let n = edit.ranges().len();
+                let layout = e.layout();
+                let at = f64::from(f) * layout.duration() as f64;
+                // Before the first clip whose middle is past the pointer,
+                // counting what was removed next to it, which moves with it.
+                let n = e.project.borrow().edit.ranges().len();
                 (0..n)
                     .find(|&i| {
-                        edit.clip_span(i)
+                        layout
+                            .block_span(i)
                             .is_some_and(|(a, b)| (a + b) as f64 / 2.0 > at)
                     })
                     .unwrap_or(n) as i32
@@ -740,28 +744,32 @@ impl EditorWindow {
         self.refresh_edit_ui();
     }
 
-    /// How long the edit plays, which the timeline shows.
-    fn output_duration(&self) -> Micros {
-        self.project.borrow().edit.duration().max(1)
+    /// The timeline: the whole recording, clip by clip, with what was
+    /// removed next to the clip it would come back at.
+    fn layout(&self) -> Layout {
+        let p = self.project.borrow();
+        Layout::new(&p.edit, p.duration_us)
     }
 
-    /// Where on the timeline (0..1) source time `t` plays.
+    /// Where on the timeline (0..1) source time `t` is.
     fn timeline_pos(&self, t: Micros) -> f32 {
-        let edit = &self.project.borrow().edit;
-        (edit.kept_before(t) as f64 / edit.duration().max(1) as f64) as f32
+        let layout = self.layout();
+        (layout.display(t) as f64 / layout.duration().max(1) as f64) as f32
     }
 
     fn position_fraction(&self) -> f32 {
         self.timeline_pos(self.player.borrow().position())
     }
 
-    /// The source time at timeline position `f` (0..1).
+    /// Timeline position `f` (0..1) in timeline time.
+    fn display_at(&self, f: f32) -> Micros {
+        (f64::from(f.clamp(0.0, 1.0)) * self.duration() as f64) as Micros
+    }
+
+    /// The source time that plays at timeline position `f` (0..1), or
+    /// next after it if that was removed.
     fn source_at(&self, f: f32) -> Micros {
-        let edit = &self.project.borrow().edit;
-        let out = (f64::from(f.clamp(0.0, 1.0)) * edit.duration() as f64) as Micros;
-        edit.to_source(out)
-            .or_else(|| edit.ranges().last().map(|r| r.1.saturating_sub(1)))
-            .unwrap_or(0)
+        self.layout().playing_at(self.display_at(f))
     }
 
     /// Where a blur's start (or `end`) dragged to timeline position `f`
@@ -769,26 +777,25 @@ impl EditorWindow {
     /// frame just before it on the timeline, which may be the last of a
     /// clip that some other part of the recording follows.
     fn blur_edge_at(&self, end: bool, f: f32) -> Micros {
+        let layout = self.layout();
+        let d = self.display_at(f);
         let t = if end {
-            let edit = &self.project.borrow().edit;
-            let out = (f64::from(f.clamp(0.0, 1.0)) * edit.duration() as f64) as Micros;
-            edit.to_source(out.saturating_sub(1)).map_or(0, |t| t + 1)
+            layout.source(d.saturating_sub(1)).0 + 1
         } else {
-            self.source_at(f)
+            layout.source(d).0
         };
         self.frame_time(self.frames_at(t as f64).round())
     }
 
-    /// The selection in output time, if any.
+    /// The selection in timeline time, if any.
     /// Within half a frame of a clip's edge, it's that edge: no flash of
-    /// the next clip is left by a cut, nor kept by a trim.
+    /// the next clip is left by deleting, nor kept by a trim.
     fn selection(&self) -> Option<(Micros, Micros)> {
         let (a, b) = (self.ui.get_sel_start(), self.ui.get_sel_end());
         (a >= 0.0 && b > a).then(|| {
-            let d = self.output_duration() as f64;
             let half_frame = (500_000.0 / self.fps()) as Micros;
-            let edit = &self.project.borrow().edit;
-            let at = |f: f32| snap_to_clip_edge(edit, (f64::from(f) * d) as Micros, half_frame);
+            let layout = self.layout();
+            let at = |f: f32| snap_to_clip_edge(&layout, self.display_at(f), half_frame);
             (at(a), at(b))
         })
     }
@@ -797,7 +804,7 @@ impl EditorWindow {
     /// clips split but not moved apart joined.
     fn selection_pieces(&self) -> Vec<visor_core::Range> {
         self.selection()
-            .map(|(a, b)| EditList::joined(self.project.borrow().edit.pieces(a, b)))
+            .map(|(a, b)| EditList::joined(self.layout().kept_pieces(a, b)))
             .unwrap_or_default()
     }
 
@@ -863,9 +870,9 @@ impl EditorWindow {
     /// timeline position `f`: as far along the recording as it moved on
     /// the timeline, at the nearest frame.
     fn clip_edge_time(&self, index: usize, end: bool, f: f32) -> Option<Micros> {
-        let edit = &self.project.borrow().edit;
-        let at = (f64::from(f) * edit.duration() as f64) as i64;
-        let t = clip_edge_source(edit, index, end, at)? as f64;
+        let layout = self.layout();
+        let at = (f64::from(f) * layout.duration() as f64) as i64;
+        let t = clip_edge_source(&self.project.borrow().edit, &layout, index, end, at)? as f64;
         Some(self.frame_time(self.frames_at(t).round()))
     }
 
@@ -1082,16 +1089,21 @@ impl EditorWindow {
         let project = self.project.borrow();
         let d = project.duration_us.max(1) as f64;
         let edit = &project.edit;
-        // The timeline shows the edit as it plays, clip after clip.
-        let out = edit.duration().max(1) as f64;
-        let pos = |t: Micros| (edit.kept_before(t) as f64 / out) as f32;
+        // The timeline shows the whole recording, clip after clip, each
+        // with what was removed next to it.
+        let layout = Layout::new(edit, project.duration_us);
+        let pos = |t: Micros| (layout.display(t) as f64 / d) as f32;
+        let frac = |t: Micros| (t as f64 / d) as f32;
         let clips: Vec<Clip> = (0..edit.ranges().len())
             .filter_map(|i| {
-                let (a, b) = edit.clip_span(i)?;
+                let (a, b) = layout.clip_span(i)?;
+                let (ba, bb) = layout.block_span(i)?;
                 Some(Clip {
-                    start: (a as f64 / out) as f32,
-                    end: (b as f64 / out) as f32,
-                    src_start: (edit.ranges()[i].0 as f64 / d) as f32,
+                    start: frac(a),
+                    end: frac(b),
+                    block_start: frac(ba),
+                    block_end: frac(bb),
+                    src_start: frac(edit.ranges()[i].0),
                     // As long as it lasts in the video, after speed.
                     label: util::clock_tenths(((b - a) as f64 / project.speed()).round() as Micros)
                         .into(),
@@ -1099,27 +1111,31 @@ impl EditorWindow {
             })
             .collect();
         self.ui.set_clips(ModelRc::new(VecModel::from(clips)));
-        self.ui.set_zoom((d / out) as f32);
-        // What was deleted, where it would come back.
-        let removed: Vec<Gone> = edit
-            .removed(project.duration_us)
+        let removed: Vec<Gone> = layout
+            .segments()
             .iter()
-            .filter_map(|r| {
-                let at = edit.removed_at(r)?;
-                let len = (r.range.len() as f64 / project.speed()).round() as Micros;
-                Some(Gone {
-                    pos: (at as f64 / out) as f32,
-                    src: (r.range.0 as f64 / d) as f32,
+            .filter(|s| !s.kept)
+            .map(|s| {
+                let len = (s.range.len() as f64 / project.speed()).round() as Micros;
+                Gone {
+                    start: frac(s.at),
+                    end: frac(s.at + s.range.len()),
+                    src_start: frac(s.range.0),
+                    clip: s.clip as i32,
                     label: format!("{} deleted", util::clock_tenths(len)).into(),
-                })
+                }
             })
             .collect();
         self.ui.set_removed(ModelRc::new(VecModel::from(removed)));
+        // Times in the video, where they play.
         let ticks: Vec<Tick> = ruler_ticks(project.output_duration())
             .into_iter()
-            .map(|t| Tick {
-                pos: (t as f64 * project.speed() / out) as f32,
-                label: util::clock(t).into(),
+            .filter_map(|t| {
+                let src = edit.to_source((t as f64 * project.speed()).round() as Micros)?;
+                Some(Tick {
+                    pos: pos(src),
+                    label: util::clock(t).into(),
+                })
             })
             .collect();
         self.ui.set_ticks(ModelRc::new(VecModel::from(ticks)));
@@ -1130,11 +1146,7 @@ impl EditorWindow {
             .map(|m| {
                 let time = util::clock(project.output_time(m.at_us));
                 MarkerMark {
-                    pos: if edit.to_output(m.at_us).is_some() {
-                        pos(m.at_us)
-                    } else {
-                        -1.0
-                    },
+                    pos: pos(m.at_us),
                     label: marker_label(&time, &m.text).into(),
                     time: time.into(),
                     text: m.text.clone().into(),
@@ -1166,10 +1178,8 @@ impl EditorWindow {
             .map(|b| {
                 let last = b.end_us.saturating_sub(1).max(b.start_us);
                 BlurRow {
-                    start: edit.to_output(b.start_us).map_or(-1.0, |_| pos(b.start_us)),
-                    end: edit
-                        .to_output(last)
-                        .map_or(-1.0, |o| ((o + 1) as f64 / out) as f32),
+                    start: pos(b.start_us),
+                    end: frac(layout.display(last) + 1),
                     time: blur_label(&project, b).into(),
                 }
             })
@@ -1177,17 +1187,16 @@ impl EditorWindow {
         self.ui.set_blurs(ModelRc::new(VecModel::from(blurs)));
         let mut bands = Vec::new();
         for (i, b) in project.blurs.iter().enumerate() {
-            let mut at = 0;
-            for r in edit.ranges() {
+            for seg in layout.segments().iter().filter(|s| s.kept) {
+                let r = seg.range;
                 let (s, e) = (b.start_us.max(r.0), b.end_us.min(r.1));
                 if e > s {
                     bands.push(BlurBand {
                         blur: i as i32,
-                        start: ((at + s - r.0) as f64 / out) as f32,
-                        end: ((at + e - r.0) as f64 / out) as f32,
+                        start: frac(seg.at + s - r.0),
+                        end: frac(seg.at + e - r.0),
                     });
                 }
-                at += r.len();
             }
         }
         self.ui.set_blur_bands(ModelRc::new(VecModel::from(bands)));
@@ -1248,8 +1257,9 @@ impl EditorWindow {
         if clips > 1 {
             label.push_str(&format!(" in {clips} clips"));
         }
-        if let Some((a, b)) = self.selection() {
-            label.push_str(&format!(" · Selected {}", util::clock_tenths(b - a)));
+        if self.selection().is_some() {
+            let kept: Micros = self.selection_pieces().iter().map(|p| p.len()).sum();
+            label.push_str(&format!(" · Selected {}", util::clock_tenths(kept)));
         }
         label
     }
@@ -1668,10 +1678,11 @@ fn ruler_ticks(duration: Micros) -> Vec<Micros> {
 /// video) if it's within `tolerance` of one, so a selection made from a
 /// clip's span, which comes back from the UI a few µs off, covers it
 /// exactly.
-fn snap_to_clip_edge(edit: &EditList, t: Micros, tolerance: Micros) -> Micros {
-    (0..edit.ranges().len())
-        .filter_map(|i| edit.clip_span(i))
-        .flat_map(|(a, b)| [a, b])
+fn snap_to_clip_edge(layout: &Layout, t: Micros, tolerance: Micros) -> Micros {
+    layout
+        .segments()
+        .iter()
+        .flat_map(|s| [s.at, s.at + s.range.len()])
         .chain([0])
         .min_by_key(|e| e.abs_diff(t))
         .filter(|e| e.abs_diff(t) <= tolerance)
@@ -1679,13 +1690,19 @@ fn snap_to_clip_edge(edit: &EditList, t: Micros, tolerance: Micros) -> Micros {
 }
 
 /// The source time clip `index`'s start (or `end`) goes to when dragged to
-/// output time `at`, which may be outside the video (before it or after
-/// it): as far along the recording as it moved on the timeline.
-fn clip_edge_source(edit: &EditList, index: usize, end: bool, at: i64) -> Option<Micros> {
+/// timeline time `at`: as far along the recording as it moved on the
+/// timeline, over what was removed next to it.
+fn clip_edge_source(
+    edit: &EditList,
+    layout: &Layout,
+    index: usize,
+    end: bool,
+    at: i64,
+) -> Option<Micros> {
     let r = *edit.ranges().get(index)?;
-    let (a, b) = edit.clip_span(index)?;
-    let (edge, out) = if end { (r.1, b) } else { (r.0, a) };
-    Some((edge as i64 + at - out as i64).max(0) as Micros)
+    let (a, b) = layout.clip_span(index)?;
+    let (edge, shown) = if end { (r.1, b) } else { (r.0, a) };
+    Some((edge as i64 + at - shown as i64).max(0) as Micros)
 }
 
 /// `blur` as one blur for each of `pieces`, the same area in each.
@@ -1779,22 +1796,34 @@ mod tests {
     fn selected_clips_snap_to_their_edges() {
         let mut edit = EditList::full(123_456_789);
         edit.split(61_000_001);
+        edit.cut(70_000_000, 80_000_000);
+        let l = Layout::new(&edit, 123_456_789);
         // A few µs off, as a clip's span is after a trip through f32.
-        assert_eq!(snap_to_clip_edge(&edit, 61_000_004, 1_000), 61_000_001);
-        assert_eq!(snap_to_clip_edge(&edit, 123_456_780, 1_000), 123_456_789);
-        assert_eq!(snap_to_clip_edge(&edit, 9, 1_000), 0);
-        assert_eq!(snap_to_clip_edge(&edit, 61_500_000, 1_000), 61_500_000);
+        assert_eq!(snap_to_clip_edge(&l, 61_000_004, 1_000), 61_000_001);
+        assert_eq!(snap_to_clip_edge(&l, 123_456_780, 1_000), 123_456_789);
+        assert_eq!(snap_to_clip_edge(&l, 9, 1_000), 0);
+        assert_eq!(snap_to_clip_edge(&l, 61_500_000, 1_000), 61_500_000);
+        // And to what was removed.
+        assert_eq!(snap_to_clip_edge(&l, 79_999_500, 1_000), 80_000_000);
     }
 
     #[test]
-    fn outer_clip_edges_drag_past_the_timeline() {
+    fn clip_edges_drag_over_what_was_removed_next_to_them() {
         let mut edit = EditList::full(100);
         edit.trim(10, 90);
-        // Dragged 5 before the timeline's start, or 4 past its end.
-        assert_eq!(clip_edge_source(&edit, 0, false, -5), Some(5));
-        assert_eq!(clip_edge_source(&edit, 0, true, 84), Some(94));
-        assert_eq!(clip_edge_source(&edit, 0, false, -50), Some(0));
-        assert_eq!(clip_edge_source(&edit, 1, false, 0), None);
+        edit.split(50);
+        edit.move_clip(1, 0);
+        // [50, 90) then [10, 50): what was trimmed off either end shows
+        // by the clip it would come back at.
+        let l = Layout::new(&edit, 100);
+        assert_eq!(l.clip_span(0), Some((0, 40)));
+        assert_eq!(l.clip_span(1), Some((60, 100)));
+        // The first clip's end over the 10 trimmed after it.
+        assert_eq!(clip_edge_source(&edit, &l, 0, true, 46), Some(96));
+        // The second's start over the 10 trimmed before it.
+        assert_eq!(clip_edge_source(&edit, &l, 1, false, 55), Some(5));
+        assert_eq!(clip_edge_source(&edit, &l, 1, false, -50), Some(0));
+        assert_eq!(clip_edge_source(&edit, &l, 2, false, 0), None);
     }
 
     #[test]
