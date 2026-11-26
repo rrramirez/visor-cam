@@ -304,8 +304,9 @@ impl App {
         }
         // A new recording, not more of one the user was about to record
         // more onto from the panel.
-        if more.is_none()
-            && let Some(dir) = self.more.borrow_mut().take()
+        let pending = self.more.borrow_mut().take();
+        if let Some(dir) = pending
+            && more.as_ref() != Some(&dir)
         {
             self.show_hidden_editor(&dir);
         }
@@ -761,6 +762,13 @@ impl App {
                 return Err("That recording is still going; stop it first.".into());
             }
             _ => {}
+        }
+        // Being recorded more onto, or about to be: the take's save would
+        // overwrite an edit made now.
+        if self.more.borrow().as_ref() == Some(&dir) {
+            return Err(
+                "Visor is recording more onto that recording; stop or discard that first.".into(),
+            );
         }
         Ok(dir)
     }

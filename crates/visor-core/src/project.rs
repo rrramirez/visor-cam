@@ -82,6 +82,13 @@ pub struct Part {
     pub file: Option<String>,
 }
 
+/// Blurs lasting to the start of the take `clip` go on to its end.
+pub fn stretch_blurs(blurs: &mut [Blur], clip: crate::Range) {
+    for b in blurs.iter_mut().filter(|b| b.end_us >= clip.0) {
+        b.end_us = b.end_us.max(clip.1);
+    }
+}
+
 /// The file name of a track in take `n` (the recording's first piece being
 /// 1): `screen.mp4` → `screen-2.mp4`.
 pub fn take_file(file: &str, n: usize) -> String {
@@ -316,7 +323,9 @@ impl Project {
 
     /// Ends the take being recorded, `duration` long: the recording grows by
     /// it, it plays as the last clip, and `markers` (in the take's own time)
-    /// are added. One with nothing recorded is dropped.
+    /// are added. Blurs that lasted to the end go on over it, like the
+    /// whole-video blur they usually are. One with nothing recorded is
+    /// dropped.
     pub fn finish_take(&mut self, duration: Micros, markers: Vec<Marker>) {
         if duration == 0 {
             self.drop_take();
@@ -328,7 +337,9 @@ impl Project {
         take.duration_us = duration;
         let start = take.start_us;
         self.duration_us = start + duration;
-        self.edit.append(crate::Range(start, start + duration));
+        let clip = crate::Range(start, start + duration);
+        self.edit.append(clip);
+        stretch_blurs(&mut self.blurs, clip);
         self.markers.extend(markers.into_iter().map(|m| Marker {
             at_us: start + m.at_us.min(duration),
             ..m
@@ -832,6 +843,15 @@ mod tests {
             at_us: 3,
             text: "Before".into(),
         });
+        let blur = |start_us, end_us| Blur {
+            start_us,
+            end_us,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        p.blurs = vec![blur(0, 20), blur(2, 6)];
         let before = p.clone();
 
         // Being recorded: nothing changes but the pending take.
@@ -860,6 +880,14 @@ mod tests {
             [Range(12, 20), Range(0, 5), Range(8, 12), Range(20, 25)]
         );
         assert_eq!(p.markers.last().map(|m| m.at_us), Some(22));
+        // A blur lasting to the end goes on over the take; others don't.
+        assert_eq!(
+            p.blurs
+                .iter()
+                .map(|b| (b.start_us, b.end_us))
+                .collect::<Vec<_>>(),
+            [(0, 25), (2, 6)]
+        );
         assert!(p.edit.is_valid(p.duration_us));
 
         // A take with nothing in it is dropped.

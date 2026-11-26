@@ -24,7 +24,9 @@ time stays one line: the first piece from 0, then each take after it.
 loads the project, `begin_take`s a take with duration 0 and saves it, so a
 crash can be recovered; markers made during it are in the whole recording's
 time. `stop` calls `finish_take`: the take gets its length, the recording
-grows by it and it is appended as the last clip (`EditList::append`).
+grows by it and it is appended as the last clip (`EditList::append`);
+blurs that lasted to the end go on over it (`stretch_blurs`), like the
+whole-video blur they usually are, so recovered and agents' takes get it too.
 `discard` deletes only the take's files and saves the project as it was.
 
 **Reading across takes.** Everything that reads tracks goes through
@@ -53,8 +55,7 @@ discard, a cancelled countdown or closing the panel shows the editor again
 as it was, only once the take's recorder has put the project back, so its
 save can't overwrite an edit. *Record more* waits while the editor exports
 or looks for pauses, which would act on the recording without the take.
-Blurs that lasted to the recording's end go on over the take
-(`stretch_blurs`), like the whole-video blur they usually are.
+Agents can't edit a recording while it is being recorded more onto.
 
 **Recovery.** `is_interrupted` is also true for a project whose last take has
 duration 0. `recover` then finishes it from what its files hold (the longest

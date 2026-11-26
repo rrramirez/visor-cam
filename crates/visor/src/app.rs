@@ -2089,7 +2089,6 @@ fn is_transient(e: &std::io::Error) -> bool {
     ) || (cfg!(windows) && e.raw_os_error() == Some(32))
 }
 
-/// Discards a recorder without blocking the UI thread on its writer threads.
 /// Discards a take being recorded more onto the recording in `dir`, then
 /// shows its editor again.
 fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
@@ -2101,6 +2100,7 @@ fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
     });
 }
 
+/// Discards a recorder without blocking the UI thread on its writer threads.
 fn discard_in_background(recorder: Recorder) {
     std::thread::spawn(move || {
         if let Err(e) = recorder.discard() {

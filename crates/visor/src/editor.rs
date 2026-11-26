@@ -70,16 +70,8 @@ fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Mar
                 m.extend(markers.iter().cloned());
                 m.sort_by_key(|m| m.at_us);
             }
-            Step::Blurs(b) => stretch_blurs(b, clip),
+            Step::Blurs(b) => visor_core::project::stretch_blurs(b, clip),
         }
-    }
-}
-
-/// Blurs lasting to the take `clip`'s start go on to its end, as they
-/// would over more of what they hide.
-fn stretch_blurs(blurs: &mut [Blur], clip: visor_core::Range) {
-    for b in blurs.iter_mut().filter(|b| b.end_us >= clip.0) {
-        b.end_us = b.end_us.max(clip.1);
     }
 }
 
@@ -269,17 +261,7 @@ impl EditorWindow {
         );
         let clips = project.edit.ranges().len();
         *self.project.borrow_mut() = project;
-        if let Some(clip) = clip {
-            let stretched = {
-                let mut p = self.project.borrow_mut();
-                let before = p.blurs.clone();
-                stretch_blurs(&mut p.blurs, clip);
-                p.blurs != before
-            };
-            if stretched {
-                self.save();
-            }
-        }
+
         *self.nudged.borrow_mut() = None;
         self.refresh_edit_ui();
         self.load_previews();
