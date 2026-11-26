@@ -255,11 +255,9 @@ impl EditorWindow {
         on!(on_cut_at_playhead, |e| e.cut_at_playhead());
         on!(on_bring_back, |e, index| {
             let d = e.duration();
-            let removed = e.project.borrow().edit.removed(d);
-            if let Some(r) = usize::try_from(index).ok().and_then(|i| removed.get(i)) {
-                let range = r.range;
+            if let Ok(i) = usize::try_from(index) {
                 e.apply(|edit| {
-                    edit.bring_back(d, range);
+                    bring_back_shown(edit, d, i);
                 });
             }
         });
@@ -1665,6 +1663,18 @@ fn blur_label(project: &Project, blur: &Blur) -> String {
     }
 }
 
+/// Brings back the `index`th dimmed part on the timeline, in the order the
+/// timeline shows them (`refresh_edit_ui` lists them that way).
+fn bring_back_shown(edit: &mut EditList, duration: Micros, index: usize) -> bool {
+    let range = Layout::new(edit, duration)
+        .segments()
+        .iter()
+        .filter(|s| !s.kept)
+        .nth(index)
+        .map(|s| s.range);
+    range.is_some_and(|r| edit.bring_back(duration, r))
+}
+
 /// Times to mark on the ruler of a video `duration` long: every second, or
 /// every 2, 5, 10… so there are a dozen at most, from 0.
 fn ruler_ticks(duration: Micros) -> Vec<Micros> {
@@ -1728,6 +1738,25 @@ fn marker_label(time: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use visor_core::Range;
+
+    #[test]
+    fn bring_back_restores_the_dimmed_part_shown_there() {
+        let mut edit = EditList::full(100);
+        edit.cut(0, 10);
+        edit.split(50);
+        edit.cut(60, 70);
+        edit.cut(90, 100);
+        edit.move_clip(0, 3);
+        // On the timeline: [50, 60) dimmed [60, 70), [70, 90) dimmed
+        // [90, 100), dimmed [0, 10) [10, 50).
+        assert!(bring_back_shown(&mut edit, 100, 0));
+        assert_eq!(edit.ranges(), [Range(50, 70), Range(70, 90), Range(10, 50)]);
+        assert!(bring_back_shown(&mut edit, 100, 1));
+        // Now dimmed: [90, 100), then [0, 10).
+        assert_eq!(edit.ranges(), [Range(50, 70), Range(70, 90), Range(0, 50)]);
+        assert!(!bring_back_shown(&mut edit, 100, 1));
+    }
 
     #[test]
     fn the_ruler_marks_a_dozen_times_at_most() {

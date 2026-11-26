@@ -32,8 +32,9 @@ part shows, and clips the rest.
   asks Rust which slot its middle is over, and `shift` slides the other
   blocks aside to open that slot (`landing`); letting go calls `move-clip`.
 - Dimmed parts (`Gone`, the layout's segments that don't play): hover one for
-  a card with its length and *Bring back* (`bring-back` →
-  `EditList::bring_back`, one undo step). The part and the card each have a
+  a card with its length and *Bring back* (`bring-back` sends its index in
+  timeline order, which `bring_back_shown` looks up in the same `Layout`;
+  `EditList::removed` lists them in recording order instead; one undo step). The part and the card each have a
   `TouchArea`, and the card stays open while either is hovered. Clicking the
   part seeks to what plays after it on the timeline.
 - clip edges (`CutEdge` with `inside: true`): drag to show less of the
