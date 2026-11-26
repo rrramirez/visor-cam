@@ -948,7 +948,64 @@ impl App {
 
 /// A start command's choices, checked against the panel's lists before
 /// any is applied: indexes into them, and the panel mode to record with.
-#[derive(Default)]
+/// The panel choices that record from `saved` again (a recording's
+/// sources, to record more), given what can be recorded now and the ids of
+/// the cameras and mics listed in the panel; and what of it is gone, as
+/// words for the user ("the window").
+fn saved_choices(
+    saved: &RecordingConfig,
+    sources: &Shareable,
+    cameras: &[&str],
+    mics: &[&str],
+) -> (Choices, Vec<&'static str>) {
+    let mut c = Choices::default();
+    let mut missing = Vec::new();
+    let display = |id: u32| sources.displays.iter().position(|d| d.id == id);
+    match &saved.target {
+        CaptureTarget::Display { id } => match display(*id) {
+            Some(i) => (c.mode, c.display) = (Some(0), Some(i)),
+            None => missing.push("the display"),
+        },
+        CaptureTarget::Window { id } => match sources.windows.iter().position(|w| w.id == *id) {
+            Some(i) => (c.mode, c.window) = (Some(1), Some(i)),
+            None => missing.push("the window"),
+        },
+        CaptureTarget::App { pid } => match sources.apps.iter().position(|a| a.pid == *pid) {
+            Some(i) => (c.mode, c.app) = (Some(2), Some(i)),
+            None => missing.push("the app"),
+        },
+        CaptureTarget::Area { display_id, rect } => match display(*display_id) {
+            Some(i) => {
+                (c.mode, c.display) = (Some(3), Some(i));
+                c.area = Some((*display_id, *rect));
+            }
+            None => missing.push("the display"),
+        },
+    }
+    c.system_audio = Some(saved.audio.system || saved.audio.app_pid.is_some());
+    if let Some(pid) = saved.audio.app_pid {
+        match sources.apps.iter().position(|a| a.pid == pid) {
+            Some(i) => c.audio_app = Some(i),
+            None => missing.push("the app whose sound was recorded"),
+        }
+    }
+    // Panel indexes, where 0 is none.
+    let device = |id: &Option<String>, ids: &[&str], what, missing: &mut Vec<_>| match id {
+        None => Some(0),
+        Some(id) => match ids.iter().position(|d| d == id) {
+            Some(i) => Some(i + 1),
+            None => {
+                missing.push(what);
+                None
+            }
+        },
+    };
+    c.camera = device(&saved.camera, cameras, "the camera", &mut missing);
+    c.mic = device(&saved.audio.mic, mics, "the microphone", &mut missing);
+    (c, missing)
+}
+
+#[derive(Debug, Default, PartialEq)]
 struct Choices {
     display: Option<usize>,
     mode: Option<i32>,
@@ -1061,6 +1118,68 @@ fn area_arg(args: &Value, display: &DisplayInfo) -> Result<Rect, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_sources_come_back_as_panel_choices() {
+        use visor_capture::{AppInfo, DisplayInfo, WindowInfo};
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let sources = Shareable {
+            displays: [7, 9]
+                .map(|id| DisplayInfo {
+                    id,
+                    name: format!("Display {id}"),
+                    frame: rect,
+                    scale: 2.0,
+                })
+                .into(),
+            windows: vec![WindowInfo {
+                id: 42,
+                title: "Notes".into(),
+                app: "Notes".into(),
+                pid: 5,
+            }],
+            apps: vec![AppInfo {
+                pid: 5,
+                name: "Notes".into(),
+            }],
+        };
+        let (cameras, mics) = (["cam-a", "cam-b"], ["mic-a"]);
+        let mut saved = RecordingConfig::display(9);
+        saved.camera = Some("cam-b".into());
+        saved.audio.mic = Some("mic-a".into());
+        let (c, missing) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert!(missing.is_empty());
+        assert_eq!((c.mode, c.display), (Some(0), Some(1)));
+        // Panel device indexes count "None" as 0.
+        assert_eq!((c.camera, c.mic), (Some(2), Some(1)));
+        assert_eq!((c.system_audio, c.audio_app), (Some(false), None));
+
+        saved.target = CaptureTarget::Window { id: 42 };
+        saved.camera = None;
+        saved.audio.app_pid = Some(5);
+        let (c, _) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!((c.mode, c.window, c.camera), (Some(1), Some(0), Some(0)));
+        assert_eq!(c.audio_app, Some(0));
+
+        saved.target = CaptureTarget::Area {
+            display_id: 7,
+            rect,
+        };
+        let (c, _) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!((c.mode, c.display, c.area), (Some(3), Some(0), Some((7, rect))));
+
+        // What's gone is said, and the rest still chosen.
+        saved.target = CaptureTarget::Window { id: 43 };
+        saved.camera = Some("cam-c".into());
+        let (c, missing) = saved_choices(&saved, &sources, &cameras, &mics);
+        assert_eq!(missing, ["the window", "the camera"]);
+        assert_eq!((c.mode, c.window, c.camera, c.mic), (None, None, None, Some(1)));
+    }
 
     #[test]
     fn finds_by_id_name_or_part_of_a_name() {
