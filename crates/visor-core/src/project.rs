@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EditList, Micros};
+use crate::{EditList, Micros, RecordingConfig};
 
 pub const PROJECT_FILE: &str = "project.json";
 /// Track files inside a recording folder.
@@ -34,6 +34,61 @@ pub struct Tracks {
     pub camera: Option<Track>,
     pub mic: Option<Track>,
     pub system: Option<Track>,
+}
+
+impl Tracks {
+    pub fn get(&self, kind: TrackKind) -> Option<&Track> {
+        match kind {
+            TrackKind::Screen => self.screen.as_ref(),
+            TrackKind::Camera => self.camera.as_ref(),
+            TrackKind::Mic => self.mic.as_ref(),
+            TrackKind::System => self.system.as_ref(),
+        }
+    }
+
+    fn all(&self) -> impl Iterator<Item = &Track> {
+        [&self.screen, &self.camera, &self.mic, &self.system]
+            .into_iter()
+            .flatten()
+    }
+}
+
+/// Which of a recording's tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Screen,
+    Camera,
+    Mic,
+    System,
+}
+
+/// A piece recorded onto the recording after it stopped (*Record more*).
+/// Its tracks are files of their own, which go on from source time
+/// `start_us`: the recording's length before it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub start_us: Micros,
+    /// 0 while it is being recorded.
+    pub duration_us: Micros,
+    pub tracks: Tracks,
+}
+
+/// A stretch of source time that one file of a track covers; no file when
+/// that piece was recorded without the track (blank, or silent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    pub start: Micros,
+    pub end: Micros,
+    pub file: Option<String>,
+}
+
+/// The file name of a track in take `n` (the recording's first piece being
+/// 1): `screen.mp4` → `screen-2.mp4`.
+pub fn take_file(file: &str, n: usize) -> String {
+    match file.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-{n}.{ext}"),
+        None => format!("{file}-{n}"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,8 +136,16 @@ pub struct Project {
     pub title: String,
     /// RFC 3339.
     pub created_at: String,
+    /// The whole recording's length, takes included.
     pub duration_us: Micros,
+    /// The first piece's tracks, from source time 0.
     pub tracks: Tracks,
+    /// Pieces recorded after it, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<Take>,
+    /// What it was recorded from, to record more from the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<RecordingConfig>,
     pub edit: EditList,
     #[serde(default)]
     pub camera_overlay: CameraOverlay,
@@ -199,6 +262,8 @@ impl Project {
             created_at: created_at.into(),
             duration_us,
             tracks: Tracks::default(),
+            takes: Vec::new(),
+            sources: None,
             edit: EditList::full(duration_us),
             camera_overlay: CameraOverlay::default(),
             speed: 1.0,
@@ -206,6 +271,30 @@ impl Project {
             markers: Vec::new(),
             blurs: Vec::new(),
         }
+    }
+
+    /// The files of track `kind` over source time, in order: the first
+    /// piece's, then each take's.
+    pub fn parts(&self, kind: TrackKind) -> Vec<Part> {
+        let first_end = self.takes.first().map_or(self.duration_us, |t| t.start_us);
+        std::iter::once((0, first_end, &self.tracks))
+            .chain(
+                self.takes
+                    .iter()
+                    .map(|t| (t.start_us, t.start_us + t.duration_us, &t.tracks)),
+            )
+            .filter(|(start, end, _)| end > start)
+            .map(|(start, end, tracks)| Part {
+                start,
+                end,
+                file: tracks.get(kind).map(|t| t.file.clone()),
+            })
+            .collect()
+    }
+
+    /// Whether any piece of the recording has track `kind`.
+    pub fn has_track(&self, kind: TrackKind) -> bool {
+        self.tracks.get(kind).is_some() || self.takes.iter().any(|t| t.tracks.get(kind).is_some())
     }
 
     /// Length of the exported video: the kept time, sped up or slowed down.
@@ -291,16 +380,23 @@ impl Project {
     /// `project.json` is untrusted: track files must stay inside the folder
     /// and the edit list must be well formed.
     fn validate(&self) -> Result<(), ProjectError> {
-        let t = &self.tracks;
-        for track in [&t.screen, &t.camera, &t.mic, &t.system]
-            .into_iter()
-            .flatten()
+        let takes = self.takes.iter().map(|t| &t.tracks);
+        for track in std::iter::once(&self.tracks)
+            .chain(takes)
+            .flat_map(Tracks::all)
         {
             if !is_plain_file_name(&track.file) {
                 return Err(ProjectError::Invalid(
                     "track file outside the project folder",
                 ));
             }
+        }
+        let mut end = 0;
+        for take in &self.takes {
+            if take.start_us < end || take.start_us + take.duration_us > self.duration_us {
+                return Err(ProjectError::Invalid("takes out of order or out of bounds"));
+            }
+            end = take.start_us + take.duration_us;
         }
         if !self.edit.is_valid(self.duration_us) {
             return Err(ProjectError::Invalid(
@@ -597,6 +693,84 @@ mod tests {
         assert_eq!(rename_to_title(&elsewhere, &root).unwrap(), None);
         assert!(elsewhere.exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn track(file: &str) -> Option<Track> {
+        Some(Track {
+            file: file.into(),
+            width: None,
+            height: None,
+            fps: None,
+        })
+    }
+
+    #[test]
+    fn takes_continue_the_recording_with_their_own_files() {
+        let mut p = Project::new("Demo", "2026-10-19T18:42:00Z", 25);
+        p.tracks.screen = track(SCREEN_FILE);
+        p.tracks.camera = track(CAMERA_FILE);
+        p.takes.push(Take {
+            start_us: 20,
+            duration_us: 5,
+            tracks: Tracks {
+                screen: track("screen-2.mp4"),
+                ..Tracks::default()
+            },
+        });
+        let part = |start, end, file: Option<&str>| Part {
+            start,
+            end,
+            file: file.map(String::from),
+        };
+        assert_eq!(
+            p.parts(TrackKind::Screen),
+            [
+                part(0, 20, Some(SCREEN_FILE)),
+                part(20, 25, Some("screen-2.mp4"))
+            ]
+        );
+        // No camera in the second take: nothing to show there.
+        assert_eq!(
+            p.parts(TrackKind::Camera),
+            [part(0, 20, Some(CAMERA_FILE)), part(20, 25, None)]
+        );
+        assert!(p.has_track(TrackKind::Camera));
+        assert!(!p.has_track(TrackKind::Mic));
+        assert_eq!(take_file(MIC_FILE, 3), "mic-3.m4a");
+
+        // A take being recorded has no length yet, and no part.
+        p.takes.push(Take {
+            start_us: 25,
+            duration_us: 0,
+            tracks: Tracks::default(),
+        });
+        assert_eq!(p.parts(TrackKind::Screen).len(), 2);
+
+        let dir = std::env::temp_dir().join(format!("visor-takes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        p.sources = Some(crate::RecordingConfig::display(1));
+        p.save(&dir).unwrap();
+        assert_eq!(Project::load(&dir).unwrap(), p);
+
+        // Takes come from project.json too: their files stay in the folder,
+        // and they stay inside the recording.
+        let mut bad = p.clone();
+        bad.takes[0].tracks.mic = track("../mic.m4a");
+        bad.save(&dir).unwrap();
+        assert!(Project::load(&dir).is_err());
+        let mut bad = p.clone();
+        bad.takes[0].duration_us = 10;
+        bad.save(&dir).unwrap();
+        assert!(Project::load(&dir).is_err());
+
+        // Projects from before takes load with none, and save as before.
+        let old = Project::new("Old", "2026-10-19T18:42:00Z", 10);
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("takes") && !json.contains("sources"));
+        let loaded: Project = serde_json::from_str(&json).unwrap();
+        assert!(loaded.takes.is_empty() && loaded.sources.is_none());
+        assert_eq!(loaded.parts(TrackKind::Screen), [part(0, 10, None)]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
