@@ -38,12 +38,18 @@ it), in until the clip is gone. Nothing merges clips, so deleting inside a
 clip leaves a clip on each side. Every operation closes up: clips always play
 back to back.
 
-**Bringing back.** `removed` lists each stretch taken out (the `cuts`, in
-recording order) with the clip edge it would come back at: the end of the
-clip it was deleted from (the one ending where it starts), or, if it was
-trimmed off the start of the recording, the start of the clip after it.
-`bring_back` moves that edge out over the whole stretch. The stretch stays
-with its clip however the clips move.
+**Bringing back.** `removed` lists each stretch taken out with the clip edge
+it would come back at, so it shows on the side of the clip it was taken
+from. What was trimmed off a clip's start (as a selection deleting it does)
+is that clip's `lead`, kept by the clip's start time and shown at its start;
+the rest of a gap shows after the clip before it in the recording, and all
+of the gap before the first clip in the recording at that clip's start.
+Operations carry `lead` over (`carry_lead`): trimming a start in adds to it,
+pulling a start out takes from it first, and a clip cut in two gives its
+second part none. Without it, a part trimmed off a moved clip's start would
+show after whichever clip it follows in the recording, somewhere else on the
+timeline. `bring_back` moves that edge out over the whole stretch. A stretch
+stays with its clip however the clips move.
 
 **Layout.** `Layout` (`layout.rs`) is the editor's timeline: each clip in
 play order with its removed stretches before or after it, so it covers the
@@ -73,6 +79,7 @@ time, sorted by when it plays, so moved clips reorder them.
   `partition_point`, `ranges().first().0` as the earliest kept time, or summed
   `clamp`s for `kept_before`. With moved clips those give wrong answers
   without failing. Use the recording-order helpers instead.
+- `lead` is saved as `"lead"` (only when not empty); older versions ignore it.
 - Saved projects with moved clips don't load in Visor 0.8.0 and earlier, whose
   `is_valid` required sorted ranges.
 

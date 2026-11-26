@@ -6,6 +6,8 @@
 //! don't overlap and aren't empty; neighbours may touch, as two clips split
 //! from one do.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Micros;
@@ -36,6 +38,13 @@ pub struct Removed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditList {
     keep: Vec<Range>,
+    /// How much of what was removed just before a clip (by the clip's start
+    /// time) was trimmed off that clip, and so shows at its start rather
+    /// than after the clip before it in the recording. See [`removed`].
+    ///
+    /// [`removed`]: Self::removed
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    lead: BTreeMap<Micros, Micros>,
 }
 
 impl EditList {
@@ -46,7 +55,40 @@ impl EditList {
         } else {
             Vec::new()
         };
-        Self { keep }
+        Self {
+            keep,
+            lead: BTreeMap::new(),
+        }
+    }
+
+    /// Carries each clip's `lead` over from `before` this edit: a clip whose
+    /// start was trimmed in adds what was trimmed, one pulled out over what
+    /// was removed before it takes that back first, and the second part of
+    /// a clip cut in two has none (what was removed between them shows
+    /// after the first part).
+    fn carry_lead(&mut self, before: &EditList) {
+        let lead_of = |t: Micros| before.lead.get(&t).copied().unwrap_or(0);
+        let mut lead = BTreeMap::new();
+        for n in &self.keep {
+            let l = if let Some(o) = before.keep.iter().find(|o| o.0 == n.0) {
+                lead_of(o.0)
+            } else if let Some(o) = before.keep.iter().find(|o| o.0 < n.0 && n.0 < o.1) {
+                // Still kept before it: cut in two, not trimmed.
+                let split = self
+                    .keep
+                    .iter()
+                    .any(|m| m.0 < n.0 && m.1 > o.0 && m.0 < o.1);
+                if split { 0 } else { lead_of(o.0) + (n.0 - o.0) }
+            } else if let Some(o) = before.keep.iter().find(|o| n.0 < o.0 && o.0 < n.1) {
+                lead_of(o.0).saturating_sub(o.0 - n.0)
+            } else {
+                0
+            };
+            if l > 0 {
+                lead.insert(n.0, l);
+            }
+        }
+        self.lead = lead;
     }
 
     pub fn ranges(&self) -> &[Range] {
@@ -94,9 +136,11 @@ impl EditList {
     pub fn split(&mut self, source: Micros) -> bool {
         match self.clip_at(source) {
             Some(i) if self.keep[i].0 < source => {
+                let before = self.clone();
                 let r = self.keep[i];
                 self.keep[i] = Range(r.0, source);
                 self.keep.insert(i + 1, Range(source, r.1));
+                self.carry_lead(&before);
                 true
             }
             _ => false,
@@ -142,6 +186,7 @@ impl EditList {
             }
             edit.keep.remove(index);
         }
+        edit.carry_lead(self);
         Some(edit)
     }
 
@@ -189,7 +234,9 @@ impl EditList {
     pub fn keep_only(&mut self, pieces: Vec<Range>) {
         let pieces: Vec<Range> = pieces.into_iter().filter(|p| !p.is_empty()).collect();
         if !pieces.is_empty() {
+            let before = self.clone();
             self.keep = pieces;
+            self.carry_lead(&before);
         }
     }
 
@@ -203,6 +250,7 @@ impl EditList {
         if end <= start {
             return;
         }
+        let before = self.clone();
         let mut out = Vec::with_capacity(self.keep.len() + 1);
         for &r in &self.keep {
             if r.1 <= start || r.0 >= end {
@@ -217,6 +265,7 @@ impl EditList {
             }
         }
         self.keep = out;
+        self.carry_lead(&before);
     }
 
     /// Like [`cut`], and also cuts the pieces kept either side of the gap
@@ -264,7 +313,9 @@ impl EditList {
         }
         let len: Micros = k[a..=b].iter().map(Range::len).sum();
         if len < min && b - a + 1 < k.len() {
+            let before = self.clone();
             self.keep.drain(a..=b);
+            self.carry_lead(&before);
         }
     }
 
@@ -285,32 +336,39 @@ impl EditList {
         cuts
     }
 
-    /// The stretches removed from a recording of `duration` (as [`cuts`]),
-    /// each with where it would come back: at the end of the clip it was
-    /// cut from, the one before it in the recording, or at the start of
-    /// the clip after it if nothing is before it.
-    ///
-    /// [`cuts`]: Self::cuts
+    /// The stretches removed from a recording of `duration`, each with
+    /// where it would come back: at the start of the clip it was trimmed
+    /// off (its `lead`, and all that was removed before the first clip in
+    /// the recording), or else at the end of the clip before it in the
+    /// recording. A stretch between two clips can be both: part trimmed
+    /// off the end of one, part off the start of the other.
     pub fn removed(&self, duration: Micros) -> Vec<Removed> {
-        self.cuts(duration)
-            .into_iter()
-            .filter_map(|range| {
-                let before = self.keep.iter().position(|r| r.1 == range.0);
-                let after = || self.keep.iter().position(|r| r.0 == range.1);
-                match before {
-                    Some(clip) => Some(Removed {
-                        range,
-                        clip,
-                        end: true,
-                    }),
-                    None => after().map(|clip| Removed {
-                        range,
-                        clip,
-                        end: false,
-                    }),
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        for gap in self.cuts(duration) {
+            let before = self.keep.iter().position(|r| r.1 == gap.0);
+            let after = self.keep.iter().position(|r| r.0 == gap.1);
+            let lead = match (before, after) {
+                (None, _) => gap.len(),
+                (Some(_), Some(_)) => self.lead.get(&gap.1).copied().unwrap_or(0).min(gap.len()),
+                (Some(_), None) => 0,
+            };
+            let split = gap.1 - lead;
+            if let Some(clip) = before.filter(|_| split > gap.0) {
+                out.push(Removed {
+                    range: Range(gap.0, split),
+                    clip,
+                    end: true,
+                });
+            }
+            if let Some(clip) = after.filter(|_| lead > 0) {
+                out.push(Removed {
+                    range: Range(split, gap.1),
+                    clip,
+                    end: false,
+                });
+            }
+        }
+        out
     }
 
     /// Puts back the stretch `range` removed from a recording of
@@ -430,6 +488,64 @@ mod tests {
         // Moved to the end, counting from before it moves.
         e.move_clip(0, 2);
         assert_eq!(e.ranges(), [Range(0, 40), Range(40, 100)]);
+    }
+
+    #[test]
+    fn what_is_trimmed_off_a_clip_stays_on_that_side_of_it() {
+        // [0, 4) [6, 10) [10, 20), [4, 6) removed after the first; then the
+        // second played first: [6, 10) [0, 4) [10, 20).
+        let mut e = EditList::full(20);
+        e.split(10);
+        e.cut(4, 6);
+        e.move_clip(1, 0);
+        assert_eq!(e.ranges(), [Range(6, 10), Range(0, 4), Range(10, 20)]);
+        // Trimming the last clip's start: what goes shows before it, not
+        // after [6, 10), which it follows in the recording.
+        let trimmed = e.with_clip_edge_moved(20, 2, false, 12).unwrap();
+        assert_eq!(
+            trimmed.removed(20),
+            [
+                Removed {
+                    range: Range(4, 6),
+                    clip: 1,
+                    end: true
+                },
+                Removed {
+                    range: Range(10, 12),
+                    clip: 2,
+                    end: false
+                },
+            ]
+        );
+        // Bringing some of it back takes it from there.
+        let back = trimmed.with_clip_edge_moved(20, 2, false, 11).unwrap();
+        assert_eq!(back.removed(20)[1].range, Range(10, 11));
+        assert!(!back.removed(20)[1].end);
+        // So does pulling the clip before it in the recording out over it.
+        let mut over = trimmed.clone();
+        assert!(over.bring_back(20, Range(10, 12)));
+        assert_eq!(over.ranges()[2], Range(10, 20));
+        // Deleting at a clip's start, as a selection does, is trimming it.
+        let mut del = e.clone();
+        del.delete(&[Range(10, 13)]);
+        assert_eq!(del.removed(20)[1].clip, 2);
+        assert!(!del.removed(20)[1].end);
+        // Deleting inside a clip leaves it after the first part.
+        let mut mid = e.clone();
+        mid.delete(&[Range(14, 15)]);
+        assert!(mid.removed(20).contains(&Removed {
+            range: Range(14, 15),
+            clip: 2,
+            end: true
+        }));
+        // Moving clips keeps it with its clip.
+        let mut moved = trimmed.clone();
+        moved.move_clip(2, 0);
+        assert!(moved.removed(20).contains(&Removed {
+            range: Range(10, 12),
+            clip: 0,
+            end: false
+        }));
     }
 
     #[test]
