@@ -763,9 +763,12 @@ impl App {
             }
             _ => {}
         }
-        // Being recorded more onto, or about to be: the take's save would
-        // overwrite an edit made now.
-        if self.more.borrow().as_ref() == Some(&dir) {
+        // Being recorded more onto (from the countdown on): the take's save
+        // would overwrite an edit made now. Only waiting in the panel, the
+        // recorder hasn't read it yet.
+        if self.more.borrow().as_ref() == Some(&dir)
+            && !matches!(*self.session.borrow(), Session::Idle)
+        {
             return Err(
                 "Visor is recording more onto that recording; stop or discard that first.".into(),
             );
