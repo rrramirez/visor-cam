@@ -38,11 +38,11 @@ Control the running Visor (turn on agent control in Preferences first):
 
 Edit the recording last stopped, or the one given with --folder FOLDER.
 Times are recorded seconds (or M:SS), as marks and status show them:
-  cut START END               remove START to END
+  remove START END            remove START to END, closing up the space
   trim START END              keep only START to END
-  restore                     undo all cuts, clips in recorded order
+  restore                     bring everything back, in recorded order
   open                        open it in the editor
-  frame SECONDS [--out FILE]  save the frame at SECONDS, cut or not, as a JPEG
+  frame SECONDS [--out FILE]  save the frame at SECONDS, removed or not, as a JPEG
                               (frame-SECONDS.jpg here by default)
   dead-time [--min SECONDS]   list stretches where the screen is still and
                               nothing is heard (2 seconds or longer)
@@ -87,7 +87,7 @@ pub fn run(args: &[String]) -> Option<i32> {
                 }
             });
         }
-        "cut" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
+        "remove" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
                 attach_console();
@@ -197,7 +197,7 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     let command_name = match name {
         "frame" => "view_frame",
         "dead-time" => "find_dead_time",
-        "cut" => "cut_recording",
+        "remove" => "remove_from_recording",
         "trim" => "trim_recording",
         "restore" => "restore_recording",
         _ => "open_recording",
@@ -215,11 +215,11 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
         }
     }
     match (name, times.as_slice()) {
-        ("cut" | "trim", [start, end]) => {
+        ("remove" | "trim", [start, end]) => {
             command["start_seconds"] = (*start).into();
             command["end_seconds"] = (*end).into();
         }
-        ("cut" | "trim", _) => return Err("give a START and an END time".into()),
+        ("remove" | "trim", _) => return Err("give a START and an END time".into()),
         ("frame", [at]) => command["seconds"] = (*at).into(),
         ("frame", _) => return Err("give one time".into()),
         (_, []) => {}
@@ -337,12 +337,20 @@ pub fn call(command: &Value) -> Value {
             Some("start_recording" | "list_sources") => launch_and_call(command),
             // A fresh Visor knows no last recording: only a named one helps.
             Some(
-                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
-                | "view_frame" | "find_dead_time",
+                "remove_from_recording"
+                | "trim_recording"
+                | "restore_recording"
+                | "open_recording"
+                | "view_frame"
+                | "find_dead_time",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
-                "cut_recording" | "trim_recording" | "restore_recording" | "open_recording"
-                | "view_frame" | "find_dead_time",
+                "remove_from_recording"
+                | "trim_recording"
+                | "restore_recording"
+                | "open_recording"
+                | "view_frame"
+                | "find_dead_time",
             ) => {
                 json!({
                     "ok": false,
@@ -513,9 +521,9 @@ mod tests {
     #[test]
     fn edit_commands_take_times_and_a_folder() {
         assert_eq!(
-            edit_args("cut", &args("3 1:10.5 --folder /tmp/Demo")).unwrap(),
+            edit_args("remove", &args("3 1:10.5 --folder /tmp/Demo")).unwrap(),
             json!({
-                "command": "cut_recording",
+                "command": "remove_from_recording",
                 "start_seconds": 3.0,
                 "end_seconds": 70.5,
                 "folder": "/tmp/Demo",
@@ -557,8 +565,8 @@ mod tests {
             edit_args("dead-time", &args("--min 1.5")).unwrap(),
             json!({"command": "find_dead_time", "min_seconds": 1.5})
         );
-        assert!(edit_args("cut", &args("--min 1 2 3")).is_err());
-        assert!(edit_args("cut", &args("a b")).is_err());
+        assert!(edit_args("remove", &args("--min 1 2 3")).is_err());
+        assert!(edit_args("remove", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
     }
 

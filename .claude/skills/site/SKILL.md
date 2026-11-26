@@ -44,7 +44,7 @@ Match the existing copy:
   odd count.
 - Talk about Visor as it is today on the platforms it ships on. Windows and Linux are "being
   built" until a release ships them.
-- Name UI controls the way the app does (*Blur an area*, *Split at playhead*).
+- Name UI controls the way the app does (*Blur an area*, *Add marker*).
 
 ## Constraints
 

@@ -20,8 +20,8 @@ stop_recording. Keep the video free of dead time: call pause_recording before \
 setting up something that shouldn't be seen, and as soon as a step fails or you \
 need to retry or think, then resume_recording once the next step is ready to show. \
 After stopping, find_dead_time lists stretches where nothing happens, and \
-cut_recording removes those and others that went wrong (marker times help find \
-them; view_frame shows what was on screen at a moment, to check before cutting); \
+remove_from_recording removes those and others that went wrong (marker times help find \
+them; view_frame shows what was on screen at a moment, to check before removing it); \
 then open_recording hands the result to the user. \
 Visor's own windows are never recorded, but your terminal or chat window is if it's \
 on the recorded screen: record a single window or app to keep it out. \
@@ -139,29 +139,29 @@ fn tool_list() -> Value {
             },
         },
         {
-            "name": "cut_recording",
-            "description": "Removes part of a recording. Times are in recorded seconds, as add_marker and status report them, and earlier cuts don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the cut shows there and the user can undo it. Anything under 0.25 s it leaves kept between it and another cut, or an end, is cut too, unless that is all that's left. Returns what is kept: the clips in the order they play, which the user may have changed in the editor.",
+            "name": "remove_from_recording",
+            "description": "Removes part of a recording, closing up the space it leaves. Times are in recorded seconds, as add_marker and status report them, and earlier removals don't shift them. Edits the recording last stopped unless folder is given. If it's open in Visor's editor the change shows there and the user can undo it or bring the part back. Anything under 0.25 s it leaves kept between it and another removed part, or an end, is removed too, unless that is all that's left. Returns what is kept: the clips in the order they play, which the user may have changed in the editor.",
             "inputSchema": edit_schema(),
         },
         {
             "name": "trim_recording",
-            "description": "Keeps only the part of a recording between start_seconds and end_seconds (recorded seconds, like cut_recording), dropping the rest. Like cut_recording, it also cuts anything under 0.25 s it leaves kept next to another cut.",
+            "description": "Keeps only the part of a recording between start_seconds and end_seconds (recorded seconds, like remove_from_recording), removing the rest. Like remove_from_recording, it also removes anything under 0.25 s it leaves kept next to another removed part.",
             "inputSchema": edit_schema(),
         },
         {
             "name": "restore_recording",
-            "description": "Undoes all cuts and trims of a recording, and plays its clips in the order recorded again.",
+            "description": "Brings back everything removed or trimmed from a recording, and plays it in the order recorded again, as one clip.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
         },
         {
             "name": "view_frame",
-            "description": "Shows the frame of a recording at a moment, as the exported video would (camera bubble included), even if that moment was cut. Use it to see what happened around a marker, or to check a stretch before cutting it.",
+            "description": "Shows the frame of a recording at a moment, as the exported video would (camera bubble included), even if that moment was removed. Use it to see what happened around a marker, or to check a stretch before removing it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "seconds": {
                         "type": "number",
-                        "description": "When, in recorded seconds, as add_marker and cut_recording use them.",
+                        "description": "When, in recorded seconds, as add_marker and remove_from_recording use them.",
                     },
                     "folder": folder_schema(),
                 },
@@ -171,7 +171,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "find_dead_time",
-            "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for cut_recording. Each leaves a moment on either side of what happens. Takes about a second per minute of recording.",
+            "description": "Lists the stretches of a recording where the screen stays still and nothing is heard, in recorded seconds, ready for remove_from_recording. Each leaves a moment on either side of what happens. Takes about a second per minute of recording.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
