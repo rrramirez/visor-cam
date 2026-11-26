@@ -7,6 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
+- **Record more:** forgot a step? In the editor, *Record more* (**R**) records another piece with the same screen, window or area, camera and microphone, right after a countdown, and brings you back with it as the last clip, ready to drag where it belongs. Undo still works on what you did before. A piece of another size fits in the frame with black bars, discarding it leaves the recording as it was, and a crash keeps what was recorded. If a source is gone (a closed window, an unplugged camera), the recorder opens so you can pick another. Agents can do it too: `start_recording` with `folder`, or `visor start --folder`.
 - **Clips:** cut the video into clips with **C** or **⌘B** (*Cut at playhead*) and drag a clip to play it somewhere else, while the others make room; blurs and markers go with it, and chapters follow the new order. Above the clips, a ruler is where you click to seek and drag to select. What you delete stays on the timeline, dimmed, next to the clip it came from, and moves with it; playing and exporting skip it.
 - **Bring back what you deleted:** hover a dimmed part and click *Bring back* to put just that part back, without undoing everything you did since. You can still drag a clip's edge to bring back some of it, and *Restore the whole recording* puts everything back as it was recorded.
 

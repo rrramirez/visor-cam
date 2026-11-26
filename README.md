@@ -68,6 +68,9 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
      what was deleted next to it; the preview shows the clip's first or last
      frame. Click an edge, then **← →** move it a frame at a time (**⇧** for
      10). Dragging an edge onto the clip's other edge removes the clip.
+   - **Record more** (**R**): forgot something? Record another piece with the
+     same screen, camera and mic; the editor comes back with it as the last
+     clip, ready to drag where it belongs.
    - *Remove pauses* finds every stretch of 2 seconds or more where the screen
      stays still and nothing is heard, and removes them all in one step. It
      leaves a moment around what happens, and ignores a spinner or a clock
@@ -122,6 +125,7 @@ visor pause; visor resume
 visor stop                                   # prints the folder and markers
 visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
+visor start --folder "$FOLDER"               # record more onto a stopped recording
 visor remove 12 19.5                         # remove 0:12–0:19.5 (recorded time)
 visor trim 2 1:05                            # keep only 0:02–1:05
 visor restore                                # bring everything back, in recorded order
