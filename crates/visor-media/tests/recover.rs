@@ -121,3 +121,60 @@ fn project_written_at_start_without_duration_is_recovered() {
         p.duration_us
     );
 }
+
+#[test]
+fn a_take_cut_short_by_a_crash_is_recovered_as_a_clip_at_the_end() {
+    use visor_core::{Track, Tracks};
+    let (dir, mut project) = common::project("recover-take", 2);
+    let before = project.clone();
+    let track = |file: &str| {
+        Some(Track {
+            file: file.into(),
+            width: None,
+            height: None,
+            fps: None,
+        })
+    };
+    // A take being recorded when Visor crashed: its tracks written, the
+    // project still saying it's being recorded.
+    common::write_video(&dir.join("screen-2.mp4"), 360, 360, 30, 128);
+    common::write_tone(&dir.join("mic-2.m4a"), 1_000_000, 0.4);
+    project.begin_take(Tracks {
+        screen: track("screen-2.mp4"),
+        mic: track("mic-2.m4a"),
+        camera: track("camera-2.mp4"),
+        ..Tracks::default()
+    });
+    project.save(&dir).unwrap();
+    assert!(recover::is_interrupted(&dir));
+
+    let p = recover::load_or_recover(&dir).unwrap();
+    assert!(!recover::is_interrupted(&dir));
+    let take = &p.takes[0];
+    let secs = take.duration_us as f64 / 1e6;
+    assert!((0.9..1.1).contains(&secs), "{secs}");
+    assert_eq!(take.tracks.screen.as_ref().unwrap().width, Some(360));
+    assert!(take.tracks.camera.is_none(), "missing camera file dropped");
+    assert!(take.tracks.mic.is_some());
+    assert_eq!(p.duration_us, before.duration_us + take.duration_us);
+    assert_eq!(
+        p.edit.ranges().last(),
+        Some(&visor_core::Range(before.duration_us, p.duration_us))
+    );
+    // The first piece as it was.
+    assert_eq!(
+        (p.tracks.clone(), p.edit.ranges()[0]),
+        (before.tracks.clone(), before.edit.ranges()[0])
+    );
+
+    // Nothing readable in a take: it's dropped, the recording as before.
+    let mut q = before.clone();
+    q.begin_take(Tracks {
+        screen: track("screen-3.mp4"),
+        ..Tracks::default()
+    });
+    q.save(&dir).unwrap();
+    assert!(recover::is_interrupted(&dir));
+    assert_eq!(recover::load_or_recover(&dir).unwrap(), before);
+    common::cleanup(&dir);
+}
