@@ -454,7 +454,7 @@ export component Editor inherits Window {
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
             if ((event.text == "r" || event.text == "R") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
-                if (!event.repeat && !root.exporting) { root.record-more(); }
+                if (!event.repeat && !root.exporting && !root.finding-pauses) { root.record-more(); }
                 return accept;
             }
             // C, or ⌘B as in other editors (B alone blurs).
@@ -734,7 +734,7 @@ export component Editor inherits Window {
                                     }
                                     SideButton {
                                         text: "Record more"; icon: Icons.record; shortcut: "R";
-                                        enabled: !root.exporting;
+                                        enabled: !root.exporting && !root.finding-pauses;
                                         clicked => { root.record-more(); keys.focus(); }
                                     }
                                     SideButton {

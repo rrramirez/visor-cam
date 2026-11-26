@@ -70,8 +70,16 @@ fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Mar
                 m.extend(markers.iter().cloned());
                 m.sort_by_key(|m| m.at_us);
             }
-            Step::Blurs(_) => {}
+            Step::Blurs(b) => stretch_blurs(b, clip),
         }
+    }
+}
+
+/// Blurs lasting to the take `clip`'s start go on to its end, as they
+/// would over more of what they hide.
+fn stretch_blurs(blurs: &mut [Blur], clip: visor_core::Range) {
+    for b in blurs.iter_mut().filter(|b| b.end_us >= clip.0) {
+        b.end_us = b.end_us.max(clip.1);
     }
 }
 
@@ -198,14 +206,15 @@ impl EditorWindow {
         let _ = self.ui.show();
     }
 
-    /// Whether an export is running (nothing else may write the recording).
-    pub fn is_exporting(&self) -> bool {
-        self.export.borrow().is_some()
+    /// Whether an export or a search for pauses is running: recording
+    /// more waits, as either acts on the recording without the take.
+    pub fn is_busy(&self) -> bool {
+        self.export.borrow().is_some() || self.ui.get_finding_pauses()
     }
 
     /// Hides the editor to record more onto its recording.
     fn record_more(&self) {
-        if self.is_exporting() {
+        if self.is_busy() {
             return;
         }
         self.control().pause();
@@ -260,6 +269,17 @@ impl EditorWindow {
         );
         let clips = project.edit.ranges().len();
         *self.project.borrow_mut() = project;
+        if let Some(clip) = clip {
+            let stretched = {
+                let mut p = self.project.borrow_mut();
+                let before = p.blurs.clone();
+                stretch_blurs(&mut p.blurs, clip);
+                p.blurs != before
+            };
+            if stretched {
+                self.save();
+            }
+        }
         *self.nudged.borrow_mut() = None;
         self.refresh_edit_ui();
         self.load_previews();
@@ -1847,7 +1867,22 @@ mod tests {
             Step::Blurs(Vec::new()),
             Step::Edit(cut),
         ];
+        let blur = |start_us, end_us| Blur {
+            start_us,
+            end_us,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        steps[2] = Step::Blurs(vec![blur(0, 20), blur(2, 6)]);
         add_take_to_steps(&mut steps, Range(20, 25), &[marker(22)]);
+        // A blur lasting to the end goes on over the take.
+        let Step::Blurs(b) = &steps[2] else { panic!() };
+        assert_eq!(
+            b.iter().map(|b| (b.start_us, b.end_us)).collect::<Vec<_>>(),
+            [(0, 25), (2, 6)]
+        );
         let Step::Edit(e) = &steps[0] else { panic!() };
         assert_eq!(e.ranges(), [Range(0, 20), Range(20, 25)]);
         let Step::Markers(m) = &steps[1] else {

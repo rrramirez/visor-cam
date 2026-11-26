@@ -92,6 +92,9 @@ pub struct App {
     /// that is being recorded onto (see `record_more`). Its editor is
     /// hidden meanwhile.
     more: RefCell<Option<PathBuf>>,
+    /// A take cancelled while its recorder was still starting: its editor
+    /// comes back once that recorder is discarded.
+    more_cancelled: RefCell<Option<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -183,6 +186,7 @@ impl App {
             quit_after_start: std::cell::Cell::new(None),
             agent: RefCell::default(),
             more: RefCell::default(),
+            more_cancelled: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });
@@ -1510,8 +1514,12 @@ impl App {
             matches!(&*self.session.borrow(), Session::Starting { id, .. } if *id == start_id);
         if !current {
             // This start was cancelled; throw away what it created.
-            if let Ok(r) = result {
-                discard_in_background(r);
+            let more = self.more_cancelled.borrow_mut().take();
+            match (result, more) {
+                (Ok(r), Some(dir)) => discard_take_then_show(r, dir),
+                (Ok(r), None) => discard_in_background(r),
+                (Err(_), Some(dir)) => self.show_hidden_editor(&dir),
+                (Err(_), None) => {}
             }
             return;
         }
@@ -1707,19 +1715,25 @@ impl App {
                 if let Some((ui, _)) = countdown {
                     let _ = ui.hide();
                 }
+                if let Some(dir) = self.more.borrow_mut().take() {
+                    // Back to the editor it was recording more from, once
+                    // the take is gone and the project put back as it was,
+                    // so nothing overwrites an edit made meanwhile.
+                    *self.session.borrow_mut() = Session::Idle;
+                    self.release_devices();
+                    self.refresh_tray();
+                    self.agent_start_finished(Err("The recording was cancelled.".into()));
+                    match recorder {
+                        Some(r) => discard_take_then_show(r, dir),
+                        // Still starting: on_recorder_ready discards it.
+                        None => *self.more_cancelled.borrow_mut() = Some(dir),
+                    }
+                    return;
+                }
                 if let Some(r) = recorder {
                     discard_in_background(r);
                 }
                 // A recorder still starting is discarded by on_recorder_ready.
-                if let Some(dir) = self.more.borrow_mut().take() {
-                    // Back to the editor it was recording more from.
-                    *self.session.borrow_mut() = Session::Idle;
-                    self.release_devices();
-                    self.refresh_tray();
-                    self.show_hidden_editor(&dir);
-                    self.agent_start_finished(Err("The recording was cancelled.".into()));
-                    return;
-                }
                 self.return_to_panel(None);
                 return;
             }
@@ -1855,7 +1869,7 @@ impl App {
         self.open_panel();
         match self.choose_saved_sources(&dir) {
             Ok(()) => self.record_when_ready(None),
-            Err(e) => self.set_panel_error(&e),
+            Err((e, _)) => self.set_panel_error(&e),
         }
     }
 
@@ -2076,6 +2090,17 @@ fn is_transient(e: &std::io::Error) -> bool {
 }
 
 /// Discards a recorder without blocking the UI thread on its writer threads.
+/// Discards a take being recorded more onto the recording in `dir`, then
+/// shows its editor again.
+fn discard_take_then_show(recorder: Recorder, dir: PathBuf) {
+    std::thread::spawn(move || {
+        if let Err(e) = recorder.discard() {
+            tracing::warn!("discarding a cancelled take failed: {e:#}");
+        }
+        post(move |app| app.show_hidden_editor(&dir));
+    });
+}
+
 fn discard_in_background(recorder: Recorder) {
     std::thread::spawn(move || {
         if let Err(e) = recorder.discard() {

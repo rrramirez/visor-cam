@@ -293,33 +293,36 @@ impl App {
             None => None,
         };
         if let Some(dir) = &more
-            && self.editor_for(dir).is_some_and(|e| e.is_exporting())
+            && self.editor_for(dir).is_some_and(|e| e.is_busy())
         {
             return send(
                 reply,
-                Err("That recording is being exported; try again once it's done.".into()),
+                Err("That recording is being exported or searched for pauses; \
+                     try again once that's done."
+                    .into()),
             );
+        }
+        // A new recording, not more of one the user was about to record
+        // more onto from the panel.
+        if more.is_none()
+            && let Some(dir) = self.more.borrow_mut().take()
+        {
+            self.show_hidden_editor(&dir);
         }
         // Cleared first: opening the panel reopens the user's devices and
         // says if one of those fails.
         self.set_panel_error("");
         self.open_panel();
+        // The user's own choices, put back if this start fails.
+        let users = self.panel_choices();
         if let Some(dir) = &more {
             // Its own sources, unless the arguments say otherwise.
-            const CHOICES: [&str; 9] = [
-                "target",
-                "display",
-                "window",
-                "app",
-                "area",
-                "camera",
-                "mic",
-                "system_audio",
-                "system_audio_app",
-            ];
-            if let Err(e) = self.choose_saved_sources(dir)
-                && !CHOICES.iter().any(|k| arg(args, k).is_some())
+            if let Err((e, missing)) = self.choose_saved_sources(dir)
+                && !replaces_missing(&missing, args)
             {
+                if let Some(users) = users {
+                    self.restore_choices(users);
+                }
                 return send(
                     reply,
                     Err(format!(
@@ -329,7 +332,15 @@ impl App {
             }
         }
         if let Err(e) = self.apply_agent_choices(args) {
+            if more.is_some()
+                && let Some(users) = users
+            {
+                self.restore_choices(users);
+            }
             return send(reply, Err(e));
+        }
+        if more.is_some() {
+            self.agent.borrow_mut().undo = users;
         }
         if let Some(dir) = more {
             if let Some(editor) = self.editor_for(&dir) {
@@ -668,26 +679,29 @@ impl App {
         format!("{why} To record without it, pass {arg} \"none\".")
     }
 
-    /// The recording an edit or open command is about: its `folder`, or
-    /// the one the agent last stopped. Only recordings directly in the
-    /// recordings folder, and not one being recorded.
     /// Sets the panel to record more onto the recording in `dir` with what
     /// it was recorded from. Err says what is gone (the rest is chosen), or
     /// that it never saved what it was recorded from.
-    pub(super) fn choose_saved_sources(&self, dir: &Path) -> Result<(), String> {
-        let project = visor_core::Project::load(dir).map_err(|e| e.to_string())?;
+    pub(super) fn choose_saved_sources(
+        &self,
+        dir: &Path,
+    ) -> Result<(), (String, Vec<&'static str>)> {
+        // What a recording that saved nothing has gone missing.
+        const ALL: [&str; 3] = ["the display", "the camera", "the microphone"];
+        let project = visor_core::Project::load(dir).map_err(|e| (e.to_string(), ALL.to_vec()))?;
         let Some(saved) = &project.sources else {
-            return Err(
+            return Err((
                 "This recording was made before Visor kept what it recorded from: \
                  choose what to record more from."
                     .into(),
-            );
+                ALL.to_vec(),
+            ));
         };
         let (choices, missing) = {
             let panel = self.panel.borrow();
             let p = panel
                 .as_ref()
-                .ok_or("The recorder panel didn't open.".to_string())?;
+                .ok_or(("The recorder panel didn't open.".to_string(), ALL.to_vec()))?;
             let cameras: Vec<&str> = p.cameras.iter().map(|c| c.id.as_str()).collect();
             let mics: Vec<&str> = p.mics.iter().map(|m| m.id.as_str()).collect();
             saved_choices(saved, &p.sources, &cameras, &mics)
@@ -700,15 +714,19 @@ impl App {
             let gone = missing.join(" and ");
             let mut gone = gone.chars();
             let first = gone.next().map(|c| c.to_uppercase().to_string());
-            return Err(format!(
+            let e = format!(
                 "{}{} it was recorded from isn't there any more: choose what to record more from.",
                 first.unwrap_or_default(),
                 gone.as_str()
-            ));
+            );
+            return Err((e, missing));
         }
-        opened
+        opened.map_err(|e| (e, Vec::new()))
     }
 
+    /// The recording an edit or open command is about: its `folder`, or
+    /// the one the agent last stopped. Only recordings directly in the
+    /// recordings folder, and not one being recorded.
     fn agent_recording(&self, args: &Value) -> Result<PathBuf, String> {
         // Its final save could overwrite the edit, and it isn't the last
         // recording yet.
@@ -1037,6 +1055,21 @@ impl App {
     }
 }
 
+/// Whether a start command's `args` pick something else for everything in
+/// `missing` (as `saved_choices` lists it): only then may recording more go
+/// on without what's gone.
+fn replaces_missing(missing: &[&str], args: &Value) -> bool {
+    let has = |keys: &[&str]| keys.iter().any(|k| arg(args, k).is_some());
+    missing.iter().all(|m| match *m {
+        "the window" | "the app" | "the display" => {
+            has(&["target", "display", "window", "app", "area"])
+        }
+        "the camera" => has(&["camera"]),
+        "the microphone" => has(&["mic"]),
+        _ => has(&["system_audio", "system_audio_app"]),
+    })
+}
+
 /// The panel choices that record from `saved` again (a recording's
 /// sources, to record more), given what can be recorded now and the ids of
 /// the cameras and mics listed in the panel; and what of it is gone, as
@@ -1209,6 +1242,31 @@ fn area_arg(args: &Value, display: &DisplayInfo) -> Result<Rect, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_arguments_that_replace_what_is_gone_do() {
+        let window_gone = ["the window"];
+        assert!(!replaces_missing(&window_gone, &json!({"camera": "none"})));
+        assert!(replaces_missing(&window_gone, &json!({"target": "screen"})));
+        assert!(replaces_missing(&window_gone, &json!({"display": 2})));
+        let both = ["the window", "the camera"];
+        assert!(!replaces_missing(&both, &json!({"window": 3})));
+        assert!(replaces_missing(
+            &both,
+            &json!({"window": 3, "camera": "none"})
+        ));
+        assert!(!replaces_missing(
+            &["the microphone"],
+            &json!({"camera": true})
+        ));
+        assert!(replaces_missing(
+            &["the microphone"],
+            &json!({"mic": "none"})
+        ));
+        let sound = ["the app whose sound was recorded"];
+        assert!(replaces_missing(&sound, &json!({"system_audio": false})));
+        assert!(replaces_missing(&[], &json!({})));
+    }
 
     #[test]
     fn saved_sources_come_back_as_panel_choices() {
