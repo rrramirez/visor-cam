@@ -231,6 +231,7 @@ impl App {
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
+            "add_video" => return self.agent_add(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -949,6 +950,112 @@ impl App {
         });
     }
 
+    /// Adds video files or other recordings at the end of a recording:
+    /// through its editor when open (the user can undo it), else copied in
+    /// off the UI thread and saved.
+    fn agent_add(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let paths: Vec<PathBuf> = match arg(args, "paths") {
+                Some(Value::Array(paths)) => paths
+                    .iter()
+                    .map(|p| p.as_str().map(PathBuf::from).ok_or("paths are paths."))
+                    .collect::<Result<_, _>>()?,
+                Some(Value::String(path)) => vec![path.into()],
+                _ => Vec::new(),
+            };
+            if paths.is_empty() {
+                return Err("Say what to add: paths, the video files or recording folders.".into());
+            }
+            for path in &paths {
+                if !path.is_absolute() {
+                    return Err(format!("{} isn't an absolute path.", path.display()));
+                }
+                if !path.exists() {
+                    return Err(format!("There's nothing at {}.", path.display()));
+                }
+            }
+            let (editor, project) = self.agent_project(&dir)?;
+            Ok((dir, paths, editor, project))
+        });
+        let (dir, paths, editor, project) = match request {
+            Ok(request) => request,
+            Err(e) => return send(reply, Err(e)),
+        };
+        if let Some(editor) = editor {
+            let (r, d) = (reply.clone(), dir.clone());
+            let answer: crate::editor::AddReply = Box::new(move |result| {
+                send(
+                    r,
+                    result.map(|(project, starts)| added_json(&d, &project, &starts, true)),
+                );
+            });
+            if let Err(e) = editor.add_videos(paths, Some(answer)) {
+                send(reply, Err(e));
+            }
+            return;
+        }
+        std::thread::spawn(move || {
+            let prepared = visor_media::import::prepare(&dir, &project, &paths).and_then(|p| {
+                p.copy(
+                    &dir,
+                    &mut |_| {},
+                    &std::sync::atomic::AtomicBool::new(false),
+                )?;
+                Ok(p)
+            });
+            post(move |app| app.agent_added(dir, prepared, reply));
+        });
+    }
+
+    /// Copied in for an agent with no editor open: adds it, if the
+    /// recording can still be changed.
+    fn agent_added(
+        &self,
+        dir: PathBuf,
+        prepared: anyhow::Result<visor_media::import::Prepared>,
+        reply: Reply,
+    ) {
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
+        };
+        let remove_copies = |prepared: &visor_media::import::Prepared| {
+            for name in prepared.files() {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        };
+        if let Err(e) = self.agent_recording(&json!({"folder": dir.display().to_string()})) {
+            remove_copies(&prepared);
+            return send(reply, Err(e));
+        }
+        // Opened in the meantime: added there, to undo.
+        if let Some(editor) = self.editor_for(&dir) {
+            let starts = editor.add_prepared(prepared);
+            return send(
+                reply,
+                Ok(added_json(&dir, &editor.project(), &starts, true)),
+            );
+        }
+        let mut project = match visor_core::Project::load(&dir) {
+            Ok(p) => p,
+            Err(e) => {
+                remove_copies(&prepared);
+                return send(reply, Err(e.to_string()));
+            }
+        };
+        let starts: Vec<Micros> = prepared
+            .additions
+            .iter()
+            .cloned()
+            .map(|a| project.add(a))
+            .collect();
+        if let Err(e) = project.save(&dir) {
+            remove_copies(&prepared);
+            return send(reply, Err(format!("Couldn't save the recording: {e}")));
+        }
+        send(reply, Ok(added_json(&dir, &project, &starts, false)));
+    }
+
     /// Opens a recording in the editor for the user.
     fn agent_open(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
@@ -1084,6 +1191,35 @@ impl App {
 /// Whether a start command's `args` pick something else for everything in
 /// `missing` (as `saved_choices` lists it): only then may recording more go
 /// on without what's gone.
+/// The reply to `add_video`: where each addition landed in recorded time,
+/// and what's kept now.
+fn added_json(
+    dir: &Path,
+    project: &visor_core::Project,
+    starts: &[Micros],
+    editor_open: bool,
+) -> Value {
+    let ends = starts
+        .iter()
+        .skip(1)
+        .copied()
+        .chain(std::iter::once(project.duration_us));
+    let added: Vec<Value> = starts
+        .iter()
+        .zip(ends)
+        .map(|(&a, b)| json!({"start_seconds": seconds(a), "end_seconds": seconds(b)}))
+        .collect();
+    json!({
+        "folder": dir.display().to_string(),
+        "added": added,
+        "recorded_seconds": seconds(project.duration_us),
+        "kept_seconds": seconds(project.edit.duration()),
+        "video_seconds": seconds(project.output_duration()),
+        "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
+        "editor_open": editor_open,
+    })
+}
+
 fn replaces_missing(missing: &[&str], args: &Value) -> bool {
     let has = |keys: &[&str]| keys.iter().any(|k| arg(args, k).is_some());
     missing.iter().all(|m| match *m {

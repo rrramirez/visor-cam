@@ -1423,6 +1423,12 @@ impl EditorWindow {
         }
     }
 
+    /// Adds what was copied in (for an agent, while the editor wasn't
+    /// open), as one step to undo; returns where each starts.
+    pub fn add_prepared(&self, prepared: visor_media::import::Prepared) -> Vec<Micros> {
+        self.apply_addition(prepared)
+    }
+
     /// Adds what was copied in, as one step to undo; returns where each
     /// starts in source time.
     fn apply_addition(&self, prepared: visor_media::import::Prepared) -> Vec<Micros> {

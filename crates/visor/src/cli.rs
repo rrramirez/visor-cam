@@ -44,6 +44,8 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   trim START END              keep only START to END
   restore                     bring everything back, in recorded order
   open                        open it in the editor
+  add PATH...                 add video files (MP4, MOV, M4V, MKV, WebM) or other
+                              Visor recordings (their folders) at its end
   frame SECONDS [--out FILE]  save the frame at SECONDS, removed or not, as a JPEG
                               (frame-SECONDS.jpg here by default)
   dead-time [--min SECONDS]   list stretches where the screen is still and
@@ -89,6 +91,14 @@ pub fn run(args: &[String]) -> Option<i32> {
                 }
             });
         }
+        "add" => match add_args(rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor add: {e}\n\n{USAGE}");
+                return Some(2);
+            }
+        },
         "remove" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
@@ -231,6 +241,24 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
+fn add_args(args: &[String]) -> Result<Value, String> {
+    let mut command = json!({"command": "add_video"});
+    let mut paths = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--folder" {
+            command["folder"] = args.next().ok_or("--folder needs a value")?.as_str().into();
+        } else {
+            paths.push(arg.clone());
+        }
+    }
+    if paths.is_empty() {
+        return Err("give the video files or recordings to add".into());
+    }
+    command["paths"] = paths.into();
+    Ok(command)
+}
+
 /// `view_frame`'s command, and where to save the frame if not the default.
 fn frame_args(args: &[String]) -> Result<(Value, Option<String>), String> {
     let mut rest = Vec::new();
@@ -345,7 +373,8 @@ pub fn call(command: &Value) -> Value {
                 | "restore_recording"
                 | "open_recording"
                 | "view_frame"
-                | "find_dead_time",
+                | "find_dead_time"
+                | "add_video",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
                 "remove_from_recording"
@@ -378,21 +407,36 @@ fn with_absolute_folder(command: &Value) -> Value {
                 args.remove("folder");
             }
             Some(Value::String(folder)) => {
-                let home = |rest: &str| dirs::home_dir().map(|h| h.join(rest));
-                let folder = match folder.strip_prefix("~/") {
-                    Some(rest) => home(rest),
-                    None if folder == "~" => home(""),
-                    None => None,
-                }
-                .unwrap_or_else(|| folder.into());
-                if let Ok(folder) = std::path::absolute(folder) {
-                    args.insert("folder".into(), folder.display().to_string().into());
-                }
+                let folder = absolute(folder);
+                args.insert("folder".into(), folder.into());
             }
             _ => {}
         }
+        // Videos and recordings to add, likewise.
+        if let Some(Value::Array(paths)) = args.get_mut("paths") {
+            for p in paths {
+                if let Value::String(path) = p {
+                    *p = absolute(path).into();
+                }
+            }
+        }
     }
     command
+}
+
+/// `path` resolved here, a leading `~` expanded.
+fn absolute(path: &str) -> String {
+    let home = |rest: &str| dirs::home_dir().map(|h| h.join(rest));
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => home(rest),
+        None if path == "~" => home(""),
+        None => None,
+    }
+    .unwrap_or_else(|| path.into());
+    std::path::absolute(&expanded)
+        .unwrap_or(expanded)
+        .display()
+        .to_string()
 }
 
 fn launch_and_call(command: &Value) -> Value {
@@ -571,6 +615,29 @@ mod tests {
         assert!(edit_args("remove", &args("--min 1 2 3")).is_err());
         assert!(edit_args("remove", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
+    }
+
+    #[test]
+    fn add_takes_videos_and_recordings_to_add() {
+        assert_eq!(
+            add_args(&args("intro.mp4 /tmp/Other --folder /tmp/Demo")).unwrap(),
+            json!({
+                "command": "add_video",
+                "paths": ["intro.mp4", "/tmp/Other"],
+                "folder": "/tmp/Demo",
+            })
+        );
+        assert!(add_args(&args("--folder /tmp/Demo")).is_err());
+        // Resolved here, as Visor runs in its own directory.
+        let command = with_absolute_folder(&add_args(&args("intro.mp4 ~/Movies/a.mov")).unwrap());
+        let paths: Vec<&str> = command["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect();
+        assert!(paths.iter().all(|p| std::path::Path::new(p).is_absolute()));
+        assert!(paths[1].ends_with("Movies/a.mov") && !paths[1].contains('~'));
     }
 
     #[test]
