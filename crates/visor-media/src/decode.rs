@@ -24,6 +24,25 @@ pub(crate) fn open_input(path: &Path) -> anyhow::Result<format::context::Input> 
         .with_context(|| format!("opening {}", path.display()))
 }
 
+/// How far a video stream says to turn its frames, clockwise, to show them
+/// upright (a phone's): 0, 90, 180 or 270 degrees.
+pub(crate) fn rotation(params: &ffmpeg::codec::Parameters) -> u32 {
+    // SAFETY: the parameters are valid; a display matrix is 9 i32s.
+    let angle = unsafe {
+        let par = params.as_ptr();
+        let sd = ffmpeg::ffi::av_packet_side_data_get(
+            (*par).coded_side_data,
+            (*par).nb_coded_side_data,
+            ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+        );
+        if sd.is_null() || (*sd).size < 36 {
+            return 0;
+        }
+        ffmpeg::ffi::av_display_rotation_get((*sd).data as *const i32)
+    };
+    clockwise(angle)
+}
+
 /// Prepares `f` to be completely overwritten with a `fmt` `w` x `h` image:
 /// keeps its buffer if it fits and nothing else (an encoder, a filter, a
 /// frame in flight) still holds it, else gives it a new one.
@@ -63,6 +82,8 @@ struct Span {
     /// the last span has no end.
     end: Micros,
     path: Option<PathBuf>,
+    /// The file's time at `start`.
+    offset: Micros,
 }
 
 /// Spans from a track's parts. The last one is open ended, so a frame that
@@ -74,6 +95,7 @@ fn spans(dir: &Path, parts: &[Part]) -> Vec<Span> {
             start: p.start,
             end: p.end,
             path: p.file.as_ref().map(|f| dir.join(f)),
+            offset: p.offset,
         })
         .collect();
     if let Some(last) = spans.last_mut() {
@@ -95,6 +117,8 @@ struct VideoFile {
     time_base: Rational,
     decoded: frame::Video,
     eof: bool,
+    /// How far to turn its frames to show them upright ([`rotation`]).
+    rotation: u32,
 }
 
 impl VideoFile {
@@ -106,6 +130,7 @@ impl VideoFile {
             .best(media::Type::Video)
             .context("no video stream")?;
         let (index, time_base) = (stream.index(), stream.time_base());
+        let rotation = rotation(&stream.parameters());
         let mut ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
         ctx.set_threading(ffmpeg::threading::Config {
             kind: ffmpeg::threading::Type::Frame,
@@ -119,7 +144,18 @@ impl VideoFile {
             time_base,
             decoded: frame::Video::empty(),
             eof: false,
+            rotation,
         })
+    }
+
+    /// Its frames' size as shown.
+    fn shown_size(&self) -> (u32, u32) {
+        let (w, h) = (self.decoder.width(), self.decoder.height());
+        if self.rotation % 180 == 90 {
+            (h, w)
+        } else {
+            (w, h)
+        }
     }
 
     fn duration(&self) -> Micros {
@@ -142,7 +178,8 @@ impl VideoFile {
             if self.decoder.receive_frame(&mut self.decoded).is_ok() {
                 let pts = self.decoded.timestamp().or(self.decoded.pts()).unwrap_or(0);
                 let at = to_micros(pts, self.time_base);
-                let raw = std::mem::replace(&mut self.decoded, frame::Video::empty());
+                let mut raw = std::mem::replace(&mut self.decoded, frame::Video::empty());
+                set_frame_rotation(&mut raw, self.rotation);
                 return Ok(Some((at, raw)));
             }
             if self.eof {
@@ -178,6 +215,8 @@ pub struct VideoReader {
     scale_threads: usize,
     /// A frame scaled to fit, before its bars are added.
     fitted: frame::Video,
+    /// A frame scaled, before it's turned upright.
+    turned: frame::Video,
 }
 
 // SAFETY: the reader exclusively owns its FFmpeg objects, none of which has
@@ -193,6 +232,7 @@ impl VideoReader {
             start: 0,
             end: Micros::MAX,
             path: Some(path.to_path_buf()),
+            offset: 0,
         }];
         Ok(Self::new(spans, 0, file, duration, target))
     }
@@ -221,7 +261,7 @@ impl VideoReader {
         duration: Micros,
         target: Option<(format::Pixel, u32, u32)>,
     ) -> Self {
-        let size = (file.decoder.width(), file.decoder.height());
+        let size = file.shown_size();
         Self {
             spans,
             pos: first,
@@ -233,6 +273,7 @@ impl VideoReader {
             scale_flags: scaling::Flags::BILINEAR,
             scale_threads: 0,
             fitted: frame::Video::empty(),
+            turned: frame::Video::empty(),
         }
     }
 
@@ -275,7 +316,8 @@ impl VideoReader {
         };
         let local = if j == i { at - self.spans[j].start } else { 0 };
         self.pos = j;
-        self.open_pos()?.seek(local)
+        let offset = self.spans[j].offset;
+        self.open_pos()?.seek(local + offset)
     }
 
     /// The file of the span being read, opened from its start if it isn't.
@@ -300,9 +342,11 @@ impl VideoReader {
     pub(crate) fn next_decoded(&mut self) -> anyhow::Result<Option<(Micros, frame::Video)>> {
         while self.pos < self.spans.len() {
             if self.spans[self.pos].path.is_some() {
-                let Span { start, end, .. } = self.spans[self.pos];
+                let Span {
+                    start, end, offset, ..
+                } = self.spans[self.pos];
                 if let Some((t, raw)) = self.open_pos()?.next_decoded()? {
-                    let at = start.saturating_add(t);
+                    let at = start.saturating_add(t.saturating_sub(offset));
                     if at < end {
                         return Ok(Some((at, raw)));
                     }
@@ -357,32 +401,60 @@ impl VideoReader {
         };
         let d = raw;
         let input = (d.format(), d.width(), d.height());
+        // Only formats it can paint bars in can be turned.
+        let turn = bars(fmt).map_or(0, |_| frame_rotation(d));
+        let shown = if turn % 180 == 90 {
+            (d.height(), d.width())
+        } else {
+            (d.width(), d.height())
+        };
         let fit = match bars(fmt) {
-            Some(_) => fit_inside((d.width(), d.height()), (w, h)),
+            Some(_) => fit_inside(shown, (w, h)),
             None => (w, h),
+        };
+        let scaled = if turn % 180 == 90 {
+            (fit.1, fit.0)
+        } else {
+            fit
         };
         if self
             .scaler
             .as_ref()
-            .is_none_or(|(s, to)| s.input() != input || *to != fit)
+            .is_none_or(|(s, to)| s.input() != input || *to != scaled)
         {
             let scaler = Scaler::new(
                 input,
-                (fmt, fit.0, fit.1),
+                (fmt, scaled.0, scaled.1),
                 self.scale_flags,
                 self.scale_threads,
             )?;
-            self.scaler = Some((scaler, fit));
+            self.scaler = Some((scaler, scaled));
         }
         let scaler = &mut self.scaler.as_mut().unwrap().0;
-        if fit == (w, h) {
-            reuse_or_alloc(out, fmt, w, h);
-            scaler.run(d, out)?;
-        } else {
-            reuse_or_alloc(&mut self.fitted, fmt, fit.0, fit.1);
-            scaler.run(d, &mut self.fitted)?;
-            reuse_or_alloc(out, fmt, w, h);
-            letterbox(&self.fitted, out);
+        match (turn, fit == (w, h)) {
+            (0, true) => {
+                reuse_or_alloc(out, fmt, w, h);
+                scaler.run(d, out)?;
+            }
+            (0, false) => {
+                reuse_or_alloc(&mut self.fitted, fmt, fit.0, fit.1);
+                scaler.run(d, &mut self.fitted)?;
+                reuse_or_alloc(out, fmt, w, h);
+                letterbox(&self.fitted, out);
+            }
+            (_, fills) => {
+                reuse_or_alloc(&mut self.turned, fmt, scaled.0, scaled.1);
+                scaler.run(d, &mut self.turned)?;
+                if fills {
+                    reuse_or_alloc(out, fmt, w, h);
+                    rotate(&self.turned, out, turn);
+                } else {
+                    reuse_or_alloc(&mut self.fitted, fmt, fit.0, fit.1);
+                    rotate(&self.turned, &mut self.fitted, turn);
+                    reuse_or_alloc(out, fmt, w, h);
+                    letterbox(&self.fitted, out);
+                }
+            }
         }
         out.set_pts(d.pts());
         Ok(())
@@ -404,17 +476,78 @@ fn bars(fmt: format::Pixel) -> Option<&'static [(usize, u32, &'static [u8])]> {
 /// The even size that a `src` frame scales to inside `into` keeping its
 /// shape; `into` itself when the shapes are within 1%.
 fn fit_inside(src: (u32, u32), into: (u32, u32)) -> (u32, u32) {
-    let (sw, sh) = (u64::from(src.0), u64::from(src.1.max(1)));
-    let (w, h) = (u64::from(into.0), u64::from(into.1));
-    let (a, b) = (sw * h, w * sh);
-    if a.abs_diff(b) * 100 <= b {
-        return into;
+    let (_, _, w, h) = visor_core::project::fit_rect(src, into);
+    (w, h)
+}
+
+/// Notes on a decoded frame how far it's to be turned (see [`rotation`]),
+/// as a display matrix, so it goes with the frame wherever it's converted.
+fn set_frame_rotation(f: &mut frame::Video, turn: u32) {
+    if turn == 0 || frame_rotation(f) == turn {
+        return;
     }
-    let even = |v: u64| ((v as u32) & !1).max(2);
-    if a < b {
-        (even(a / sh).min(into.0), into.1)
-    } else {
-        (into.0, even(sh * w / sw.max(1)).min(into.1))
+    // SAFETY: the frame is valid; a display matrix is 9 i32s.
+    unsafe {
+        let sd = ffmpeg::ffi::av_frame_new_side_data(
+            f.as_mut_ptr(),
+            ffmpeg::ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
+            36,
+        );
+        if !sd.is_null() {
+            ffmpeg::ffi::av_display_rotation_set((*sd).data as *mut i32, f64::from(turn));
+        }
+    }
+}
+
+/// How far a decoded frame is to be turned, clockwise, to show upright.
+fn frame_rotation(f: &frame::Video) -> u32 {
+    // SAFETY: the frame is valid; a display matrix is 9 i32s.
+    let angle = unsafe {
+        let sd = ffmpeg::ffi::av_frame_get_side_data(
+            f.as_ptr(),
+            ffmpeg::ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
+        );
+        if sd.is_null() || (*sd).size < 36 {
+            return 0;
+        }
+        ffmpeg::ffi::av_display_rotation_get((*sd).data as *const i32)
+    };
+    clockwise(angle)
+}
+
+/// A display matrix's angle (counterclockwise) as a clockwise turn of 0,
+/// 90, 180 or 270 degrees.
+fn clockwise(angle: f64) -> u32 {
+    if !angle.is_finite() {
+        return 0;
+    }
+    ((-angle / 90.0).round() as i64).rem_euclid(4) as u32 * 90
+}
+
+/// Turns `src` clockwise by `turn` (90, 180 or 270) into `out`, which has
+/// its size turned. For the formats with [`bars`].
+fn rotate(src: &frame::Video, out: &mut frame::Video, turn: u32) {
+    let planes = bars(out.format()).expect("a format with bars");
+    for (p, &(bpp, shift, _)) in planes.iter().enumerate() {
+        let sub = |v: u32| ((v + (1 << shift) - 1) >> shift) as usize;
+        let (sw, sh) = (sub(src.width()), sub(src.height()));
+        let (ow, oh) = (sub(out.width()), sub(out.height()));
+        let (sstride, ostride) = (src.stride(p), out.stride(p));
+        let from = src.data(p);
+        let to = out.data_mut(p);
+        for y in 0..oh {
+            for x in 0..ow {
+                let (sx, sy) = match turn {
+                    90 => (y, (sh - 1).saturating_sub(x)),
+                    180 => ((sw - 1).saturating_sub(x), (sh - 1).saturating_sub(y)),
+                    _ => ((sw - 1).saturating_sub(y), x),
+                };
+                let (sx, sy) = (sx.min(sw - 1), sy.min(sh - 1));
+                let s = sy * sstride + sx * bpp;
+                let o = y * ostride + x * bpp;
+                to[o..o + bpp].copy_from_slice(&from[s..s + bpp]);
+            }
+        }
     }
 }
 
@@ -591,6 +724,7 @@ impl AudioReader {
             start: 0,
             end: Micros::MAX,
             path: Some(path.to_path_buf()),
+            offset: 0,
         }];
         Ok(Self {
             spans,
@@ -630,7 +764,8 @@ impl AudioReader {
         };
         let local = if j == i { at - self.spans[j].start } else { 0 };
         self.pos = j;
-        self.open_pos()?.seek(local)
+        let offset = self.spans[j].offset;
+        self.open_pos()?.seek(local + offset)
     }
 
     fn open_pos(&mut self) -> anyhow::Result<&mut AudioFile> {
@@ -646,9 +781,11 @@ impl AudioReader {
     pub fn next_chunk(&mut self) -> anyhow::Result<Option<(Micros, Vec<f32>)>> {
         while self.pos < self.spans.len() {
             if self.spans[self.pos].path.is_some() {
-                let Span { start, end, .. } = self.spans[self.pos];
+                let Span {
+                    start, end, offset, ..
+                } = self.spans[self.pos];
                 if let Some((t, chunk)) = self.open_pos()?.next_chunk()? {
-                    let at = start.saturating_add(t);
+                    let at = start.saturating_add(t.saturating_sub(offset));
                     if at < end {
                         return Ok(Some((at, chunk)));
                     }

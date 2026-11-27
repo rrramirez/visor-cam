@@ -98,6 +98,7 @@ pub fn project(name: &str, seconds: u64) -> (PathBuf, Project) {
         width: w,
         height: h,
         fps: Some(30),
+        start_us: None,
     };
     p.tracks.screen = Some(track("screen.mp4", Some(640), Some(360)));
     p.tracks.camera = Some(track("camera.mp4", Some(320), Some(240)));
@@ -135,6 +136,7 @@ pub fn checkerboard_project(name: &str, w: u32, h: u32, seconds: u64) -> (PathBu
         width: Some(w),
         height: Some(h),
         fps: Some(FPS as u32),
+        start_us: None,
     });
     p.save(&dir).unwrap();
     (dir, p)
@@ -164,6 +166,7 @@ pub fn add_take(dir: &Path, project: &mut Project, seconds: u64, (w, h): (u32, u
         width: size.map(|s| s.0),
         height: size.map(|s| s.1),
         fps: size.map(|_| FPS as u32),
+        start_us: None,
     };
     let mut tracks = visor_core::Tracks::default();
     let screen = take_file(SCREEN_FILE, n);
@@ -180,4 +183,71 @@ pub fn add_take(dir: &Path, project: &mut Project, seconds: u64, (w, h): (u32, u
     project.begin_take(tracks);
     project.finish_take(duration, Vec::new());
     project.save(dir).unwrap();
+}
+
+/// A `w` x `h` video whose left half is bright (luma 220) and right half
+/// dark (30), to tell which way it's turned.
+pub fn write_halves(path: &Path, w: u32, h: u32, frames: u64) {
+    let mut frame = nv12(w, h, 0, 128);
+    let (wu, hu) = (w as usize, h as usize);
+    frame.planes[0].data = (0..wu * hu)
+        .map(|i| if i % wu < wu / 2 { 220 } else { 30 })
+        .collect::<Vec<u8>>()
+        .into();
+    let mut writer = VideoWriter::create(path, w, h, FPS as u32).unwrap();
+    for i in 0..frames {
+        writer.write(&frame, i * FRAME_US, false).unwrap();
+    }
+    writer.finish(frames * FRAME_US).unwrap();
+}
+
+/// Copies the streams of `inputs` into one file at `out`, as a phone or
+/// another app would have made it: its timestamps starting `offset_us` in,
+/// and the video shown turned clockwise by `rotation` degrees, if any.
+pub fn remux(inputs: &[&Path], out: &Path, offset_us: u64, rotation: Option<f64>) {
+    use ffmpeg_next::{self as ffmpeg, codec, ffi, media};
+    ffmpeg::init().unwrap();
+    let mut octx = ffmpeg::format::output(out).unwrap();
+    let mut ins = Vec::new();
+    for path in inputs {
+        let ictx = ffmpeg::format::input(path).unwrap();
+        let ist = ictx.streams().next().unwrap();
+        let (itb, params) = (ist.time_base(), ist.parameters());
+        let mut ost = octx
+            .add_stream(ffmpeg::encoder::find(codec::Id::None))
+            .unwrap();
+        ost.set_parameters(params.clone());
+        // SAFETY: the stream and its parameters are valid; the side data
+        // is a 3x3 i32 matrix, as FFmpeg expects.
+        unsafe {
+            let par = (*ost.as_mut_ptr()).codecpar;
+            (*par).codec_tag = 0;
+            if let (Some(angle), media::Type::Video) = (rotation, params.medium()) {
+                let sd = ffi::av_packet_side_data_new(
+                    &mut (*par).coded_side_data,
+                    &mut (*par).nb_coded_side_data,
+                    ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+                    9 * 4,
+                    0,
+                );
+                ffi::av_display_rotation_set((*sd).data as *mut i32, angle);
+            }
+        }
+        let oi = ost.index();
+        ins.push((ictx, itb, oi));
+    }
+    octx.write_header().unwrap();
+    for (mut ictx, itb, oi) in ins {
+        let otb = octx.stream(oi).unwrap().time_base();
+        let shift = (offset_us as i64 * i64::from(otb.1)) / (1_000_000 * i64::from(otb.0));
+        for (_, mut packet) in ictx.packets() {
+            packet.rescale_ts(itb, otb);
+            packet.set_pts(packet.pts().map(|t| t + shift));
+            packet.set_dts(packet.dts().map(|t| t + shift));
+            packet.set_position(-1);
+            packet.set_stream(oi);
+            packet.write_interleaved(&mut octx).unwrap();
+        }
+    }
+    octx.write_trailer().unwrap();
 }

@@ -1,8 +1,9 @@
-# Recording and takes
+# Recording, takes and added videos
 
-How a recording gets onto disk, and how *Record more* adds to one later
-(`crates/visor-recorder`, `visor-core` `project.rs`, `visor-media`
-`decode.rs` and `recover.rs`, the app's `record_more`).
+How a recording gets onto disk, how *Record more* adds to one later, and how
+other recordings and video files are added to it (`crates/visor-recorder`,
+`visor-core` `project.rs`, `visor-media` `decode.rs`, `import.rs` and
+`recover.rs`, the app's `record_more` and the editor's `add_videos`).
 
 ## How it works
 
@@ -25,8 +26,10 @@ loads the project, `begin_take`s a take with duration 0 and saves it, so a
 crash can be recovered; markers made during it are in the whole recording's
 time. `stop` calls `finish_take`: the take gets its length, the recording
 grows by it and it is appended as the last clip (`EditList::append`);
-blurs that lasted to the end go on over it (`stretch_blurs`), like the
-whole-video blur they usually are, so recovered and agents' takes get it too.
+blurs that lasted to the end of what was recorded here go on over it
+(`carry_blurs`, stretched, or copied over the take when added footage lies
+in between), like the whole-video blur they usually are, so recovered and
+agents' takes get it too.
 `discard` deletes only the take's files and saves the project as it was.
 
 **Reading across takes.** Everything that reads tracks goes through
@@ -67,6 +70,41 @@ cancel" hint (`can-cancel`) shows only when it took the keyboard: Slint's
 While a cancelled take is being put back (`more_cancelled`), its recording
 can't be opened, recorded more onto, or edited by agents.
 
+**Added videos.** *Add video…* (the editor's menu, a drop on the editor,
+agents' `add_video`, `visor add`) adds other Visor recordings and video
+files (MP4, MOV, M4V, MKV, WebM) at the end, as takes too. `import::prepare`
+reads each one without changing anything: a recording (a folder with
+`project.json`) becomes one take per piece of it, with its edit, markers and
+blurs (`Addition`); a file is probed (`probe_video`: a video stream Visor
+can decode, the size as shown, the time it starts, whether its sound can be
+played) and becomes one take whose screen and mic tracks name the same file.
+Each take gets the lowest number no file or take has
+(`Project::free_take_number`), past the one before it in the same addition,
+and keeps its file's extension (`screen-3.mov`). The names are kept as empty files from the
+moment they're picked (`reserve`), so a take recorded or another addition
+made meanwhile can't take them, and `copy_in` never renames onto a file
+that isn't empty. If Visor quits during a copy, opening the editor removes
+what's left (`import::leftovers`: `.partial` files, and empty take files the
+project doesn't name), unless a copy into it, an agent's or a closed
+editor's, is still running (`App::copies`). `Prepared::copy` copies them in (written as
+`.partial`, then renamed; removed again on failure or cancel), then
+`Project::add` puts each at the recording's end: its takes after
+`duration_us`, its clips in its own play order (`EditList::append_edit`,
+which keeps what it had removed, and its trimmed start, coming back where
+they did), its markers, and its blurs, placed over the same content when its
+frame is letterboxed (`fit_rect`). This recording's blurs don't stretch over
+added footage, unlike over a take recorded onto it. Its title, speed,
+thumbnail and bubble layout aren't taken; its camera shows in this
+recording's bubble. `Project::take_addition(at)` takes everything from source
+time `at` on out again, for undo (see [editor-ui.md](editor-ui.md)).
+
+**Files from elsewhere.** `Track::start_us` is the file time where the track
+starts (another app's video may start past 0); `Part::offset` carries it to
+the readers, which subtract it. A video stream's display matrix (a phone held
+upright) is read as a clockwise turn (`rotation`), noted on each decoded
+frame as side data, and the frame is turned after scaling (`rotate`), for
+the formats with bars; `size()` is the size as shown.
+
 **Recovery.** `is_interrupted` is also true for a project whose last take has
 duration 0. `recover` then finishes it from what its files hold (the longest
 readable track), dropping unreadable tracks, or drops the take if its screen
@@ -82,6 +120,15 @@ track is unreadable.
   undo can't remove the take, because every undo step has it.
 - Recording more keeps the recording's camera bubble layout (the live bubble
   position isn't saved over it).
+- A take's number is never one an existing file in the folder has
+  (`free_take_number`): an addition undone keeps its files until the editor
+  closes, for redo, and a take recorded meanwhile mustn't write over them.
+- What's added is copied in; its original is never written to. A recording
+  can't be added to itself, nor one still being recorded (`is_interrupted`).
+- A folder isn't renamed while a copy into it runs (`App::copies`). A
+  closed editor's folder is renamed once its copy winds down (the rename
+  waits for the editor's jobs); after an agent's copy with no editor open,
+  it takes its name the next time an editor of it closes.
 
 ## Gotchas
 
@@ -93,12 +140,22 @@ track is unreadable.
 - A recording in progress (a take included) looks interrupted, so recovery
   only runs at launch, before anything can be recording.
 
+- `av_display_rotation_set` takes a clockwise angle, but
+  `av_display_rotation_get` returns a counterclockwise one: a matrix set to
+  90 reads back as -90.
+- Packaged builds decode only what `scripts/build-ffmpeg-macos.sh` (and the
+  Windows script) enable; a video in another codec is refused by
+  `probe_video`, which checks for a decoder, rather than failing to play.
+
 ## Tests
 
 `visor-core` `project` (parts, bookkeeping of takes, old JSON),
 `visor-media` `tests/decode.rs` (reading parts, letterbox, gaps),
 `tests/export.rs` and `tests/player.rs` (a take exported and played),
-`tests/recover.rs` (a take cut short), `visor-recorder` (recording more with a
+`tests/recover.rs` (a take cut short), `tests/import.rs` (probing, copying,
+a recording and a phone's video added and exported), `tests/decode.rs` (a
+file starting late and turned), `visor-recorder` (recording more with a
 fake screen, discard keeps the original), `visor` `agent.rs`
-(`saved_choices`) and `editor.rs` (`add_take_to_steps`). The hide / countdown /
+(`saved_choices`) and `editor.rs` (`add_take_to_steps`, `add_to_steps`),
+`cli.rs` (`visor add`). The hide / countdown /
 come back flow is checked live.

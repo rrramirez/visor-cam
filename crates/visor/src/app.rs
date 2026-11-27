@@ -96,6 +96,11 @@ pub struct App {
     /// the project put back (agents may not edit it meanwhile); its editor
     /// comes back then.
     more_cancelled: RefCell<Option<PathBuf>>,
+    /// Recordings videos are being copied into (by an agent, or an editor
+    /// that may have closed since), once per copy: not renamed meanwhile,
+    /// nor swept for what an unfinished addition left, as the copy writes
+    /// to the folder.
+    copies: RefCell<Vec<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -188,6 +193,7 @@ impl App {
             agent: RefCell::default(),
             more: RefCell::default(),
             more_cancelled: RefCell::default(),
+            copies: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });
@@ -388,7 +394,7 @@ impl App {
         }
     }
 
-    fn recent(&self) -> Vec<(String, PathBuf)> {
+    pub fn recent(&self) -> Vec<(String, PathBuf)> {
         let root = self.settings.borrow().save_dir.clone();
         visor_core::project::list_projects(&root)
             .unwrap_or_default()
@@ -1967,6 +1973,13 @@ impl App {
     /// to try again shortly.
     fn rename_closed(&self, dir: &std::path::Path, root: &std::path::Path, last: bool) -> bool {
         if self.editors.borrow().iter().any(|e| e.dir() == dir) {
+            return false;
+        }
+        if self.copying(dir) {
+            tracing::info!(
+                "not renaming {}: videos are being added to it",
+                dir.display()
+            );
             return false;
         }
         match visor_core::project::rename_to_title(dir, root) {

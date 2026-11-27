@@ -73,6 +73,7 @@ fn part(start: u64, end: u64, file: Option<&str>) -> visor_core::Part {
         start,
         end,
         file: file.map(String::from),
+        offset: 0,
     }
 }
 
@@ -158,5 +159,72 @@ fn reads_audio_takes_in_their_place() {
     reader.seek(2_500_000).unwrap();
     let (at, _) = reader.next_chunk().unwrap().unwrap();
     assert!((2_400_000..=2_500_000).contains(&at), "seek landed at {at}");
+    common::cleanup(&dir);
+}
+
+#[test]
+fn reads_a_phone_video_upright_from_its_first_frame() {
+    use ffmpeg_next::format::Pixel;
+    let dir = temp_dir("phone");
+    write_video(&dir.join("screen.mp4"), 640, 360, FPS, 128);
+    let (video, tone) = (dir.join("v.mp4"), dir.join("t.m4a"));
+    write_halves(&video, 320, 180, 2 * FPS);
+    write_tone(&tone, 2_000_000, 0.4);
+    // Stored sideways, shown turned clockwise, starting 1.4 s in.
+    remux(
+        &[&video, &tone],
+        &dir.join("screen-2.mov"),
+        1_400_000,
+        Some(90.0),
+    );
+    let phone = visor_core::Part {
+        offset: 1_400_000,
+        ..part(1_000_000, 3_000_000, Some("screen-2.mov"))
+    };
+
+    let parts = [phone.clone()];
+    let reader = VideoReader::open_parts(&dir, &parts, None).unwrap();
+    assert_eq!(reader.size(), (180, 320));
+    let parts = [part(0, 1_000_000, Some("screen.mp4")), phone.clone()];
+    let mut reader =
+        VideoReader::open_parts(&dir, &parts, Some((Pixel::YUV420P, 180, 320))).unwrap();
+    reader.seek(1_000_000).unwrap();
+    let (pts, f) = reader.frame_at(1_000_000).unwrap().unwrap();
+    assert_eq!(pts, 1_000_000);
+    // Its left half, bright, is on top once turned.
+    let (stride, data) = (f.stride(0), f.data(0));
+    let rows = |y0: usize, y1: usize| {
+        let sum: u64 = (y0..y1)
+            .flat_map(|y| data[y * stride..y * stride + 180].iter())
+            .map(|&v| u64::from(v))
+            .sum();
+        sum as f64 / ((y1 - y0) * 180) as f64
+    };
+    assert!(
+        rows(0, 150) > 200.0 && rows(170, 320) < 50.0,
+        "{} {}",
+        rows(0, 150),
+        rows(170, 320)
+    );
+    // The last frame is at its end, not 1.4 s past it.
+    let mut last = 0;
+    while let Some((pts, _)) = reader.next_frame().unwrap() {
+        last = pts;
+    }
+    assert!(last.abs_diff(3_000_000 - FRAME_US) < 2 * FRAME_US, "{last}");
+
+    // Its sound plays in its place too, sharing the file.
+    let mut audio = AudioReader::open_parts(&dir, &[phone]).unwrap();
+    let mut first = None;
+    let mut samples = 0;
+    while let Some((at, chunk)) = audio.next_chunk().unwrap() {
+        first.get_or_insert(at);
+        samples += chunk.len() / 2;
+    }
+    assert!(
+        first.is_some_and(|f| f.abs_diff(1_000_000) < 30_000),
+        "{first:?}"
+    );
+    assert!((samples as i64 - 96_000).abs() < 2_048, "{samples} samples");
     common::cleanup(&dir);
 }

@@ -74,6 +74,11 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    - **Record more** (**R**): forgot something? Record another piece with the
      same screen, camera and mic; the editor comes back with it as the last
      clip, ready to drag where it belongs.
+   - **Add video**: *Add video…* adds another Visor recording (from the
+     recent ones, or any folder) or video files (MP4, MOV, M4V, MKV, WebM)
+     at the end, as clips; or drop them on the editor. A recording comes as
+     you edited it, with its markers and blurs. They're copied in, and
+     **⌘Z** takes them out again.
    - *Remove pauses* finds every stretch of 2 seconds or more where the screen
      stays still and nothing is heard, and removes them all in one step. It
      leaves a moment around what happens, and ignores a spinner or a clock
@@ -129,6 +134,7 @@ visor stop                                   # prints the folder and markers
 visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
 visor start --folder "$FOLDER"               # record more onto a stopped recording
+visor add intro.mp4 ~/Movies/Visor/Outro     # add videos or recordings at its end
 visor remove 12 19.5                         # remove 0:12–0:19.5 (recorded time)
 visor trim 2 1:05                            # keep only 0:02–1:05
 visor restore                                # bring everything back, in recorded order

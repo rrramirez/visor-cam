@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use visor_core::project::BubbleShape;
-use visor_core::{Blur, EditList, Layout, Marker, Micros, Project, TrackKind};
+use visor_core::{Addition, Blur, EditList, Layout, Marker, Micros, Project, TrackKind};
 use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
 
-use crate::app::app;
+use crate::app::{app, post};
 use crate::platform;
 use crate::util;
 use crate::{BlurBand, BlurRow, Clip, Editor, Gone, MarkerMark, Thumb, Tick};
@@ -50,6 +50,26 @@ pub struct EditorWindow {
     jobs: Jobs,
     /// Set to stop looking for pauses, when the window closes.
     pauses_cancel: RefCell<Option<Arc<AtomicBool>>>,
+    /// Recordings or videos being copied in to add.
+    adding: RefCell<Option<AddJob>>,
+    /// Files copied in for additions, to delete when the editor closes if
+    /// the recording no longer has them (undone).
+    added_files: RefCell<Vec<String>>,
+    /// The recordings the *Add video…* menu lists, in its order.
+    recent: RefCell<Vec<PathBuf>>,
+    /// Files dropped on the window, gathered until the drop is over.
+    dropped: Rc<RefCell<Vec<PathBuf>>>,
+}
+
+/// Hears where each added recording or video starts, in source time, with
+/// the recording as it now is; or why nothing was added.
+pub type AddReply = Box<dyn FnOnce(Result<(Project, Vec<Micros>), String>)>;
+
+struct AddJob {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
+    result: Arc<Mutex<Option<anyhow::Result<visor_media::import::Prepared>>>>,
+    reply: Option<AddReply>,
 }
 
 /// A step to undo or redo: the edit, the markers or the blurs, as they
@@ -58,11 +78,23 @@ enum Step {
     Edit(EditList),
     Markers(Vec<Marker>),
     Blurs(Vec<Blur>),
+    /// Recordings or videos added from this source time on: undoing takes
+    /// them out (to redo).
+    Added(Micros),
+    /// What was added from that time on, taken out (to undo), to put back.
+    TakenOut(Micros, Addition),
 }
 
 /// Puts a take just recorded (`clip`, and the `markers` made in it) into
 /// every step to undo or redo, so going back never takes it out again.
-fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Marker]) {
+/// `recorded_end`: where what was recorded here ended before it (see
+/// [`carry_blurs`](visor_core::project::carry_blurs)).
+fn add_take_to_steps(
+    steps: &mut [Step],
+    recorded_end: Micros,
+    clip: visor_core::Range,
+    markers: &[Marker],
+) {
     for step in steps {
         match step {
             Step::Edit(edit) => edit.append(clip),
@@ -70,7 +102,53 @@ fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Mar
                 m.extend(markers.iter().cloned());
                 m.sort_by_key(|m| m.at_us);
             }
-            Step::Blurs(b) => visor_core::project::stretch_blurs(b, clip),
+            Step::Blurs(b) => visor_core::project::carry_blurs(b, recorded_end, clip),
+            Step::Added(_) | Step::TakenOut(..) => {}
+        }
+    }
+}
+
+/// Puts what was added at source time `at` (`part`, as [`take_addition`]
+/// gives it) into every step, so undoing them doesn't take it out: only
+/// undoing the addition does.
+///
+/// [`take_addition`]: Project::take_addition
+fn add_to_steps(steps: &mut [Step], at: Micros, part: &Addition) {
+    for step in steps {
+        match step {
+            Step::Edit(edit) => edit.append_edit(&part.edit, at),
+            Step::Markers(m) => {
+                // As `Project::add` keeps one at the end before it.
+                for x in m.iter_mut().filter(|x| x.at_us >= at) {
+                    x.at_us = at.saturating_sub(1);
+                }
+                m.extend(part.markers.iter().map(|x| Marker {
+                    at_us: at + x.at_us,
+                    ..x.clone()
+                }));
+                m.sort_by_key(|m| m.at_us);
+            }
+            Step::Blurs(b) => b.extend(part.blurs.iter().map(|x| Blur {
+                start_us: at + x.start_us,
+                end_us: at + x.end_us,
+                ..x.clone()
+            })),
+            Step::Added(_) | Step::TakenOut(..) => {}
+        }
+    }
+}
+
+/// Takes what was added from source time `at` on out of every step again,
+/// as undoing the addition takes it out of the recording.
+fn strip_from_steps(steps: &mut [Step], at: Micros) {
+    for step in steps {
+        match step {
+            Step::Edit(edit) => {
+                edit.split_off(at);
+            }
+            Step::Markers(m) => m.retain(|m| m.at_us < at),
+            Step::Blurs(b) => b.retain(|b| b.start_us < at),
+            Step::Added(_) | Step::TakenOut(..) => {}
         }
     }
 }
@@ -112,6 +190,14 @@ impl EditorWindow {
     /// recording that was just made).
     pub fn open(dir: PathBuf, name_first: bool) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
+        // What an addition left when Visor quit while copying it (unless a
+        // copy into it, an agent's or a closed editor's, is going on now).
+        if !app().copying(&dir) {
+            for name in visor_media::import::leftovers(&dir, &project) {
+                tracing::info!("removing {name}, left by an addition that didn't finish");
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        }
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
 
@@ -176,6 +262,10 @@ impl EditorWindow {
                 blur_nudged: RefCell::default(),
                 jobs: Jobs::default(),
                 pauses_cancel: RefCell::default(),
+                adding: RefCell::default(),
+                added_files: RefCell::default(),
+                recent: RefCell::default(),
+                dropped: Rc::default(),
             }
         });
         this.wire(Rc::downgrade(&this));
@@ -201,7 +291,9 @@ impl EditorWindow {
     /// Whether an export or a search for pauses is running: recording
     /// more waits, as either acts on the recording without the take.
     pub fn is_busy(&self) -> bool {
-        self.export.borrow().is_some() || self.ui.get_finding_pauses()
+        self.export.borrow().is_some()
+            || self.ui.get_finding_pauses()
+            || self.adding.borrow().is_some()
     }
 
     /// Hides the editor to record more onto its recording.
@@ -248,31 +340,28 @@ impl EditorWindow {
                     .cloned()
                     .collect()
             };
-            add_take_to_steps(&mut self.undo.borrow_mut(), clip, &markers);
-            add_take_to_steps(&mut self.redo.borrow_mut(), clip, &markers);
-        }
-        match Player::open(&self.dir, &project, (1920, 1200), 360) {
-            Ok(player) => *self.player.borrow_mut() = player,
-            Err(e) => tracing::error!("could not reopen the player: {e:#}"),
-        }
-        self.ui.set_has_camera(project.has_track(TrackKind::Camera));
-        self.ui.set_has_audio(
-            project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System),
-        );
-        let clips = project.edit.ranges().len();
-        *self.project.borrow_mut() = project;
-
-        *self.nudged.borrow_mut() = None;
-        self.refresh_edit_ui();
-        self.load_previews();
-        if let Some(clip) = clip {
-            if let Some((a, b)) = self.layout().clip_span(clips - 1) {
-                let d = self.duration() as f64;
-                self.ui.set_sel_start((a as f64 / d) as f32);
-                self.ui.set_sel_end((b as f64 / d) as f32);
-                self.ui.set_kept_label(self.kept_label().into());
+            // What was added before stays: it can't be taken out from
+            // under the take, nor put back where the take now is.
+            self.undo
+                .borrow_mut()
+                .retain(|s| !matches!(s, Step::Added(_)));
+            if self
+                .redo
+                .borrow()
+                .iter()
+                .any(|s| matches!(s, Step::TakenOut(..)))
+            {
+                tracing::info!("recorded more: an addition undone can't be redone");
+                self.redo.borrow_mut().clear();
             }
-            self.control().seek(clip.0);
+            let recorded_end = self.project.borrow().recorded_end();
+            add_take_to_steps(&mut self.undo.borrow_mut(), recorded_end, clip, &markers);
+            add_take_to_steps(&mut self.redo.borrow_mut(), recorded_end, clip, &markers);
+        }
+        *self.project.borrow_mut() = project;
+        self.reload_media();
+        if let Some(clip) = clip {
+            self.select_from(clip.0);
         }
         self.show();
     }
@@ -321,6 +410,40 @@ impl EditorWindow {
         });
         on!(on_remove_pauses, |e| e.remove_pauses());
         on!(on_record_more, |e| e.record_more());
+        on!(on_open_add_menu, |e| e.open_add_menu());
+        on!(on_add_recent, |e, i| {
+            let dir = usize::try_from(i)
+                .ok()
+                .and_then(|i| e.recent.borrow().get(i).cloned());
+            if let Some(dir) = dir {
+                let _ = e.add_videos(vec![dir], None);
+            }
+        });
+        on!(on_add_files, |e| e.choose_files(false));
+        on!(on_add_recording, |e| e.choose_files(true));
+        {
+            // A drop of several files comes as one event each: add them
+            // together once they're in.
+            use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+            let (w, dropped) = (weak.clone(), self.dropped.clone());
+            ui.window().on_winit_window_event(move |_, event| {
+                if let winit::event::WindowEvent::DroppedFile(path) = event {
+                    let first = dropped.borrow().is_empty();
+                    dropped.borrow_mut().push(path.clone());
+                    if first {
+                        let (w, dropped) = (w.clone(), dropped.clone());
+                        Timer::single_shot(Duration::from_millis(100), move || {
+                            let paths = std::mem::take(&mut *dropped.borrow_mut());
+                            if let Some(e) = w.upgrade() {
+                                let _ = e.add_videos(paths, None);
+                            }
+                        });
+                    }
+                    return EventResult::PreventDefault;
+                }
+                EventResult::Propagate
+            });
+        }
         on!(on_trim_to_selection, |e| {
             if let Some((a, b)) = e.selection() {
                 let pieces = e.layout().kept_pieces(a, b);
@@ -559,6 +682,7 @@ impl EditorWindow {
     /// Stops work for a window that is being hidden, then lets the app drop it.
     fn closing(&self) {
         self.stop_work();
+        self.remove_unused_added_files();
         let (dir, jobs) = (self.dir.clone(), self.jobs.clone());
         // Drop the window (and its player threads) after this callback.
         slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
@@ -578,6 +702,19 @@ impl EditorWindow {
         }
         if let Some(cancel) = self.pauses_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(job) = self.adding.take() {
+            job.cancel.store(true, Ordering::SeqCst);
+            // Copied, but not added yet: it never will be.
+            if let Some(Ok(prepared)) = job.result.lock().unwrap().take() {
+                for name in prepared.files() {
+                    let _ = std::fs::remove_file(self.dir.join(name));
+                }
+            }
+            self.ui.set_adding(false);
+            if let Some(reply) = job.reply {
+                reply(Err("The editor was closed before it was added.".into()));
+            }
         }
         self.control().pause();
         self.jobs.clone()
@@ -1152,6 +1289,255 @@ impl EditorWindow {
                 to.borrow_mut().push(Step::Blurs(now));
                 self.set_blurs(blurs);
             }
+            Step::Added(at) => {
+                let part = self.project.borrow_mut().take_addition(at);
+                strip_from_steps(&mut self.undo.borrow_mut(), at);
+                self.redo.borrow_mut().push(Step::TakenOut(at, part));
+                self.addition_changed();
+            }
+            Step::TakenOut(at, part) => {
+                {
+                    let mut p = self.project.borrow_mut();
+                    if p.duration_us != at {
+                        tracing::warn!("putting back an addition at {at}, not {}", p.duration_us);
+                    }
+                    p.add(part.clone());
+                }
+                add_to_steps(&mut self.undo.borrow_mut(), at, &part);
+                self.undo.borrow_mut().push(Step::Added(at));
+                self.addition_changed();
+                self.select_from(at);
+            }
+        }
+    }
+
+    /// After adding or taking out recordings or videos: the recording is
+    /// saved, and played and shown as it now is.
+    fn addition_changed(&self) {
+        self.save();
+        self.ui.set_sel_start(-1.0);
+        self.ui.set_sel_end(-1.0);
+        self.pick_edge(None);
+        self.ui.set_picked_blur(-1);
+        self.ui.set_blur_edge(-1);
+        self.reload_media();
+    }
+
+    /// Reopens the player and previews over the recording as it now is
+    /// (its length or files changed).
+    fn reload_media(&self) {
+        let project = self.project.borrow().clone();
+        match Player::open(&self.dir, &project, (1920, 1200), 360) {
+            Ok(player) => *self.player.borrow_mut() = player,
+            Err(e) => tracing::error!("could not reopen the player: {e:#}"),
+        }
+        self.ui.set_has_camera(project.has_track(TrackKind::Camera));
+        self.ui.set_has_audio(
+            project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System),
+        );
+        *self.nudged.borrow_mut() = None;
+        self.refresh_edit_ui();
+        self.load_previews();
+        // The new player shows nothing until told where.
+        let at = kept_frame(&project.edit, 0);
+        self.control().seek(at);
+    }
+
+    /// Selects the first clip (as they play) from source time `at` on, and
+    /// puts the playhead at its start.
+    fn select_from(&self, at: Micros) {
+        let (index, start) = {
+            let p = self.project.borrow();
+            match p.edit.ranges().iter().position(|r| r.0 >= at) {
+                Some(i) => (i, p.edit.ranges()[i].0),
+                None => return,
+            }
+        };
+        if let Some((a, b)) = self.layout().clip_span(index) {
+            let d = self.duration() as f64;
+            self.ui.set_sel_start((a as f64 / d) as f32);
+            self.ui.set_sel_end((b as f64 / d) as f32);
+            self.ui.set_kept_label(self.kept_label().into());
+        }
+        self.control().seek(start);
+    }
+
+    /// Adds Visor recordings (folders) and video files at the end: they're
+    /// copied in the background, then added as one step to undo. `reply`
+    /// hears where each landed in source time, or why none was added.
+    /// Refused at once (with why) while exporting, finding pauses or adding.
+    pub fn add_videos(&self, paths: Vec<PathBuf>, reply: Option<AddReply>) -> Result<(), String> {
+        let refused = if paths.is_empty() {
+            Some("Nothing to add.")
+        } else if self.export.borrow().is_some() {
+            Some("Wait for the export to finish, then add it.")
+        } else if self.ui.get_finding_pauses() {
+            Some("Wait for Remove pauses to finish, then add it.")
+        } else if self.adding.borrow().is_some() {
+            Some("Still adding the last one.")
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            self.ui.set_add_error(why.into());
+            return Err(why.to_string());
+        }
+        let job = AddJob {
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(AtomicU32::new(0)),
+            result: Arc::new(Mutex::new(None)),
+            reply,
+        };
+        let (cancel, progress, result) =
+            (job.cancel.clone(), job.progress.clone(), job.result.clone());
+        let dir = self.dir.clone();
+        let project = self.project();
+        let guard = self.jobs.start();
+        app().copy_started(&dir);
+        std::thread::spawn(move || {
+            let _guard = guard;
+            let r = visor_media::import::prepare(&dir, &project, &paths).and_then(|prepared| {
+                prepared.copy(
+                    &dir,
+                    &mut |p| progress.store((p as f32).to_bits(), Ordering::Relaxed),
+                    &cancel,
+                )?;
+                Ok(prepared)
+            });
+            {
+                // Under the lock `stop_work` takes the result with, after
+                // setting `cancel`: a copy closed on is removed here or there.
+                let mut result = result.lock().unwrap();
+                match r {
+                    Ok(prepared) if cancel.load(Ordering::SeqCst) => {
+                        for name in prepared.files() {
+                            let _ = std::fs::remove_file(dir.join(name));
+                        }
+                        *result = Some(Err(anyhow::anyhow!("cancelled")));
+                    }
+                    r => *result = Some(r),
+                }
+            }
+            post(move |app| app.copy_finished(&dir));
+        });
+        self.ui.set_add_error("".into());
+        self.ui.set_adding(true);
+        self.ui.set_adding_label("Adding…".into());
+        *self.adding.borrow_mut() = Some(job);
+        // The UI timer polls the copy.
+        drop(self.control());
+        Ok(())
+    }
+
+    fn poll_adding(&self) {
+        let finished = {
+            let job = self.adding.borrow();
+            let Some(job) = job.as_ref() else { return };
+            let p = f32::from_bits(job.progress.load(Ordering::Relaxed));
+            self.ui
+                .set_adding_label(format!("Adding… {:.0}%", p * 100.0).into());
+            job.result.lock().unwrap().take()
+        };
+        let Some(result) = finished else { return };
+        let job = self.adding.borrow_mut().take().expect("job present");
+        self.ui.set_adding(false);
+        let outcome = match result {
+            Ok(prepared) => Ok(self.apply_addition(prepared)),
+            Err(e) => {
+                let why = format!("{e:#}");
+                tracing::warn!("adding failed: {why}");
+                if !job.cancel.load(Ordering::Relaxed) {
+                    self.ui
+                        .set_add_error(format!("Couldn't add it: {why}").into());
+                }
+                Err(why)
+            }
+        };
+        if let Some(reply) = job.reply {
+            reply(outcome.map(|starts| (self.project(), starts)));
+        }
+    }
+
+    /// Adds what was copied in (for an agent, while the editor wasn't
+    /// open), as one step to undo; returns where each starts.
+    pub fn add_prepared(&self, prepared: visor_media::import::Prepared) -> Vec<Micros> {
+        self.apply_addition(prepared)
+    }
+
+    /// Adds what was copied in, as one step to undo; returns where each
+    /// starts in source time.
+    fn apply_addition(&self, prepared: visor_media::import::Prepared) -> Vec<Micros> {
+        let at = self.project.borrow().duration_us;
+        self.added_files
+            .borrow_mut()
+            .extend(prepared.files().map(String::from));
+        let starts = {
+            let mut p = self.project.borrow_mut();
+            prepared.additions.into_iter().map(|a| p.add(a)).collect()
+        };
+        let part = self.project.borrow().clone().take_addition(at);
+        add_to_steps(&mut self.undo.borrow_mut(), at, &part);
+        self.undo.borrow_mut().push(Step::Added(at));
+        self.redo.borrow_mut().clear();
+        self.addition_changed();
+        self.select_from(at);
+        starts
+    }
+
+    /// Deletes the files copied in for additions that the recording no
+    /// longer has (undone, or never finished).
+    fn remove_unused_added_files(&self) {
+        let project = self.project.borrow();
+        let used: std::collections::HashSet<&str> = std::iter::once(&project.tracks)
+            .chain(project.takes.iter().map(|t| &t.tracks))
+            .flat_map(|t| [&t.screen, &t.camera, &t.mic, &t.system])
+            .flatten()
+            .map(|t| t.file.as_str())
+            .collect();
+        for name in self.added_files.borrow_mut().drain(..) {
+            if !used.contains(name.as_str()) {
+                let path = self.dir.join(&name);
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!("could not remove {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    /// Opens the *Add video…* menu: fills in the recent recordings.
+    fn open_add_menu(&self) {
+        let here = std::fs::canonicalize(&self.dir).ok();
+        let recent: Vec<(String, PathBuf)> = app()
+            .recent()
+            .into_iter()
+            .filter(|(_, d)| std::fs::canonicalize(d).ok() != here)
+            .filter(|(_, d)| !visor_media::recover::is_interrupted(d))
+            .collect();
+        let names: Vec<slint::SharedString> =
+            recent.iter().map(|(t, _)| t.as_str().into()).collect();
+        self.ui
+            .set_recent_recordings(ModelRc::new(VecModel::from(names)));
+        *self.recent.borrow_mut() = recent.into_iter().map(|(_, d)| d).collect();
+    }
+
+    fn choose_files(&self, recordings: bool) {
+        self.control().pause();
+        let dialog = rfd::FileDialog::new();
+        let picked = if recordings {
+            dialog
+                .set_title("Choose a Visor recording")
+                .set_directory(app().settings.borrow().save_dir.clone())
+                .pick_folders()
+        } else {
+            dialog
+                .set_title("Choose video files")
+                .add_filter("Videos", &visor_media::import::picker_extensions())
+                .pick_files()
+        };
+        if let Some(paths) = picked {
+            let _ = self.add_videos(paths, None);
         }
     }
 
@@ -1386,8 +1772,11 @@ impl EditorWindow {
         };
         self.ui.set_time_label(label.into());
         self.poll_export();
+        self.poll_adding();
 
-        let idle = self.player.borrow().is_idle() && self.export.borrow().is_none();
+        let idle = self.player.borrow().is_idle()
+            && self.export.borrow().is_none()
+            && self.adding.borrow().is_none();
         self.idle_ticks
             .set(if idle { self.idle_ticks.get() + 1 } else { 0 });
         if self.idle_ticks.get() >= IDLE_TICKS {
@@ -1455,7 +1844,8 @@ impl EditorWindow {
     }
 
     fn start_export(&self) {
-        if self.export.borrow().is_some() {
+        // While adding, the export would leave out what's being added.
+        if self.export.borrow().is_some() || self.adding.borrow().is_some() {
             return;
         }
         self.control().pause();
@@ -1581,7 +1971,7 @@ impl EditorWindow {
     /// Looks for dead time (see `visor_media::dead_time`) off the UI
     /// thread, then cuts it all as one step to undo.
     fn remove_pauses(&self) {
-        if self.ui.get_finding_pauses() {
+        if self.ui.get_finding_pauses() || self.adding.borrow().is_some() {
             return;
         }
         self.ui.set_finding_pauses(true);
@@ -1858,7 +2248,7 @@ mod tests {
             height: 0.5,
         };
         steps[2] = Step::Blurs(vec![blur(0, 20), blur(2, 6)]);
-        add_take_to_steps(&mut steps, Range(20, 25), &[marker(22)]);
+        add_take_to_steps(&mut steps, 20, Range(20, 25), &[marker(22)]);
         // A blur lasting to the end goes on over the take.
         let Step::Blurs(b) = &steps[2] else { panic!() };
         assert_eq!(
@@ -1874,6 +2264,77 @@ mod tests {
         let Step::Edit(e) = &steps[3] else { panic!() };
         assert_eq!(e.ranges(), [Range(0, 5), Range(8, 20), Range(20, 25)]);
         assert!(e.is_valid(25));
+    }
+
+    #[test]
+    fn an_addition_is_in_every_step_below_it_until_undone() {
+        let marker = |at_us| Marker {
+            at_us,
+            text: String::new(),
+        };
+        let blur = |start_us, end_us| Blur {
+            start_us,
+            end_us,
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        };
+        let mut cut = EditList::full(20);
+        cut.cut(5, 8);
+        let before = || {
+            vec![
+                Step::Edit(EditList::full(20)),
+                Step::Markers(vec![marker(3), marker(19)]),
+                Step::Blurs(vec![blur(0, 20)]),
+                Step::Added(10),
+                Step::Edit(cut.clone()),
+            ]
+        };
+        let mut edit = EditList::full(10);
+        edit.cut(0, 2);
+        let part = visor_core::Addition {
+            duration_us: 10,
+            pieces: Vec::new(),
+            edit,
+            markers: vec![marker(4)],
+            blurs: vec![blur(1, 3)],
+            size: None,
+        };
+        let mut steps = before();
+        add_to_steps(&mut steps, 20, &part);
+        let Step::Edit(e) = &steps[0] else { panic!() };
+        assert_eq!(e.ranges(), [Range(0, 20), Range(22, 30)]);
+        let Step::Markers(m) = &steps[1] else {
+            panic!()
+        };
+        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [3, 19, 24]);
+        // This recording's blurs don't go on over it.
+        let Step::Blurs(b) = &steps[2] else { panic!() };
+        assert_eq!(
+            b.iter().map(|b| (b.start_us, b.end_us)).collect::<Vec<_>>(),
+            [(0, 20), (21, 23)]
+        );
+        let Step::Edit(e) = &steps[4] else { panic!() };
+        assert_eq!(e.ranges(), [Range(0, 5), Range(8, 20), Range(22, 30)]);
+
+        // A marker right at the end stays when the addition is undone.
+        let mut end = vec![Step::Markers(vec![marker(20)])];
+        add_to_steps(&mut end, 20, &part);
+        strip_from_steps(&mut end, 20);
+        let Step::Markers(m) = &end[0] else { panic!() };
+        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [19]);
+
+        strip_from_steps(&mut steps, 20);
+        for (a, b) in steps.iter().zip(before()) {
+            match (a, b) {
+                (Step::Edit(x), Step::Edit(y)) => assert_eq!(*x, y),
+                (Step::Markers(x), Step::Markers(y)) => assert_eq!(*x, y),
+                (Step::Blurs(x), Step::Blurs(y)) => assert_eq!(*x, y),
+                (Step::Added(x), Step::Added(y)) => assert_eq!(*x, y),
+                _ => panic!("steps changed kind"),
+            }
+        }
     }
 
     #[test]

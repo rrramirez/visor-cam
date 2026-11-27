@@ -231,6 +231,7 @@ impl App {
             "trim_recording" => self.agent_edit(&command, EditKind::Trim),
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
+            "add_video" => return self.agent_add(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -297,9 +298,11 @@ impl App {
         {
             return send(
                 reply,
-                Err("That recording is being exported or searched for pauses; \
+                Err(
+                    "That recording is being exported, searched for pauses or added to; \
                      try again once that's done."
-                    .into()),
+                        .into(),
+                ),
             );
         }
         // A new recording, not more of one the user was about to record
@@ -949,6 +952,160 @@ impl App {
         });
     }
 
+    /// Adds video files or other recordings at the end of a recording:
+    /// through its editor when open (the user can undo it), else copied in
+    /// off the UI thread and saved.
+    fn agent_add(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let paths: Vec<PathBuf> = match arg(args, "paths") {
+                Some(Value::Array(paths)) => paths
+                    .iter()
+                    .map(|p| p.as_str().map(PathBuf::from).ok_or("paths are paths."))
+                    .collect::<Result<_, _>>()?,
+                Some(Value::String(path)) => vec![path.into()],
+                _ => Vec::new(),
+            };
+            if paths.is_empty() {
+                return Err("Say what to add: paths, the video files or recording folders.".into());
+            }
+            for path in &paths {
+                if !path.is_absolute() {
+                    return Err(format!("{} isn't an absolute path.", path.display()));
+                }
+                if !path.exists() {
+                    return Err(format!("There's nothing at {}.", path.display()));
+                }
+            }
+            // Waiting in the panel to be recorded more onto: the take's
+            // save would drop what's added now.
+            if self.more.borrow().as_ref() == Some(&dir) {
+                return Err("The user is about to record more onto that recording; \
+                            add to it once they're done."
+                    .into());
+            }
+            let (editor, project) = self.agent_project(&dir)?;
+            Ok((dir, paths, editor, project))
+        });
+        let (dir, paths, editor, project) = match request {
+            Ok(request) => request,
+            Err(e) => return send(reply, Err(e)),
+        };
+        if let Some(editor) = editor {
+            let (r, d) = (reply.clone(), dir.clone());
+            let answer: crate::editor::AddReply = Box::new(move |result| {
+                send(
+                    r,
+                    result.map(|(project, starts)| added_json(&d, &project, &starts, true)),
+                );
+            });
+            if let Err(e) = editor.add_videos(paths, Some(answer)) {
+                send(reply, Err(e));
+            }
+            return;
+        }
+        self.copy_started(&dir);
+        std::thread::spawn(move || {
+            let prepared = visor_media::import::prepare(&dir, &project, &paths).and_then(|p| {
+                p.copy(
+                    &dir,
+                    &mut |_| {},
+                    &std::sync::atomic::AtomicBool::new(false),
+                )?;
+                Ok(p)
+            });
+            post(move |app| app.agent_added(dir, prepared, reply));
+        });
+    }
+
+    /// Whether videos are being copied into `dir` (see `App::copies`).
+    pub(crate) fn copying(&self, dir: &Path) -> bool {
+        self.copies.borrow().contains(&canonical(dir))
+    }
+
+    /// A copy into `dir` starts; [`copy_finished`](Self::copy_finished)
+    /// once it's over, whatever came of it.
+    pub(crate) fn copy_started(&self, dir: &Path) {
+        self.copies.borrow_mut().push(canonical(dir));
+    }
+
+    pub(crate) fn copy_finished(&self, dir: &Path) {
+        let dir = canonical(dir);
+        let mut copies = self.copies.borrow_mut();
+        if let Some(i) = copies.iter().position(|d| *d == dir) {
+            copies.remove(i);
+        }
+    }
+
+    /// Copied in for an agent with no editor open: adds it, if the
+    /// recording can still be changed.
+    fn agent_added(
+        &self,
+        dir: PathBuf,
+        prepared: anyhow::Result<visor_media::import::Prepared>,
+        reply: Reply,
+    ) {
+        self.copy_finished(&dir);
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
+        };
+        let remove_copies = |prepared: &visor_media::import::Prepared| {
+            for name in prepared.files() {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        };
+        let still = self
+            .agent_recording(&json!({"folder": dir.display().to_string()}))
+            .and_then(|_| match self.more.borrow().as_ref() == Some(&dir) {
+                true => Err("The user started recording more onto that recording \
+                             meanwhile; nothing was added."
+                    .to_string()),
+                false => Ok(()),
+            });
+        if let Err(e) = still {
+            remove_copies(&prepared);
+            return send(reply, Err(e));
+        }
+        // Opened in the meantime: added there, to undo, unless it's
+        // exporting or the like, which would leave it out.
+        if let Some(editor) = self.editor_for(&dir) {
+            if editor.is_busy() {
+                remove_copies(&prepared);
+                return send(
+                    reply,
+                    Err(
+                        "That recording was opened and is being exported, searched for \
+                         pauses or added to; nothing was added. Try again once that's done."
+                            .into(),
+                    ),
+                );
+            }
+            let starts = editor.add_prepared(prepared);
+            return send(
+                reply,
+                Ok(added_json(&dir, &editor.project(), &starts, true)),
+            );
+        }
+        let mut project = match visor_core::Project::load(&dir) {
+            Ok(p) => p,
+            Err(e) => {
+                remove_copies(&prepared);
+                return send(reply, Err(e.to_string()));
+            }
+        };
+        let starts: Vec<Micros> = prepared
+            .additions
+            .iter()
+            .cloned()
+            .map(|a| project.add(a))
+            .collect();
+        if let Err(e) = project.save(&dir) {
+            remove_copies(&prepared);
+            return send(reply, Err(format!("Couldn't save the recording: {e}")));
+        }
+        send(reply, Ok(added_json(&dir, &project, &starts, false)));
+    }
+
     /// Opens a recording in the editor for the user.
     fn agent_open(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
@@ -1079,6 +1236,39 @@ impl App {
         );
         false
     }
+}
+
+fn canonical(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// The reply to `add_video`: where each addition landed in recorded time,
+/// and what's kept now.
+fn added_json(
+    dir: &Path,
+    project: &visor_core::Project,
+    starts: &[Micros],
+    editor_open: bool,
+) -> Value {
+    let ends = starts
+        .iter()
+        .skip(1)
+        .copied()
+        .chain(std::iter::once(project.duration_us));
+    let added: Vec<Value> = starts
+        .iter()
+        .zip(ends)
+        .map(|(&a, b)| json!({"start_seconds": seconds(a), "end_seconds": seconds(b)}))
+        .collect();
+    json!({
+        "folder": dir.display().to_string(),
+        "added": added,
+        "recorded_seconds": seconds(project.duration_us),
+        "kept_seconds": seconds(project.edit.duration()),
+        "video_seconds": seconds(project.output_duration()),
+        "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
+        "editor_open": editor_open,
+    })
 }
 
 /// Whether a start command's `args` pick something else for everything in

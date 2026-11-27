@@ -7,7 +7,7 @@ there.
 
 - [edit-model.md](edit-model.md): `EditList`, clips, source and output time,
   cuts and trims, speed, chapters.
-- [recording.md](recording.md): recording to disk, takes (*Record more*)
-  and reading across them, crash recovery.
+- [recording.md](recording.md): recording to disk, takes (*Record more*),
+  added recordings and videos, reading across them, crash recovery.
 - [editor-ui.md](editor-ui.md): the Slint editor window, its timeline, undo
   steps and shortcuts.
