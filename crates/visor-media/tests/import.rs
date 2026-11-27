@@ -233,3 +233,39 @@ fn adds_a_recording_and_a_phone_video_at_the_end() {
         common::cleanup(&d);
     }
 }
+
+#[test]
+fn preparing_keeps_the_take_numbers_it_picks() {
+    use visor_media::import::prepare;
+    let (dir, project) = project("add-reserve", 1);
+    let elsewhere = temp_dir("add-reserve-src");
+    let video = elsewhere.join("clip.mp4");
+    write_video(&video, 320, 180, FPS, 128);
+    let prepared = prepare(&dir, &project, std::slice::from_ref(&video)).unwrap();
+    let name = prepared.files().next().unwrap().to_string();
+    assert_eq!(name, "screen-2.mp4");
+    // Taken while it's copied: a take recorded meanwhile gets another.
+    assert_eq!(project.free_take_number(&dir), 3);
+    prepared
+        .copy(&dir, &mut |_| {}, &AtomicBool::new(false))
+        .unwrap();
+    assert!(dir.join(&name).metadata().unwrap().len() > 0);
+
+    // One it can't add: nothing is kept for any of them.
+    let bad = elsewhere.join("bad.mp4");
+    std::fs::write(&bad, "not a video").unwrap();
+    let before: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(prepare(&dir, &project, &[video.clone(), bad]).is_err());
+    let after: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(before.len(), after.len());
+    common::cleanup(&dir);
+    common::cleanup(&elsewhere);
+}

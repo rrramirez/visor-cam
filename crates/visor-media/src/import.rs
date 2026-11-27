@@ -119,8 +119,13 @@ pub fn copy_in(
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     let partial = dst.with_extension("partial");
-    let result = copy_to(src, &partial, progress, cancel)
-        .and_then(|()| fs::rename(&partial, dst).map_err(Into::into));
+    let result = copy_to(src, &partial, progress, cancel).and_then(|()| {
+        // Only onto nothing, or the empty file `prepare` kept its name with.
+        if fs::metadata(dst).is_ok_and(|m| m.len() > 0) {
+            return Err(anyhow!("{} is already there", dst.display()));
+        }
+        fs::rename(&partial, dst).map_err(Into::into)
+    });
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
@@ -176,13 +181,47 @@ pub fn is_recording(path: &Path) -> bool {
 /// Reads `paths` (Visor recording folders and video files), to add to the
 /// recording `project` in `dir`, refusing any it can't: this recording
 /// itself, one being recorded, a video it can't play. Their files get the
-/// next free take numbers ([`Project::free_take_number`]).
+/// next free take numbers ([`Project::free_take_number`]), kept as empty
+/// files in `dir` until [`Prepared::copy`] fills them in, so nothing else
+/// takes them meanwhile; if it fails, they're removed.
 pub fn prepare(dir: &Path, project: &Project, paths: &[PathBuf]) -> anyhow::Result<Prepared> {
-    let mut next = project.free_take_number(dir);
     let mut prepared = Prepared {
         additions: Vec::new(),
         copies: Vec::new(),
     };
+    let result = prepare_into(dir, project, paths, &mut prepared);
+    if result.is_err() {
+        for name in prepared.files() {
+            let _ = fs::remove_file(dir.join(name));
+        }
+    }
+    result.map(|()| prepared)
+}
+
+/// Keeps `name` in `dir` for a copy of `src`: an empty file, made only if
+/// nothing has the name.
+fn reserve(
+    dir: &Path,
+    copies: &mut Vec<(PathBuf, String)>,
+    src: PathBuf,
+    name: String,
+) -> anyhow::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(&name))
+        .with_context(|| format!("can't make {name} in the recording"))?;
+    copies.push((src, name));
+    Ok(())
+}
+
+fn prepare_into(
+    dir: &Path,
+    project: &Project,
+    paths: &[PathBuf],
+    prepared: &mut Prepared,
+) -> anyhow::Result<()> {
+    let mut next = project.free_take_number(dir);
     let here = fs::canonicalize(dir).ok();
     for path in paths {
         let name = path.file_name().map_or_else(
@@ -193,19 +232,19 @@ pub fn prepare(dir: &Path, project: &Project, paths: &[PathBuf]) -> anyhow::Resu
             if fs::canonicalize(path).ok() == here {
                 return Err(anyhow!("can't add a recording to itself"));
             }
-            recording(path, &mut next, &mut prepared.copies)
+            recording(dir, path, &mut next, &mut prepared.copies)
         } else {
-            video(path, &mut next, &mut prepared.copies)
+            video(dir, path, &mut next, &mut prepared.copies)
         }
         .with_context(|| format!("adding {name}"))?;
         prepared.additions.push(addition);
     }
-    Ok(prepared)
+    Ok(())
 }
 
 impl Prepared {
     /// Copies the files into `dir`, telling `progress` how far it is over
-    /// all of them. On failure or `cancel`, those copied are removed.
+    /// all of them. On failure or `cancel`, all of its files are removed.
     pub fn copy(
         &self,
         dir: &Path,
@@ -230,8 +269,9 @@ impl Prepared {
                 cancel,
             );
             if let Err(e) = result {
-                for (_, copied) in &self.copies[..i] {
-                    let _ = fs::remove_file(dir.join(copied));
+                // Those copied, and those kept for the rest.
+                for name in self.files() {
+                    let _ = fs::remove_file(dir.join(name));
                 }
                 return Err(e);
             }
@@ -259,6 +299,7 @@ fn numbered(base: &str, n: usize, file: &str) -> String {
 
 /// Another Visor recording, as it's edited: each of its pieces a take.
 fn recording(
+    dir: &Path,
     src: &Path,
     next: &mut usize,
     copies: &mut Vec<(PathBuf, String)>,
@@ -297,14 +338,15 @@ fn recording(
                 if !file.is_file() {
                     return Err(anyhow!("its file {} is missing", t.file));
                 }
-                let name = names
-                    .entry(t.file.clone())
-                    .or_insert_with(|| {
+                let name = match names.get(&t.file) {
+                    Some(name) => name.clone(),
+                    None => {
                         let name = numbered(base, n, &t.file);
-                        copies.push((file, name.clone()));
+                        reserve(dir, copies, file, name.clone())?;
+                        names.insert(t.file.clone(), name.clone());
                         name
-                    })
-                    .clone();
+                    }
+                };
                 Ok(Some(Track {
                     file: name,
                     ..t.clone()
@@ -340,11 +382,14 @@ fn recording(
 
 /// A video file: one take, its picture and sound from the same file.
 fn video(
+    dir: &Path,
     src: &Path,
     next: &mut usize,
     copies: &mut Vec<(PathBuf, String)>,
 ) -> anyhow::Result<Addition> {
-    let info = probe_video(src)?;
+    if !is_video_file(src) {
+        return Err(anyhow!("Visor can add MP4, MOV, M4V, MKV and WebM videos"));
+    }
     let n = *next;
     *next += 1;
     let file_name = src
@@ -352,7 +397,9 @@ fn video(
         .and_then(|n| n.to_str())
         .unwrap_or("video.mp4");
     let name = numbered(SCREEN_FILE, n, file_name);
-    copies.push((src.to_path_buf(), name.clone()));
+    // Its number is kept before reading it, which can take a while.
+    reserve(dir, copies, src.to_path_buf(), name.clone())?;
+    let info = probe_video(src)?;
     let start_us = (info.start > 0).then_some(info.start);
     let tracks = Tracks {
         screen: Some(Track {
