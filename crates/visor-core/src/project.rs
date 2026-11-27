@@ -17,7 +17,7 @@ pub const MIC_FILE: &str = "mic.m4a";
 pub const SYSTEM_FILE: &str = "system.m4a";
 pub const CURRENT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +26,10 @@ pub struct Track {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// The file's time at which the track starts (its first frame's
+    /// timestamp), for a video added from elsewhere; `None` is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_us: Option<Micros>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -96,6 +100,40 @@ pub fn take_file(file: &str, n: usize) -> String {
         Some((stem, ext)) => format!("{stem}-{n}.{ext}"),
         None => format!("{file}-{n}"),
     }
+}
+
+/// Where a frame of size `src` shows inside one of size `into`: scaled to
+/// fit, in the middle, with black bars, as `(x, y, width, height)` in
+/// pixels (even, as YUV frames need). A shape within 1% of `into`'s fills it.
+pub fn fit_rect(src: (u32, u32), into: (u32, u32)) -> (u32, u32, u32, u32) {
+    let (sw, sh) = (u64::from(src.0), u64::from(src.1.max(1)));
+    let (w, h) = (u64::from(into.0), u64::from(into.1));
+    let (a, b) = (sw * h, w * sh);
+    let even = |v: u64| ((v as u32) & !1).max(2);
+    let (fw, fh) = if a.abs_diff(b) * 100 <= b {
+        into
+    } else if a < b {
+        (even(a / sh).min(into.0), into.1)
+    } else {
+        (into.0, even(sh * w / sw.max(1)).min(into.1))
+    };
+    (((into.0 - fw) / 2) & !1, ((into.1 - fh) / 2) & !1, fw, fh)
+}
+
+/// Another recording, or a video, to add at the end of a project
+/// ([`Project::add`]), in its own source time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Addition {
+    pub duration_us: Micros,
+    /// Its pieces from its time 0, their files named as in the folder it's
+    /// added to.
+    pub pieces: Vec<Take>,
+    pub edit: EditList,
+    pub markers: Vec<Marker>,
+    pub blurs: Vec<Blur>,
+    /// Its frame size, to keep its blurs over what they hid when it shows
+    /// with black bars.
+    pub size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,6 +392,84 @@ impl Project {
             self.takes.pop();
         }
         recording
+    }
+
+    /// Adds another recording or a video after everything: its pieces as
+    /// takes, its clips (in its order) as the last ones, its markers and
+    /// blurs. Blurs here don't go on over it: it's other footage. Returns
+    /// the source time it starts at.
+    pub fn add(&mut self, addition: Addition) -> Micros {
+        let start = self.duration_us;
+        self.takes.extend(addition.pieces.into_iter().map(|t| Take {
+            start_us: start + t.start_us,
+            ..t
+        }));
+        self.duration_us = start + addition.duration_us;
+        self.edit.append_edit(&addition.edit, start);
+        self.markers
+            .extend(addition.markers.into_iter().map(|m| Marker {
+                at_us: start + m.at_us,
+                ..m
+            }));
+        self.markers.sort_by_key(|m| m.at_us);
+        let frame = self
+            .tracks
+            .screen
+            .as_ref()
+            .and_then(|t| Some((t.width?, t.height?)));
+        let place = match (addition.size, frame) {
+            (Some(src), Some(into)) if into.0 > 0 && into.1 > 0 => {
+                let (x, y, w, h) = fit_rect(src, into);
+                let (fw, fh) = (f64::from(into.0), f64::from(into.1));
+                Some((
+                    f64::from(x) / fw,
+                    f64::from(y) / fh,
+                    f64::from(w) / fw,
+                    f64::from(h) / fh,
+                ))
+            }
+            _ => None,
+        };
+        self.blurs.extend(addition.blurs.into_iter().map(|b| {
+            let (x, y, w, h) = place.unwrap_or((0.0, 0.0, 1.0, 1.0));
+            Blur {
+                start_us: start + b.start_us,
+                end_us: start + b.end_us,
+                x: x + b.x * w,
+                y: y + b.y * h,
+                width: b.width * w,
+                height: b.height * h,
+            }
+        }));
+        start
+    }
+
+    /// The lowest number (2 or more) to name a new take's files with
+    /// ([`take_file`]) that no file of this project nor in `dir` has: one
+    /// of an addition that was undone may still be there, to redo it.
+    pub fn free_take_number(&self, dir: &Path) -> usize {
+        let mut names: Vec<String> = std::iter::once(&self.tracks)
+            .chain(self.takes.iter().map(|t| &t.tracks))
+            .flat_map(Tracks::all)
+            .map(|t| t.file.clone())
+            .collect();
+        if let Ok(entries) = fs::read_dir(dir) {
+            names.extend(
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok()),
+            );
+        }
+        let stems: Vec<&str> = names
+            .iter()
+            .map(|n| n.split_once('.').map_or(n.as_str(), |(stem, _)| stem))
+            .collect();
+        (2..)
+            .find(|n| {
+                let tail = format!("-{n}");
+                !stems.iter().any(|s| s.ends_with(&tail))
+            })
+            .unwrap_or(2)
     }
 
     /// Length of the exported video: the kept time, sped up or slowed down.
@@ -761,6 +877,7 @@ mod tests {
             width: None,
             height: None,
             fps: None,
+            start_us: None,
         })
     }
 
@@ -898,6 +1015,110 @@ mod tests {
     }
 
     #[test]
+    fn an_added_recording_comes_with_its_edit_markers_and_blurs() {
+        let size = |file: &str, w, h| {
+            Some(Track {
+                width: Some(w),
+                height: Some(h),
+                ..track(file).unwrap()
+            })
+        };
+        let mut p = Project::new("Demo", "2026-10-19T18:42:00Z", 20);
+        p.tracks.screen = size(SCREEN_FILE, 1600, 900);
+        p.markers.push(Marker {
+            at_us: 3,
+            text: "Here".into(),
+        });
+        let blur = |start_us, end_us, x, y, width, height| Blur {
+            start_us,
+            end_us,
+            x,
+            y,
+            width,
+            height,
+        };
+        p.blurs.push(blur(0, 20, 0.0, 0.0, 0.5, 0.5));
+        let before = p.clone();
+
+        // A square recording, 10 long, recorded more onto at 6, its first
+        // 2 trimmed off; a marker and a blur in its own time.
+        let mut edit = EditList::full(10);
+        edit.cut(0, 2);
+        let take = |start_us, duration_us, file: &str| Take {
+            start_us,
+            duration_us,
+            tracks: Tracks {
+                screen: size(file, 800, 800),
+                ..Tracks::default()
+            },
+        };
+        let added = Addition {
+            duration_us: 10,
+            pieces: vec![take(0, 6, "screen-2.mp4"), take(6, 4, "screen-3.mp4")],
+            edit,
+            markers: vec![Marker {
+                at_us: 7,
+                text: "There".into(),
+            }],
+            blurs: vec![blur(4, 9, 0.5, 0.0, 0.5, 1.0)],
+            size: Some((800, 800)),
+        };
+        assert_eq!(p.add(added), 20);
+        assert_eq!(p.duration_us, 30);
+        assert_eq!(p.edit.ranges(), [Range(0, 20), Range(22, 30)]);
+        assert_eq!(
+            p.takes
+                .iter()
+                .map(|t| (t.start_us, t.duration_us))
+                .collect::<Vec<_>>(),
+            [(20, 6), (26, 4)]
+        );
+        assert_eq!(
+            p.parts(TrackKind::Screen)[1..]
+                .iter()
+                .map(|part| part.file.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["screen-2.mp4", "screen-3.mp4"]
+        );
+        assert_eq!(p.markers.last().map(|m| m.at_us), Some(27));
+        // This one's blur stays on this one; the added one is on the right
+        // half of the 900x900 square in the middle of the 1600x900 frame.
+        assert_eq!(p.blurs[0], before.blurs[0]);
+        let b = &p.blurs[1];
+        assert_eq!((b.start_us, b.end_us), (24, 29));
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let (x, w) = ((350.0 + 450.0) / 1600.0, 450.0 / 1600.0);
+        assert!(near(b.x, x) && near(b.y, 0.0) && near(b.width, w) && near(b.height, 1.0));
+        assert!(p.validate().is_ok());
+
+        // Its files' numbers aren't taken again by a take recorded later.
+        let dir = std::env::temp_dir().join(format!("visor-added-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(before.free_take_number(&dir), 2);
+        assert_eq!(p.free_take_number(&dir), 4);
+        // Nor those of files left in the folder (an addition undone).
+        fs::write(dir.join("screen-2.mov"), b"").unwrap();
+        assert_eq!(before.free_take_number(&dir), 3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_starting_late_says_where_it_starts() {
+        let mut t = track("screen-2.mp4").unwrap();
+        assert!(!serde_json::to_string(&t).unwrap().contains("start_us"));
+        t.start_us = Some(1_400_000);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Track>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn frames_of_another_shape_fit_in_the_middle() {
+        assert_eq!(fit_rect((800, 800), (1600, 900)), (350, 0, 900, 900));
+        assert_eq!(fit_rect((1600, 900), (800, 800)), (0, 174, 800, 450));
+        assert_eq!(fit_rect((1280, 720), (1920, 1080)), (0, 0, 1920, 1080));
+    }
+
+    #[test]
     fn save_load_roundtrip() {
         let dir = std::env::temp_dir().join(format!("visor-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -908,6 +1129,7 @@ mod tests {
             width: Some(1920),
             height: Some(1080),
             fps: Some(60),
+            start_us: None,
         });
         p.edit.cut(2_000_000, 3_000_000);
         p.markers.push(Marker {
@@ -941,6 +1163,7 @@ mod tests {
             width: None,
             height: None,
             fps: None,
+            start_us: None,
         });
         assert!(p.validate().is_err());
         p.tracks.screen = None;

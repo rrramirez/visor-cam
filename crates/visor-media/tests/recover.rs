@@ -133,6 +133,7 @@ fn a_take_cut_short_by_a_crash_is_recovered_as_a_clip_at_the_end() {
             width: None,
             height: None,
             fps: None,
+            start_us: None,
         })
     };
     // A take being recorded when Visor crashed: its tracks written, the

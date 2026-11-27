@@ -105,7 +105,7 @@ impl Recorder {
             None
         };
         // A take's files are numbered: screen-2.mp4…
-        let take = original.as_ref().map(|p| p.takes.len() + 2);
+        let take = original.as_ref().map(|p| p.free_take_number(&dir));
         let file = |base: &str| take.map_or_else(|| base.to_string(), |n| take_file(base, n));
 
         let system_audio = match (config.audio.system, config.audio.app_pid) {
@@ -128,6 +128,7 @@ impl Recorder {
             width: Some(width),
             height: Some(height),
             fps: Some(config.fps),
+            start_us: None,
         });
 
         // Writers are created before the clock starts so their setup time
@@ -142,6 +143,7 @@ impl Recorder {
                     width: Some(w),
                     height: Some(h),
                     fps: Some(30),
+                    start_us: None,
                 });
                 Some(VideoWriter::create(&dir.join(file(CAMERA_FILE)), w, h, 30)?)
             }
@@ -154,6 +156,7 @@ impl Recorder {
                     width: None,
                     height: None,
                     fps: None,
+                    start_us: None,
                 });
                 Some(AudioWriter::create(&dir.join(file(MIC_FILE)))?)
             }
@@ -166,6 +169,7 @@ impl Recorder {
                     width: None,
                     height: None,
                     fps: None,
+                    start_us: None,
                 });
                 Some(AudioWriter::create(&dir.join(file(SYSTEM_FILE)))?)
             }

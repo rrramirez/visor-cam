@@ -404,18 +404,8 @@ fn bars(fmt: format::Pixel) -> Option<&'static [(usize, u32, &'static [u8])]> {
 /// The even size that a `src` frame scales to inside `into` keeping its
 /// shape; `into` itself when the shapes are within 1%.
 fn fit_inside(src: (u32, u32), into: (u32, u32)) -> (u32, u32) {
-    let (sw, sh) = (u64::from(src.0), u64::from(src.1.max(1)));
-    let (w, h) = (u64::from(into.0), u64::from(into.1));
-    let (a, b) = (sw * h, w * sh);
-    if a.abs_diff(b) * 100 <= b {
-        return into;
-    }
-    let even = |v: u64| ((v as u32) & !1).max(2);
-    if a < b {
-        (even(a / sh).min(into.0), into.1)
-    } else {
-        (into.0, even(sh * w / sw.max(1)).min(into.1))
-    }
+    let (_, _, w, h) = visor_core::project::fit_rect(src, into);
+    (w, h)
 }
 
 /// Paints `out` black and puts `src` (no larger) in its middle.

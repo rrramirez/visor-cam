@@ -98,6 +98,7 @@ pub fn project(name: &str, seconds: u64) -> (PathBuf, Project) {
         width: w,
         height: h,
         fps: Some(30),
+        start_us: None,
     };
     p.tracks.screen = Some(track("screen.mp4", Some(640), Some(360)));
     p.tracks.camera = Some(track("camera.mp4", Some(320), Some(240)));
@@ -135,6 +136,7 @@ pub fn checkerboard_project(name: &str, w: u32, h: u32, seconds: u64) -> (PathBu
         width: Some(w),
         height: Some(h),
         fps: Some(FPS as u32),
+        start_us: None,
     });
     p.save(&dir).unwrap();
     (dir, p)
@@ -164,6 +166,7 @@ pub fn add_take(dir: &Path, project: &mut Project, seconds: u64, (w, h): (u32, u
         width: size.map(|s| s.0),
         height: size.map(|s| s.1),
         fps: size.map(|_| FPS as u32),
+        start_us: None,
     };
     let mut tracks = visor_core::Tracks::default();
     let screen = take_file(SCREEN_FILE, n);

@@ -89,6 +89,7 @@ pub fn recover(dir: &Path) -> anyhow::Result<Project> {
         width: info.size.map(|s| s.0),
         height: info.size.map(|s| s.1),
         fps: Some(30),
+        start_us: None,
     };
     project.tracks.screen = Some(Track {
         fps: project
@@ -115,6 +116,7 @@ pub fn recover(dir: &Path) -> anyhow::Result<Project> {
             width: None,
             height: None,
             fps: None,
+            start_us: None,
         })
     };
     project.tracks.mic = audio_track(MIC_FILE);

@@ -106,6 +106,20 @@ impl EditList {
         }
     }
 
+    /// Adds the clips of `other`, another recording's edit, after
+    /// everything, in its order: that recording put at source time
+    /// `offset`, past every clip here. What it removed comes back where it
+    /// did there, what it trimmed off its start included.
+    pub fn append_edit(&mut self, other: &EditList, offset: Micros) {
+        self.keep
+            .extend(other.keep.iter().map(|r| Range(r.0 + offset, r.1 + offset)));
+        self.lead
+            .extend(other.lead.iter().map(|(&t, &l)| (t + offset, l)));
+        if let Some(first) = other.keep.iter().map(|r| r.0).min().filter(|&f| f > 0) {
+            self.lead.insert(first + offset, first);
+        }
+    }
+
     /// Whether the ranges are non-overlapping, non-empty and end by
     /// `duration`, as the edit operations keep them. Lists loaded from disk
     /// are checked with this.
@@ -495,6 +509,44 @@ impl EditList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_appended_edit_keeps_its_order_and_what_it_removed() {
+        // This one: 0–20, its end trimmed to 15.
+        let mut e = EditList::full(20);
+        e.cut(15, 20);
+        // Another recording, 10 long: its start trimmed to 2, cut 5–6,
+        // split at 8 and its last clip played first.
+        let mut other = EditList::full(10);
+        other.cut(0, 2);
+        other.cut(5, 6);
+        other.split(8);
+        other.move_clip(2, 0);
+        e.append_edit(&other, 20);
+        assert_eq!(
+            e.ranges(),
+            [Range(0, 15), Range(28, 30), Range(22, 25), Range(26, 28)]
+        );
+        assert!(e.is_valid(30));
+        let removed: Vec<_> = e
+            .removed(30)
+            .iter()
+            .map(|r| (r.range, r.clip, r.end))
+            .collect();
+        assert_eq!(
+            removed,
+            [
+                // This one's trimmed end still comes back after its clip,
+                (Range(15, 20), 0, true),
+                // the other's trimmed start at its clip,
+                (Range(20, 22), 2, false),
+                // and its cut where it was.
+                (Range(25, 26), 2, true),
+            ]
+        );
+        assert!(e.bring_back(30, Range(20, 22)));
+        assert_eq!(e.ranges()[2], Range(20, 25));
+    }
 
     #[test]
     fn clips_split_move_and_play_in_their_order() {
