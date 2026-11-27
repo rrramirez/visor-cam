@@ -13,6 +13,20 @@ Every change goes through `apply` (edits), `change_markers` or
 `change_blurs`, which push one step, save `project.json` and call
 `refresh_edit_ui` to rebuild the Slint models.
 
+**Adding videos.** `add_videos` copies recordings and files in on a thread
+(`import::prepare`, `Prepared::copy`; see [recording.md](recording.md)) while
+the button says *Adding… n%*; `poll_adding` then adds them as one step,
+`Step::Added(at)`, where `at` is the source time they start at. Undoing it
+takes everything from `at` on out (`Project::take_addition`) into
+`Step::TakenOut`, which redo puts back. So that undoing an earlier step
+doesn't take the addition out too, it is put into every step below it
+(`add_to_steps`), and taken out of them again when it's undone
+(`strip_from_steps`). Recording more makes additions permanent: their
+`Added` steps go, and an addition waiting to be redone can't be. Files
+copied in that the recording no longer uses are deleted when the editor
+closes (`remove_unused_added_files`), and closing cancels a copy. Drops come
+from winit's `DroppedFile`, one event per file, gathered for 100 ms.
+
 **Timeline.** It shows the whole recording laid out by `visor_core::Layout`:
 each clip in the order it plays, with what was deleted next to it (dimmed)
 where it would come back. Every source time has one place on it, so a
@@ -65,6 +79,8 @@ space.
   old timeline.
 - A step to undo holds a whole list, so undo restores the order of clips
   along with their ranges.
+- Only one addition copies at a time, and none while exporting or finding
+  pauses; *Record more* waits for it (`is_busy`).
 
 ## Gotchas
 
