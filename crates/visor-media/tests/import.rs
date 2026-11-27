@@ -290,3 +290,16 @@ fn pickers_list_upper_case_names_too() {
         "IMG_0001.MOV"
     )));
 }
+
+#[test]
+fn finds_what_an_interrupted_addition_left() {
+    let (dir, project) = project("add-left", 1);
+    std::fs::write(dir.join("screen-2.partial"), b"half").unwrap();
+    std::fs::write(dir.join("screen-2.mov"), b"").unwrap();
+    // Empty, but the project's: kept. Not empty: kept.
+    std::fs::write(dir.join("notes.txt"), b"mine").unwrap();
+    let mut left = visor_media::import::leftovers(&dir, &project);
+    left.sort();
+    assert_eq!(left, ["screen-2.mov", "screen-2.partial"]);
+    common::cleanup(&dir);
+}

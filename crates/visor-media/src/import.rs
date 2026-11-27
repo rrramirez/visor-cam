@@ -448,3 +448,37 @@ fn video(
         size: Some(info.size),
     })
 }
+
+/// Files an addition that never finished left in the recording `dir` (Visor
+/// quit while copying): half-copied `.partial` files, and the empty files
+/// that kept take numbers for it, which the project doesn't name.
+pub fn leftovers(dir: &Path, project: &Project) -> Vec<String> {
+    let used: Vec<&str> = std::iter::once(&project.tracks)
+        .chain(project.takes.iter().map(|t| &t.tracks))
+        .flat_map(|t| [&t.screen, &t.camera, &t.mic, &t.system])
+        .flatten()
+        .map(|t| t.file.as_str())
+        .collect();
+    let take_stem = |name: &str| {
+        let stem = name.split_once('.').map_or(name, |(s, _)| s);
+        stem.rsplit_once('-').is_some_and(|(base, n)| {
+            ["screen", "camera", "mic", "system"].contains(&base)
+                && !n.is_empty()
+                && n.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let empty = e.metadata().is_ok_and(|m| m.len() == 0);
+            let left = (name.ends_with(".partial") && take_stem(&name))
+                || (empty && take_stem(&name) && !used.contains(&name.as_str()));
+            left.then_some(name)
+        })
+        .collect()
+}

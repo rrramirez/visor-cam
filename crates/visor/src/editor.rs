@@ -190,6 +190,14 @@ impl EditorWindow {
     /// recording that was just made).
     pub fn open(dir: PathBuf, name_first: bool) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
+        // What an addition left when Visor quit while copying it (unless an
+        // agent's copy into it is going on now).
+        if !app().agent_copying(&dir) {
+            for name in visor_media::import::leftovers(&dir, &project) {
+                tracing::info!("removing {name}, left by an addition that didn't finish");
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        }
         let player = Player::open(&dir, &project, (1920, 1200), 360)?;
         let ui = Editor::new()?;
 
@@ -697,6 +705,12 @@ impl EditorWindow {
         }
         if let Some(job) = self.adding.take() {
             job.cancel.store(true, Ordering::Relaxed);
+            // Copied, but not added yet: it never will be.
+            if let Some(Ok(prepared)) = job.result.lock().unwrap().take() {
+                for name in prepared.files() {
+                    let _ = std::fs::remove_file(self.dir.join(name));
+                }
+            }
             self.ui.set_adding(false);
             if let Some(reply) = job.reply {
                 reply(Err("The editor was closed before it was added.".into()));
