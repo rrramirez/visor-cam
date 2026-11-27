@@ -1020,7 +1020,7 @@ impl App {
     /// Whether an agent's videos are being copied into `dir`.
     pub(crate) fn agent_copying(&self, dir: &Path) -> bool {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        self.agent_copies.borrow().iter().any(|d| *d == dir)
+        self.agent_copies.borrow().contains(&dir)
     }
 
     /// Copied in for an agent with no editor open: adds it, if the
