@@ -1003,7 +1003,7 @@ impl App {
             }
             return;
         }
-        self.agent_copies.borrow_mut().push(dir.clone());
+        self.copy_started(&dir);
         std::thread::spawn(move || {
             let prepared = visor_media::import::prepare(&dir, &project, &paths).and_then(|p| {
                 p.copy(
@@ -1017,10 +1017,23 @@ impl App {
         });
     }
 
-    /// Whether an agent's videos are being copied into `dir`.
-    pub(crate) fn agent_copying(&self, dir: &Path) -> bool {
-        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        self.agent_copies.borrow().contains(&dir)
+    /// Whether videos are being copied into `dir` (see `App::copies`).
+    pub(crate) fn copying(&self, dir: &Path) -> bool {
+        self.copies.borrow().contains(&canonical(dir))
+    }
+
+    /// A copy into `dir` starts; [`copy_finished`](Self::copy_finished)
+    /// once it's over, whatever came of it.
+    pub(crate) fn copy_started(&self, dir: &Path) {
+        self.copies.borrow_mut().push(canonical(dir));
+    }
+
+    pub(crate) fn copy_finished(&self, dir: &Path) {
+        let dir = canonical(dir);
+        let mut copies = self.copies.borrow_mut();
+        if let Some(i) = copies.iter().position(|d| *d == dir) {
+            copies.remove(i);
+        }
     }
 
     /// Copied in for an agent with no editor open: adds it, if the
@@ -1031,12 +1044,7 @@ impl App {
         prepared: anyhow::Result<visor_media::import::Prepared>,
         reply: Reply,
     ) {
-        {
-            let mut copies = self.agent_copies.borrow_mut();
-            if let Some(i) = copies.iter().position(|d| *d == dir) {
-                copies.remove(i);
-            }
-        }
+        self.copy_finished(&dir);
         let prepared = match prepared {
             Ok(p) => p,
             Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
@@ -1228,6 +1236,10 @@ impl App {
         );
         false
     }
+}
+
+fn canonical(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// The reply to `add_video`: where each addition landed in recorded time,

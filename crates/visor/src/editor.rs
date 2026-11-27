@@ -15,7 +15,7 @@ use visor_media::dead_time;
 use visor_media::player::Player;
 use visor_media::{ExportFormat, ExportOptions};
 
-use crate::app::app;
+use crate::app::{app, post};
 use crate::platform;
 use crate::util;
 use crate::{BlurBand, BlurRow, Clip, Editor, Gone, MarkerMark, Thumb, Tick};
@@ -190,9 +190,9 @@ impl EditorWindow {
     /// recording that was just made).
     pub fn open(dir: PathBuf, name_first: bool) -> anyhow::Result<Rc<Self>> {
         let project = visor_media::recover::load_or_recover(&dir)?;
-        // What an addition left when Visor quit while copying it (unless an
-        // agent's copy into it is going on now).
-        if !app().agent_copying(&dir) {
+        // What an addition left when Visor quit while copying it (unless a
+        // copy into it, an agent's or a closed editor's, is going on now).
+        if !app().copying(&dir) {
             for name in visor_media::import::leftovers(&dir, &project) {
                 tracing::info!("removing {name}, left by an addition that didn't finish");
                 let _ = std::fs::remove_file(dir.join(name));
@@ -704,7 +704,7 @@ impl EditorWindow {
             cancel.store(true, Ordering::Relaxed);
         }
         if let Some(job) = self.adding.take() {
-            job.cancel.store(true, Ordering::Relaxed);
+            job.cancel.store(true, Ordering::SeqCst);
             // Copied, but not added yet: it never will be.
             if let Some(Ok(prepared)) = job.result.lock().unwrap().take() {
                 for name in prepared.files() {
@@ -1393,6 +1393,7 @@ impl EditorWindow {
         let dir = self.dir.clone();
         let project = self.project();
         let guard = self.jobs.start();
+        app().copy_started(&dir);
         std::thread::spawn(move || {
             let _guard = guard;
             let r = visor_media::import::prepare(&dir, &project, &paths).and_then(|prepared| {
@@ -1401,15 +1402,23 @@ impl EditorWindow {
                     &mut |p| progress.store((p as f32).to_bits(), Ordering::Relaxed),
                     &cancel,
                 )?;
-                if cancel.load(Ordering::Relaxed) {
-                    for name in prepared.files() {
-                        let _ = std::fs::remove_file(dir.join(name));
-                    }
-                    anyhow::bail!("cancelled");
-                }
                 Ok(prepared)
             });
-            *result.lock().unwrap() = Some(r);
+            {
+                // Under the lock `stop_work` takes the result with, after
+                // setting `cancel`: a copy closed on is removed here or there.
+                let mut result = result.lock().unwrap();
+                match r {
+                    Ok(prepared) if cancel.load(Ordering::SeqCst) => {
+                        for name in prepared.files() {
+                            let _ = std::fs::remove_file(dir.join(name));
+                        }
+                        *result = Some(Err(anyhow::anyhow!("cancelled")));
+                    }
+                    r => *result = Some(r),
+                }
+            }
+            post(move |app| app.copy_finished(&dir));
         });
         self.ui.set_add_error("".into());
         self.ui.set_adding(true);

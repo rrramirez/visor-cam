@@ -125,7 +125,7 @@ track is unreadable.
 - What's added is copied in; its original is never written to. A recording
   can't be added to itself, nor one still being recorded (`is_interrupted`).
 - While an agent copies into a recording with no editor open, the folder
-  isn't renamed (`App::agent_copies`); it takes its name the next time an
+  isn't renamed (`App::copies`, as for a closed editor's copy still finishing); it takes its name the next time an
   editor of it closes.
 
 ## Gotchas
