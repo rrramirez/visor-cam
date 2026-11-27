@@ -80,7 +80,10 @@ space.
 - A step to undo holds a whole list, so undo restores the order of clips
   along with their ranges.
 - Only one addition copies at a time, and none while exporting or finding
-  pauses; *Record more* waits for it (`is_busy`).
+  pauses; while it copies, Export, *Remove pauses* and *Record more* wait
+  (`is_busy`), as each would act on the recording without it. An agent's
+  copy that finishes after the editor was opened is refused if the editor
+  is busy.
 
 ## Gotchas
 

@@ -78,8 +78,12 @@ reads each one without changing anything: a recording (a folder with
 blurs (`Addition`); a file is probed (`probe_video`: a video stream Visor
 can decode, the size as shown, the time it starts, whether its sound can be
 played) and becomes one take whose screen and mic tracks name the same file.
-Files are numbered with `Project::free_take_number` and keep their
-extension (`screen-3.mov`). `Prepared::copy` copies them in (written as
+Each take is numbered with `Project::free_take_number` (past any number
+already taken, so gaps left by deleted files are skipped) and keeps its
+file's extension (`screen-3.mov`). The names are kept as empty files from the
+moment they're picked (`reserve`), so a take recorded or another addition
+made meanwhile can't take them, and `copy_in` never renames onto a file
+that isn't empty. `Prepared::copy` copies them in (written as
 `.partial`, then renamed; removed again on failure or cancel), then
 `Project::add` puts each at the recording's end: its takes after
 `duration_us`, its clips in its own play order (`EditList::append_edit`,
@@ -118,6 +122,9 @@ track is unreadable.
   closes, for redo, and a take recorded meanwhile mustn't write over them.
 - What's added is copied in; its original is never written to. A recording
   can't be added to itself, nor one still being recorded (`is_interrupted`).
+- While an agent copies into a recording with no editor open, the folder
+  isn't renamed (`App::agent_copies`); it takes its name the next time an
+  editor of it closes.
 
 ## Gotchas
 

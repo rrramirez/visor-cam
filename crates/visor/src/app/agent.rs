@@ -1003,6 +1003,7 @@ impl App {
             }
             return;
         }
+        self.agent_copies.borrow_mut().push(dir.clone());
         std::thread::spawn(move || {
             let prepared = visor_media::import::prepare(&dir, &project, &paths).and_then(|p| {
                 p.copy(
@@ -1024,6 +1025,12 @@ impl App {
         prepared: anyhow::Result<visor_media::import::Prepared>,
         reply: Reply,
     ) {
+        {
+            let mut copies = self.agent_copies.borrow_mut();
+            if let Some(i) = copies.iter().position(|d| *d == dir) {
+                copies.remove(i);
+            }
+        }
         let prepared = match prepared {
             Ok(p) => p,
             Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
@@ -1045,8 +1052,20 @@ impl App {
             remove_copies(&prepared);
             return send(reply, Err(e));
         }
-        // Opened in the meantime: added there, to undo.
+        // Opened in the meantime: added there, to undo, unless it's
+        // exporting or the like, which would leave it out.
         if let Some(editor) = self.editor_for(&dir) {
+            if editor.is_busy() {
+                remove_copies(&prepared);
+                return send(
+                    reply,
+                    Err(
+                        "That recording was opened and is being exported, searched for \
+                         pauses or added to; nothing was added. Try again once that's done."
+                            .into(),
+                    ),
+                );
+            }
             let starts = editor.add_prepared(prepared);
             return send(
                 reply,

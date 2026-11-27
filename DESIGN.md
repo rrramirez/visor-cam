@@ -251,4 +251,6 @@ again after rebuilding.
 - Recordings with a take (*Record more*, *Add video*) play only their first piece in
   Visor 0.8.0 and earlier, and an edit saved there forgets the takes (their
   files stay in the folder).
+- Dropping videos on the editor relies on winit's file drop events, which
+  winit doesn't deliver on Wayland; there, *Add video…*'s pickers do it.
 - No global hotkeys and no per-track volume in the editor yet (not chosen for v1).
