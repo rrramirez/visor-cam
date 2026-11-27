@@ -87,7 +87,14 @@ enum Step {
 
 /// Puts a take just recorded (`clip`, and the `markers` made in it) into
 /// every step to undo or redo, so going back never takes it out again.
-fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Marker]) {
+/// `recorded_end`: where what was recorded here ended before it (see
+/// [`carry_blurs`](visor_core::project::carry_blurs)).
+fn add_take_to_steps(
+    steps: &mut [Step],
+    recorded_end: Micros,
+    clip: visor_core::Range,
+    markers: &[Marker],
+) {
     for step in steps {
         match step {
             Step::Edit(edit) => edit.append(clip),
@@ -95,7 +102,7 @@ fn add_take_to_steps(steps: &mut [Step], clip: visor_core::Range, markers: &[Mar
                 m.extend(markers.iter().cloned());
                 m.sort_by_key(|m| m.at_us);
             }
-            Step::Blurs(b) => visor_core::project::stretch_blurs(b, clip),
+            Step::Blurs(b) => visor_core::project::carry_blurs(b, recorded_end, clip),
             Step::Added(_) | Step::TakenOut(..) => {}
         }
     }
@@ -335,8 +342,9 @@ impl EditorWindow {
                 tracing::info!("recorded more: an addition undone can't be redone");
                 self.redo.borrow_mut().clear();
             }
-            add_take_to_steps(&mut self.undo.borrow_mut(), clip, &markers);
-            add_take_to_steps(&mut self.redo.borrow_mut(), clip, &markers);
+            let recorded_end = self.project.borrow().recorded_end();
+            add_take_to_steps(&mut self.undo.borrow_mut(), recorded_end, clip, &markers);
+            add_take_to_steps(&mut self.redo.borrow_mut(), recorded_end, clip, &markers);
         }
         *self.project.borrow_mut() = project;
         self.reload_media();
@@ -2212,7 +2220,7 @@ mod tests {
             height: 0.5,
         };
         steps[2] = Step::Blurs(vec![blur(0, 20), blur(2, 6)]);
-        add_take_to_steps(&mut steps, Range(20, 25), &[marker(22)]);
+        add_take_to_steps(&mut steps, 20, Range(20, 25), &[marker(22)]);
         // A blur lasting to the end goes on over the take.
         let Step::Blurs(b) = &steps[2] else { panic!() };
         assert_eq!(

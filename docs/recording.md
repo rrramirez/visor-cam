@@ -26,8 +26,10 @@ loads the project, `begin_take`s a take with duration 0 and saves it, so a
 crash can be recovered; markers made during it are in the whole recording's
 time. `stop` calls `finish_take`: the take gets its length, the recording
 grows by it and it is appended as the last clip (`EditList::append`);
-blurs that lasted to the end go on over it (`stretch_blurs`), like the
-whole-video blur they usually are, so recovered and agents' takes get it too.
+blurs that lasted to the end of what was recorded here go on over it
+(`carry_blurs`, stretched, or copied over the take when added footage lies
+in between), like the whole-video blur they usually are, so recovered and
+agents' takes get it too.
 `discard` deletes only the take's files and saves the project as it was.
 
 **Reading across takes.** Everything that reads tracks goes through

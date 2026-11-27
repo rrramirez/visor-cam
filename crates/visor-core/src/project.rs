@@ -75,6 +75,10 @@ pub struct Take {
     /// 0 while it is being recorded.
     pub duration_us: Micros,
     pub tracks: Tracks,
+    /// Added from elsewhere (another recording or a video), not recorded
+    /// onto this one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added: bool,
 }
 
 /// A stretch of source time that one file of a track covers; no file when
@@ -88,11 +92,27 @@ pub struct Part {
     pub offset: Micros,
 }
 
-/// Blurs lasting to the start of the take `clip` go on to its end.
-pub fn stretch_blurs(blurs: &mut [Blur], clip: crate::Range) {
-    for b in blurs.iter_mut().filter(|b| b.end_us >= clip.0) {
-        b.end_us = b.end_us.max(clip.1);
+/// Blurs over what was recorded here that last to its end (`recorded_end`)
+/// go on over the take `clip`, like the whole-video blur they usually are:
+/// stretched if the take follows on, else a copy over it (footage added
+/// in between keeps its own).
+pub fn carry_blurs(blurs: &mut Vec<Blur>, recorded_end: Micros, clip: crate::Range) {
+    let mut copies = Vec::new();
+    for b in blurs
+        .iter_mut()
+        .filter(|b| b.start_us < recorded_end && b.end_us >= recorded_end)
+    {
+        if recorded_end >= clip.0 {
+            b.end_us = b.end_us.max(clip.1);
+        } else {
+            copies.push(Blur {
+                start_us: clip.0,
+                end_us: clip.1,
+                ..b.clone()
+            });
+        }
     }
+    blurs.extend(copies);
 }
 
 /// The file name of a track in take `n` (the recording's first piece being
@@ -345,6 +365,17 @@ impl Project {
         self.tracks.get(kind).is_some() || self.takes.iter().any(|t| t.tracks.get(kind).is_some())
     }
 
+    /// Where what was recorded onto this recording ends: its first piece,
+    /// or the last take recorded (not added) after it.
+    pub fn recorded_end(&self) -> Micros {
+        let first = self.takes.first().map_or(self.duration_us, |t| t.start_us);
+        self.takes
+            .iter()
+            .filter(|t| !t.added && t.duration_us > 0)
+            .map(|t| t.start_us + t.duration_us)
+            .fold(first, Micros::max)
+    }
+
     /// The take being recorded, if one is.
     pub fn recording_take(&self) -> Option<&Take> {
         self.takes.last().filter(|t| t.duration_us == 0)
@@ -358,6 +389,7 @@ impl Project {
             start_us: self.duration_us,
             duration_us: 0,
             tracks,
+            added: false,
         });
         self.takes.len() + 1
     }
@@ -372,6 +404,7 @@ impl Project {
             self.drop_take();
             return;
         }
+        let recorded_end = self.recorded_end();
         let Some(take) = self.takes.last_mut().filter(|t| t.duration_us == 0) else {
             return;
         };
@@ -380,7 +413,7 @@ impl Project {
         self.duration_us = start + duration;
         let clip = crate::Range(start, start + duration);
         self.edit.append(clip);
-        stretch_blurs(&mut self.blurs, clip);
+        carry_blurs(&mut self.blurs, recorded_end, clip);
         self.markers.extend(markers.into_iter().map(|m| Marker {
             at_us: start + m.at_us.min(duration),
             ..m
@@ -405,6 +438,7 @@ impl Project {
         let start = self.duration_us;
         self.takes.extend(addition.pieces.into_iter().map(|t| Take {
             start_us: start + t.start_us,
+            added: true,
             ..t
         }));
         self.duration_us = start + addition.duration_us;
@@ -946,6 +980,7 @@ mod tests {
                 screen: track("screen-2.mp4"),
                 ..Tracks::default()
             },
+            added: false,
         });
         let part = |start, end, file: Option<&str>| Part {
             start,
@@ -974,6 +1009,7 @@ mod tests {
             start_us: 25,
             duration_us: 0,
             tracks: Tracks::default(),
+            added: false,
         });
         assert_eq!(p.parts(TrackKind::Screen).len(), 2);
 
@@ -1105,6 +1141,7 @@ mod tests {
                 screen: size(file, 800, 800),
                 ..Tracks::default()
             },
+            added: false,
         };
         let added = Addition {
             duration_us: 10,
@@ -1152,6 +1189,22 @@ mod tests {
         assert_eq!(part.size, None);
         q.add(part);
         assert_eq!(q, p);
+
+        // Recording more after it: this recording's whole-video blur
+        // covers the new take too, the added one's doesn't.
+        assert!(p.takes.iter().all(|t| t.added));
+        assert_eq!(p.recorded_end(), 20);
+        let mut r = p.clone();
+        r.begin_take(Tracks::default());
+        r.finish_take(5, Vec::new());
+        assert!(!r.takes.last().unwrap().added);
+        let spans: Vec<_> = r
+            .blurs
+            .iter()
+            .map(|b| (b.start_us, b.end_us, b.x))
+            .collect();
+        assert_eq!(spans, [(0, 20, 0.0), (24, 29, b.x), (30, 35, 0.0)]);
+        assert_eq!(r.recorded_end(), 35);
 
         // Its files' numbers aren't taken again by a take recorded later.
         let dir = std::env::temp_dir().join(format!("visor-added-{}", std::process::id()));

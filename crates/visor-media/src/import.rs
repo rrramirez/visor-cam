@@ -362,6 +362,7 @@ fn recording(
                 start_us,
                 duration_us,
                 tracks,
+                added: true,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -422,6 +423,7 @@ fn video(
             start_us: 0,
             duration_us: info.duration,
             tracks,
+            added: true,
         }],
         edit: EditList::full(info.duration),
         markers: Vec::new(),
