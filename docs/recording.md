@@ -85,7 +85,8 @@ moment they're picked (`reserve`), so a take recorded or another addition
 made meanwhile can't take them, and `copy_in` never renames onto a file
 that isn't empty. If Visor quits during a copy, opening the editor removes
 what's left (`import::leftovers`: `.partial` files, and empty take files the
-project doesn't name). `Prepared::copy` copies them in (written as
+project doesn't name), unless a copy into it, an agent's or a closed
+editor's, is still running (`App::copies`). `Prepared::copy` copies them in (written as
 `.partial`, then renamed; removed again on failure or cancel), then
 `Project::add` puts each at the recording's end: its takes after
 `duration_us`, its clips in its own play order (`EditList::append_edit`,
@@ -124,9 +125,10 @@ track is unreadable.
   closes, for redo, and a take recorded meanwhile mustn't write over them.
 - What's added is copied in; its original is never written to. A recording
   can't be added to itself, nor one still being recorded (`is_interrupted`).
-- While an agent copies into a recording with no editor open, the folder
-  isn't renamed (`App::copies`, as for a closed editor's copy still finishing); it takes its name the next time an
-  editor of it closes.
+- A folder isn't renamed while a copy into it runs (`App::copies`). A
+  closed editor's folder is renamed once its copy winds down (the rename
+  waits for the editor's jobs); after an agent's copy with no editor open,
+  it takes its name the next time an editor of it closes.
 
 ## Gotchas
 
