@@ -382,7 +382,8 @@ pub fn call(command: &Value) -> Value {
                 | "restore_recording"
                 | "open_recording"
                 | "view_frame"
-                | "find_dead_time",
+                | "find_dead_time"
+                | "add_video",
             ) => {
                 json!({
                     "ok": false,

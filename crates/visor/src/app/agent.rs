@@ -298,9 +298,11 @@ impl App {
         {
             return send(
                 reply,
-                Err("That recording is being exported or searched for pauses; \
+                Err(
+                    "That recording is being exported, searched for pauses or added to; \
                      try again once that's done."
-                    .into()),
+                        .into(),
+                ),
             );
         }
         // A new recording, not more of one the user was about to record
@@ -974,6 +976,13 @@ impl App {
                     return Err(format!("There's nothing at {}.", path.display()));
                 }
             }
+            // Waiting in the panel to be recorded more onto: the take's
+            // save would drop what's added now.
+            if self.more.borrow().as_ref() == Some(&dir) {
+                return Err("The user is about to record more onto that recording; \
+                            add to it once they're done."
+                    .into());
+            }
             let (editor, project) = self.agent_project(&dir)?;
             Ok((dir, paths, editor, project))
         });
@@ -1024,7 +1033,15 @@ impl App {
                 let _ = std::fs::remove_file(dir.join(name));
             }
         };
-        if let Err(e) = self.agent_recording(&json!({"folder": dir.display().to_string()})) {
+        let still = self
+            .agent_recording(&json!({"folder": dir.display().to_string()}))
+            .and_then(|_| match self.more.borrow().as_ref() == Some(&dir) {
+                true => Err("The user started recording more onto that recording \
+                             meanwhile; nothing was added."
+                    .to_string()),
+                false => Ok(()),
+            });
+        if let Err(e) = still {
             remove_copies(&prepared);
             return send(reply, Err(e));
         }
@@ -1188,9 +1205,6 @@ impl App {
     }
 }
 
-/// Whether a start command's `args` pick something else for everything in
-/// `missing` (as `saved_choices` lists it): only then may recording more go
-/// on without what's gone.
 /// The reply to `add_video`: where each addition landed in recorded time,
 /// and what's kept now.
 fn added_json(
@@ -1220,6 +1234,9 @@ fn added_json(
     })
 }
 
+/// Whether a start command's `args` pick something else for everything in
+/// `missing` (as `saved_choices` lists it): only then may recording more go
+/// on without what's gone.
 fn replaces_missing(missing: &[&str], args: &Value) -> bool {
     let has = |keys: &[&str]| keys.iter().any(|k| arg(args, k).is_some());
     missing.iter().all(|m| match *m {

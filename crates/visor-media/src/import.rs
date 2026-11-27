@@ -29,6 +29,15 @@ pub struct VideoInfo {
     pub has_audio: bool,
 }
 
+/// The extensions a file picker offers, in lower and upper case: some
+/// (Linux's) match them case by case, and phones name files `IMG_0001.MOV`.
+pub fn picker_extensions() -> Vec<String> {
+    VIDEO_EXTENSIONS
+        .iter()
+        .flat_map(|e| [e.to_string(), e.to_ascii_uppercase()])
+        .collect()
+}
+
 /// Whether `path` is named like a video that can be added.
 pub fn is_video_file(path: &Path) -> bool {
     path.extension()

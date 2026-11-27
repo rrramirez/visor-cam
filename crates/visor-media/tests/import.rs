@@ -269,3 +269,13 @@ fn preparing_keeps_the_take_numbers_it_picks() {
     common::cleanup(&dir);
     common::cleanup(&elsewhere);
 }
+
+#[test]
+fn pickers_list_upper_case_names_too() {
+    // Linux pickers match extensions case by case; phones name files IMG_0001.MOV.
+    let exts = visor_media::import::picker_extensions();
+    assert!(exts.iter().any(|e| e == "mov") && exts.iter().any(|e| e == "MOV"));
+    assert!(visor_media::import::is_video_file(std::path::Path::new(
+        "IMG_0001.MOV"
+    )));
+}

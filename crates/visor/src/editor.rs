@@ -1510,7 +1510,7 @@ impl EditorWindow {
         } else {
             dialog
                 .set_title("Choose video files")
-                .add_filter("Videos", &visor_media::import::VIDEO_EXTENSIONS)
+                .add_filter("Videos", &visor_media::import::picker_extensions())
                 .pick_files()
         };
         if let Some(paths) = picked {
@@ -1821,7 +1821,8 @@ impl EditorWindow {
     }
 
     fn start_export(&self) {
-        if self.export.borrow().is_some() {
+        // While adding, the export would leave out what's being added.
+        if self.export.borrow().is_some() || self.adding.borrow().is_some() {
             return;
         }
         self.control().pause();
@@ -1947,7 +1948,7 @@ impl EditorWindow {
     /// Looks for dead time (see `visor_media::dead_time`) off the UI
     /// thread, then cuts it all as one step to undo.
     fn remove_pauses(&self) {
-        if self.ui.get_finding_pauses() {
+        if self.ui.get_finding_pauses() || self.adding.borrow().is_some() {
             return;
         }
         self.ui.set_finding_pauses(true);

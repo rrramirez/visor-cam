@@ -760,7 +760,7 @@ export component Editor inherits Window {
                                     }
                                     SideButton {
                                         text: root.finding-pauses ? "Finding pauses…" : "Remove pauses"; icon: Icons.skip;
-                                        enabled: !root.finding-pauses;
+                                        enabled: !root.finding-pauses && !root.adding;
                                         clicked => { root.remove-pauses(); keys.focus(); }
                                     }
                                     SideButton {
@@ -1125,6 +1125,7 @@ export component Editor inherits Window {
                             primary: true;
                             text: "Export";
                             icon: Icons.export;
+                            enabled: !root.adding;
                             clicked => { root.export(); }
                         }
                         if !root.exporting && root.export-status != "": HorizontalLayout {
