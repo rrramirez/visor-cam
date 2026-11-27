@@ -7,6 +7,7 @@ pub mod composite;
 pub mod dead_time;
 pub mod decode;
 pub mod export;
+pub mod import;
 pub mod player;
 pub mod preview;
 pub mod recover;

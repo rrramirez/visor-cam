@@ -81,9 +81,9 @@ PKG_CONFIG_PATH="$static/lib/pkgconfig" PKG_CONFIG_LIBDIR="$static/lib/pkgconfig
     --enable-indev=avfoundation \
     --enable-demuxer=mov,matroska,gif,aac \
     --enable-muxer=mp4,ipod,mov,webm,matroska,gif \
-    --enable-decoder=h264,aac,rawvideo,vp9,opus,gif \
+    --enable-decoder=h264,hevc,aac,mp3float,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_f32le,rawvideo,vp8,vp9,opus,gif \
     --enable-encoder=libx264,h264_videotoolbox,aac,libvpx_vp9,libsvtav1,libopus,gif,mjpeg \
-    --enable-parser=h264,aac,vp9,opus,av1 \
+    --enable-parser=h264,hevc,aac,mpegaudio,vp8,vp9,opus,av1 \
     --enable-hwaccel=h264_videotoolbox \
     --enable-bsfs \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,scale,aresample,atempo,highpass,afftdn,loudnorm,null,anull,palettegen,paletteuse,split \

@@ -24,6 +24,30 @@ pub(crate) fn open_input(path: &Path) -> anyhow::Result<format::context::Input> 
         .with_context(|| format!("opening {}", path.display()))
 }
 
+/// How far a video stream says to turn its frames, clockwise, to show them
+/// upright (a phone's): 0, 90, 180 or 270 degrees.
+pub(crate) fn rotation(params: &ffmpeg::codec::Parameters) -> u32 {
+    // SAFETY: the parameters are valid; a display matrix is 9 i32s.
+    let angle = unsafe {
+        let par = params.as_ptr();
+        let sd = ffmpeg::ffi::av_packet_side_data_get(
+            (*par).coded_side_data,
+            (*par).nb_coded_side_data,
+            ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+        );
+        if sd.is_null() || (*sd).size < 36 {
+            return 0;
+        }
+        ffmpeg::ffi::av_display_rotation_get((*sd).data as *const i32)
+    };
+    if !angle.is_finite() {
+        return 0;
+    }
+    // The matrix turns counterclockwise.
+    let clockwise = (-angle / 90.0).round() as i64;
+    (clockwise.rem_euclid(4) * 90) as u32
+}
+
 /// Prepares `f` to be completely overwritten with a `fmt` `w` x `h` image:
 /// keeps its buffer if it fits and nothing else (an encoder, a filter, a
 /// frame in flight) still holds it, else gives it a new one.
