@@ -84,3 +84,152 @@ fn copies_a_file_in_with_progress_and_can_be_cancelled() {
     assert_eq!(left.len(), 2, "{left:?}");
     common::cleanup(&dir);
 }
+
+#[test]
+fn adds_a_recording_and_a_phone_video_at_the_end() {
+    use visor_core::{Blur, Marker, Range, Tracks};
+    use visor_media::import::prepare;
+    use visor_media::{ExportFormat, ExportOptions, export};
+    const S: u64 = 1_000_000;
+    let (dir, mut project) = project("add-into", 2);
+    // Another recording, 3 s, cut 0.5–1 s, split at 2 s with its last
+    // clip played first, a marker and a blur; then recorded more onto.
+    let (other, mut theirs) = common::project("add-other", 3);
+    theirs.edit.cut(S / 2, S);
+    theirs.edit.split(2 * S);
+    theirs.edit.move_clip(2, 0);
+    theirs.markers = vec![Marker {
+        at_us: 2 * S + S / 2,
+        text: "Theirs".into(),
+    }];
+    theirs.blurs = vec![Blur {
+        start_us: 0,
+        end_us: 3 * S,
+        x: 0.0,
+        y: 0.0,
+        width: 0.5,
+        height: 0.5,
+    }];
+    add_take(&other, &mut theirs, 1, (640, 360), false);
+    // A phone's video, held upright, starting 1.4 s in.
+    let elsewhere = temp_dir("add-phone");
+    let (video, tone) = (elsewhere.join("v.mp4"), elsewhere.join("t.m4a"));
+    write_halves(&video, 320, 180, 2 * FPS);
+    write_tone(&tone, 2 * S, 0.4);
+    let phone = elsewhere.join("IMG_0001.MOV");
+    remux(&[&video, &tone], &phone, 1_400_000, Some(90.0));
+
+    let prepared = prepare(&dir, &project, &[other.clone(), phone.clone()]).unwrap();
+    prepared
+        .copy(&dir, &mut |_| {}, &AtomicBool::new(false))
+        .unwrap();
+    let starts: Vec<u64> = prepared
+        .additions
+        .into_iter()
+        .map(|a| project.add(a))
+        .collect();
+    // To the nearest 10 ms (the test recordings' frames are 33 333 µs).
+    let cs = |t: u64| (t + 5_000) / 10_000 * 10;
+    assert_eq!(
+        starts.iter().map(|&t| cs(t)).collect::<Vec<_>>(),
+        [2000, 6000]
+    );
+    // The phone's video lasts as long as its sound, a little over 2 s.
+    assert!(
+        (8000..8100).contains(&cs(project.duration_us)),
+        "{}",
+        project.duration_us
+    );
+    let ms = |r: &Range| (cs(r.0), cs(r.1));
+    assert_eq!(
+        project.edit.ranges().iter().map(ms).collect::<Vec<_>>(),
+        [
+            (0, 2000),
+            (4000, 5000),
+            (2000, 2500),
+            (3000, 4000),
+            (5000, 6000),
+            (6000, cs(project.duration_us))
+        ]
+    );
+    assert_eq!(project.takes.len(), 3);
+    let at = starts[0];
+    assert_eq!(
+        project.markers.last().map(|m| m.at_us),
+        Some(at + 2 * S + S / 2)
+    );
+    let b = &project.blurs[0];
+    // Stretched over the take recorded onto it, as there.
+    assert_eq!((b.start_us, b.end_us), (at, at + theirs.duration_us));
+    // The phone's video and sound are one file.
+    let phone_take: &Tracks = &project.takes[2].tracks;
+    let (screen, mic) = (
+        phone_take.screen.as_ref().unwrap(),
+        phone_take.mic.as_ref().unwrap(),
+    );
+    assert_eq!(screen.file, mic.file);
+    assert!(screen.file.ends_with(".MOV") || screen.file.ends_with(".mov"));
+    assert_eq!((screen.width, screen.height), (Some(180), Some(320)));
+    for take in &project.takes {
+        for track in [
+            &take.tracks.screen,
+            &take.tracks.camera,
+            &take.tracks.mic,
+            &take.tracks.system,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(dir.join(&track.file).is_file(), "{}", track.file);
+        }
+    }
+    project.save(&dir).unwrap();
+    assert_eq!(visor_core::Project::load(&dir).unwrap(), project);
+
+    let out = dir.join("out.mp4");
+    export(
+        &dir,
+        &project,
+        &out,
+        &ExportOptions::new(ExportFormat::Mp4),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut reader = visor_media::decode::VideoReader::open(
+        &out,
+        Some((ffmpeg_next::format::Pixel::YUV420P, 640, 360)),
+    )
+    .unwrap();
+    assert!(
+        reader.duration().abs_diff(7 * S + S / 2) < 100_000,
+        "{}",
+        reader.duration()
+    );
+    // 1 s into the phone's video: upright, its bright half on top, with
+    // black bars either side.
+    reader.seek(6 * S + S / 2).unwrap();
+    let (_, f) = reader.frame_at(6 * S + S / 2).unwrap().unwrap();
+    let (stride, data) = (f.stride(0), f.data(0));
+    let at = |x: usize, y: usize| data[y * stride + x];
+    assert!(
+        at(320, 60) > 180 && at(320, 300) < 60,
+        "{} {}",
+        at(320, 60),
+        at(320, 300)
+    );
+    assert!(at(40, 60) < 25 && at(600, 60) < 25);
+
+    // Refused: itself, and a recording still being recorded onto.
+    assert!(prepare(&dir, &project, std::slice::from_ref(&dir)).is_err());
+    theirs.begin_take(Tracks::default());
+    theirs.save(&other).unwrap();
+    let err = format!(
+        "{:#}",
+        prepare(&dir, &project, std::slice::from_ref(&other)).unwrap_err()
+    );
+    assert!(err.contains("being recorded"), "{err}");
+    for d in [dir, other, elsewhere] {
+        common::cleanup(&d);
+    }
+}
