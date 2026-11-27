@@ -388,7 +388,7 @@ impl App {
         }
     }
 
-    fn recent(&self) -> Vec<(String, PathBuf)> {
+    pub fn recent(&self) -> Vec<(String, PathBuf)> {
         let root = self.settings.borrow().save_dir.clone();
         visor_core::project::list_projects(&root)
             .unwrap_or_default()

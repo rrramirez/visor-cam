@@ -105,6 +105,27 @@ component SideButton inherits Rectangle {
     }
 }
 
+// An item of the *Add video…* menu.
+component AddMenuRow inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    height: 30px;
+    border-radius: Theme.radius-small;
+    background: t.has-hover ? Theme.surface-3 : transparent;
+    Text {
+        x: 8px;
+        width: parent.width - 16px;
+        text: root.text;
+        color: Theme.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    t := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // One edge of a clip or a blur on the timeline: drag it to move it, or
 // click it to pick it for nudging. With `inside`, its grip lies inside what
 // it bounds, so it can be grabbed at either end of the timeline; else
@@ -398,6 +419,16 @@ export component Editor inherits Window {
     // Looks for stretches where nothing happens and removes them.
     callback remove-pauses();
     callback record-more();
+    // Adding videos: the recent recordings the menu offers (by name), and
+    // while files are copied in, what to say on the button.
+    in property <[string]> recent-recordings;
+    in property <bool> adding;
+    in property <string> adding-label;
+    in property <string> add-error;
+    callback open-add-menu();
+    callback add-recent(int);
+    callback add-files();
+    callback add-recording();
     callback add-marker();
     callback rename-marker(int, string);
     callback delete-marker(int);
@@ -454,7 +485,7 @@ export component Editor inherits Window {
             if (event.text == "o") { root.set-out(); return accept; }
             if (event.text == "t") { root.trim-to-selection(); return accept; }
             if ((event.text == "r" || event.text == "R") && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.alt) {
-                if (!event.repeat && !root.exporting && !root.finding-pauses) { root.record-more(); }
+                if (!event.repeat && !root.exporting && !root.finding-pauses && !root.adding) { root.record-more(); }
                 return accept;
             }
             // C, or ⌘B as in other editors (B alone blurs).
@@ -734,8 +765,62 @@ export component Editor inherits Window {
                                     }
                                     SideButton {
                                         text: "Record more"; icon: Icons.record; shortcut: "R";
-                                        enabled: !root.exporting && !root.finding-pauses;
+                                        enabled: !root.exporting && !root.finding-pauses && !root.adding;
                                         clicked => { root.record-more(); keys.focus(); }
+                                    }
+                                    add-button := SideButton {
+                                        text: root.adding ? root.adding-label : "Add video…"; icon: Icons.plus;
+                                        enabled: !root.exporting && !root.finding-pauses && !root.adding;
+                                        clicked => {
+                                            root.open-add-menu();
+                                            add-menu.show();
+                                        }
+                                        add-menu := PopupWindow {
+                                            x: 0;
+                                            y: parent.height + 2px;
+                                            width: parent.width;
+                                            close-policy: close-on-click;
+                                            Rectangle {
+                                                background: Theme.surface-2;
+                                                border-radius: Theme.radius-small;
+                                                border-width: 1px;
+                                                border-color: Theme.surface-3;
+                                                VerticalLayout {
+                                                    padding: 4px;
+                                                    spacing: 0;
+                                                    if root.recent-recordings.length > 0: Text {
+                                                        text: "Recent recordings";
+                                                        color: Theme.faint;
+                                                        font-size: Theme.font-small;
+                                                        height: 22px;
+                                                        vertical-alignment: center;
+                                                        x: 8px;
+                                                    }
+                                                    for name[i] in root.recent-recordings: AddMenuRow {
+                                                        text: name;
+                                                        clicked => { root.add-recent(i); keys.focus(); }
+                                                    }
+                                                    if root.recent-recordings.length > 0: Rectangle {
+                                                        height: 1px;
+                                                        background: Theme.surface-3;
+                                                    }
+                                                    AddMenuRow {
+                                                        text: "Choose video files…";
+                                                        clicked => { root.add-files(); keys.focus(); }
+                                                    }
+                                                    AddMenuRow {
+                                                        text: "Choose a Visor recording…";
+                                                        clicked => { root.add-recording(); keys.focus(); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.add-error != "": Text {
+                                        text: root.add-error;
+                                        color: Theme.record;
+                                        font-size: Theme.font-small;
+                                        wrap: word-wrap;
                                     }
                                     SideButton {
                                         text: "Undo"; icon: Icons.undo; shortcut: "⌘Z";
