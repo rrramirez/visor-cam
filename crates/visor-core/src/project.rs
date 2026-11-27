@@ -84,6 +84,8 @@ pub struct Part {
     pub start: Micros,
     pub end: Micros,
     pub file: Option<String>,
+    /// The file's time at `start` (see [`Track::start_us`]).
+    pub offset: Micros,
 }
 
 /// Blurs lasting to the start of the take `clip` go on to its end.
@@ -333,6 +335,7 @@ impl Project {
                 start,
                 end,
                 file: tracks.get(kind).map(|t| t.file.clone()),
+                offset: tracks.get(kind).and_then(|t| t.start_us).unwrap_or(0),
             })
             .collect()
     }
@@ -898,6 +901,7 @@ mod tests {
             start,
             end,
             file: file.map(String::from),
+            offset: 0,
         };
         assert_eq!(
             p.parts(TrackKind::Screen),

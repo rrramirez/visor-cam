@@ -14,7 +14,7 @@ fn probes_a_video_from_elsewhere() {
     // From a phone held upright: stored sideways, shown turned clockwise,
     // and starting 1.4 s in.
     let phone = dir.join("IMG_0001.MOV");
-    remux(&[&video, &tone], &phone, 1_400_000, Some(-90.0));
+    remux(&[&video, &tone], &phone, 1_400_000, Some(90.0));
     let info = probe_video(&phone).unwrap();
     assert_eq!(info.size, (180, 320));
     assert!(info.has_audio);

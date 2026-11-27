@@ -203,8 +203,7 @@ pub fn write_halves(path: &Path, w: u32, h: u32, frames: u64) {
 
 /// Copies the streams of `inputs` into one file at `out`, as a phone or
 /// another app would have made it: its timestamps starting `offset_us` in,
-/// and the video shown turned by `rotation` degrees (counterclockwise, as
-/// FFmpeg's display matrix says), if any.
+/// and the video shown turned clockwise by `rotation` degrees, if any.
 pub fn remux(inputs: &[&Path], out: &Path, offset_us: u64, rotation: Option<f64>) {
     use ffmpeg_next::{self as ffmpeg, codec, ffi, media};
     ffmpeg::init().unwrap();
