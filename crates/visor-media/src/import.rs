@@ -241,9 +241,9 @@ fn prepare_into(
             if fs::canonicalize(path).ok() == here {
                 return Err(anyhow!("can't add a recording to itself"));
             }
-            recording(dir, path, &mut next, &mut prepared.copies)
+            recording(dir, project, path, &mut next, &mut prepared.copies)
         } else {
-            video(dir, path, &mut next, &mut prepared.copies)
+            video(dir, project, path, &mut next, &mut prepared.copies)
         }
         .with_context(|| format!("adding {name}"))?;
         prepared.additions.push(addition);
@@ -296,6 +296,14 @@ impl Prepared {
     }
 }
 
+/// The next take's number: free in the folder (where those kept so far
+/// are, as empty files) and in the project, and after the last one taken.
+fn take_number(dir: &Path, project: &Project, next: &mut usize) -> usize {
+    let n = project.free_take_number(dir).max(*next);
+    *next = n + 1;
+    n
+}
+
 /// A file's name for track `base` (`screen.mp4`) in take `n`, keeping the
 /// file's own extension: `screen-3.mov`.
 fn numbered(base: &str, n: usize, file: &str) -> String {
@@ -309,6 +317,7 @@ fn numbered(base: &str, n: usize, file: &str) -> String {
 /// Another Visor recording, as it's edited: each of its pieces a take.
 fn recording(
     dir: &Path,
+    project: &Project,
     src: &Path,
     next: &mut usize,
     copies: &mut Vec<(PathBuf, String)>,
@@ -336,8 +345,7 @@ fn recording(
         .filter(|&(_, len, _)| len > 0);
     let pieces = pieces
         .map(|(start_us, duration_us, tracks)| {
-            let n = *next;
-            *next += 1;
+            let n = take_number(dir, project, next);
             // A file two tracks share (a video's picture and sound) is
             // copied once.
             let mut names: HashMap<String, String> = HashMap::new();
@@ -393,6 +401,7 @@ fn recording(
 /// A video file: one take, its picture and sound from the same file.
 fn video(
     dir: &Path,
+    project: &Project,
     src: &Path,
     next: &mut usize,
     copies: &mut Vec<(PathBuf, String)>,
@@ -400,8 +409,7 @@ fn video(
     if !is_video_file(src) {
         return Err(anyhow!("Visor can add MP4, MOV, M4V, MKV and WebM videos"));
     }
-    let n = *next;
-    *next += 1;
+    let n = take_number(dir, project, next);
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())

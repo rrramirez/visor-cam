@@ -251,6 +251,17 @@ fn preparing_keeps_the_take_numbers_it_picks() {
         .unwrap();
     assert!(dir.join(&name).metadata().unwrap().len() > 0);
 
+    // A take recorded after a gap (an addition undone, its file deleted):
+    // each one added skips it.
+    std::fs::write(dir.join("screen-4.mp4"), b"take").unwrap();
+    let two = prepare(&dir, &project, &[video.clone(), video.clone()]).unwrap();
+    assert_eq!(
+        two.files().collect::<Vec<_>>(),
+        ["screen-3.mp4", "screen-5.mp4"]
+    );
+    two.copy(&dir, &mut |_| {}, &AtomicBool::new(false))
+        .unwrap();
+
     // One it can't add: nothing is kept for any of them.
     let bad = elsewhere.join("bad.mp4");
     std::fs::write(&bad, "not a video").unwrap();
