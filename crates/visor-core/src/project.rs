@@ -436,6 +436,12 @@ impl Project {
     /// the source time it starts at.
     pub fn add(&mut self, addition: Addition) -> Micros {
         let start = self.duration_us;
+        // A marker right at the end (as a take's last can be) moves a
+        // microsecond back, so it stays this recording's: what's from
+        // `start` on is the addition's.
+        for m in self.markers.iter_mut().filter(|m| m.at_us >= start) {
+            m.at_us = start.saturating_sub(1);
+        }
         self.takes.extend(addition.pieces.into_iter().map(|t| Take {
             start_us: start + t.start_us,
             added: true,
@@ -1189,6 +1195,29 @@ mod tests {
         assert_eq!(part.size, None);
         q.add(part);
         assert_eq!(q, p);
+
+        // A marker of this recording right at its end stays with it.
+        let mut m = before.clone();
+        m.markers.push(Marker {
+            at_us: 20,
+            text: "End".into(),
+        });
+        m.add(Addition {
+            duration_us: 5,
+            pieces: Vec::new(),
+            edit: EditList::full(5),
+            markers: Vec::new(),
+            blurs: Vec::new(),
+            size: None,
+        });
+        m.take_addition(20);
+        assert_eq!(
+            m.markers
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Here", "End"]
+        );
 
         // Recording more after it: this recording's whole-video blur
         // covers the new take too, the added one's doesn't.

@@ -118,6 +118,10 @@ fn add_to_steps(steps: &mut [Step], at: Micros, part: &Addition) {
         match step {
             Step::Edit(edit) => edit.append_edit(&part.edit, at),
             Step::Markers(m) => {
+                // As `Project::add` keeps one at the end before it.
+                for x in m.iter_mut().filter(|x| x.at_us >= at) {
+                    x.at_us = at.saturating_sub(1);
+                }
                 m.extend(part.markers.iter().map(|x| Marker {
                     at_us: at + x.at_us,
                     ..x.clone()
@@ -2257,7 +2261,7 @@ mod tests {
         let before = || {
             vec![
                 Step::Edit(EditList::full(20)),
-                Step::Markers(vec![marker(3)]),
+                Step::Markers(vec![marker(3), marker(19)]),
                 Step::Blurs(vec![blur(0, 20)]),
                 Step::Added(10),
                 Step::Edit(cut.clone()),
@@ -2280,7 +2284,7 @@ mod tests {
         let Step::Markers(m) = &steps[1] else {
             panic!()
         };
-        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [3, 24]);
+        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [3, 19, 24]);
         // This recording's blurs don't go on over it.
         let Step::Blurs(b) = &steps[2] else { panic!() };
         assert_eq!(
@@ -2289,6 +2293,13 @@ mod tests {
         );
         let Step::Edit(e) = &steps[4] else { panic!() };
         assert_eq!(e.ranges(), [Range(0, 5), Range(8, 20), Range(22, 30)]);
+
+        // A marker right at the end stays when the addition is undone.
+        let mut end = vec![Step::Markers(vec![marker(20)])];
+        add_to_steps(&mut end, 20, &part);
+        strip_from_steps(&mut end, 20);
+        let Step::Markers(m) = &end[0] else { panic!() };
+        assert_eq!(m.iter().map(|m| m.at_us).collect::<Vec<_>>(), [19]);
 
         strip_from_steps(&mut steps, 20);
         for (a, b) in steps.iter().zip(before()) {
