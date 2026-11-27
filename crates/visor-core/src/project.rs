@@ -447,6 +447,56 @@ impl Project {
         start
     }
 
+    /// Takes out what was added from source time `at` on, as it is now:
+    /// the takes, clips, markers and blurs from there, which
+    /// [`add`](Self::add) puts back.
+    pub fn take_addition(&mut self, at: Micros) -> Addition {
+        let (pieces, takes) = std::mem::take(&mut self.takes)
+            .into_iter()
+            .partition(|t| t.start_us >= at);
+        self.takes = takes;
+        let pieces: Vec<Take> = pieces;
+        let (markers, kept) = std::mem::take(&mut self.markers)
+            .into_iter()
+            .partition(|m| m.at_us >= at);
+        self.markers = kept;
+        let markers: Vec<Marker> = markers;
+        let (blurs, kept) = std::mem::take(&mut self.blurs)
+            .into_iter()
+            .partition(|b| b.start_us >= at);
+        self.blurs = kept;
+        let blurs: Vec<Blur> = blurs;
+        let duration_us = self.duration_us.saturating_sub(at);
+        self.duration_us = at.min(self.duration_us);
+        Addition {
+            duration_us,
+            pieces: pieces
+                .into_iter()
+                .map(|t| Take {
+                    start_us: t.start_us - at,
+                    ..t
+                })
+                .collect(),
+            edit: self.edit.split_off(at),
+            markers: markers
+                .into_iter()
+                .map(|m| Marker {
+                    at_us: m.at_us - at,
+                    ..m
+                })
+                .collect(),
+            blurs: blurs
+                .into_iter()
+                .map(|b| Blur {
+                    start_us: b.start_us - at,
+                    end_us: b.end_us - at,
+                    ..b
+                })
+                .collect(),
+            size: None,
+        }
+    }
+
     /// The lowest number (2 or more) to name a new take's files with
     /// ([`take_file`]) that no file of this project nor in `dir` has: one
     /// of an addition that was undone may still be there, to redo it.
@@ -1094,6 +1144,14 @@ mod tests {
         let (x, w) = ((350.0 + 450.0) / 1600.0, 450.0 / 1600.0);
         assert!(near(b.x, x) && near(b.y, 0.0) && near(b.width, w) && near(b.height, 1.0));
         assert!(p.validate().is_ok());
+
+        // Taken out again (to undo it): as before; put back: as added.
+        let mut q = p.clone();
+        let part = q.take_addition(20);
+        assert_eq!(q, before);
+        assert_eq!(part.size, None);
+        q.add(part);
+        assert_eq!(q, p);
 
         // Its files' numbers aren't taken again by a take recorded later.
         let dir = std::env::temp_dir().join(format!("visor-added-{}", std::process::id()));

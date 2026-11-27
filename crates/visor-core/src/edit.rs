@@ -116,7 +116,22 @@ impl EditList {
         self.lead
             .extend(other.lead.iter().map(|(&t, &l)| (t + offset, l)));
         if let Some(first) = other.keep.iter().map(|r| r.0).min().filter(|&f| f > 0) {
-            self.lead.insert(first + offset, first);
+            self.lead.entry(first + offset).or_insert(first);
+        }
+    }
+
+    /// Takes the clips from source time `at` on off this edit, as an edit
+    /// of their own from `at` ([`append_edit`] puts them back).
+    ///
+    /// [`append_edit`]: Self::append_edit
+    pub fn split_off(&mut self, at: Micros) -> EditList {
+        let (off, keep) = self.keep.iter().partition(|r| r.0 >= at);
+        self.keep = keep;
+        let off: Vec<Range> = off;
+        let lead = self.lead.split_off(&at);
+        EditList {
+            keep: off.iter().map(|r| Range(r.0 - at, r.1 - at)).collect(),
+            lead: lead.into_iter().map(|(t, l)| (t - at, l)).collect(),
         }
     }
 
@@ -527,6 +542,12 @@ mod tests {
             e.ranges(),
             [Range(0, 15), Range(28, 30), Range(22, 25), Range(26, 28)]
         );
+        // Taken off again, and put back: the same.
+        let mut back = e.clone();
+        let off = back.split_off(20);
+        assert_eq!(back.ranges(), [Range(0, 15)]);
+        back.append_edit(&off, 20);
+        assert_eq!(back, e);
         assert!(e.is_valid(30));
         let removed: Vec<_> = e
             .removed(30)
