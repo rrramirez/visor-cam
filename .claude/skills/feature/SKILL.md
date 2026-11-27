@@ -85,13 +85,16 @@ Run the checks for what the feature touches:
 - Platform code touched (`visor-capture/src/{windows,linux}.rs`, `#[cfg(target_os)]`) → also
   `scripts/linux-check.sh` (needs Docker) and `scripts/windows-check.sh`. If one can't run
   here, say so in the PR rather than skipping it silently.
-- **Live check**: anything a user can see gets looked at in the real app. Run it
-  (`cargo run -p visor`, or the `run` skill) and use the `visor-dev` agent tools to drive it
-  and look at it (`open_recording`, `view_frame`, `status`). For web pages, use Playwright
-  (as `site/check.mjs` does). The Chrome extension can't open `file://` pages or servers on
-  this machine's localhost. Check the note's scenarios that
-  automated tests can't cover. Don't move the user's mouse or keyboard without asking. Note
-  what you checked live and what you didn't try.
+- **Live check**: anything a user can see gets looked at in the real app. Load the
+  `ui-test` skill: it runs a test instance with its own settings and recordings, drives it
+  with mouse and keyboard (menus, pickers, shortcuts, drag and drop), and screenshots only its
+  windows. Check the note's scenarios that automated tests can't cover, in the packaged app
+  (`launch --dmg`) when the change depends on what ships, such as FFmpeg codecs. Its input
+  needs the user's Accessibility permission and moves the mouse, so ask before the first run;
+  without it, use what the CLI and `visor-dev` agent tools reach (`open_recording`,
+  `view_frame`, `status`) and list the rest under **To test**. For web pages, use Playwright
+  (as `site/check.mjs` does); the Chrome extension can't open `file://` pages or servers on
+  this machine's localhost. Note what you checked live and what you didn't try.
 
 ## 5. Docs, site, changelog
 
