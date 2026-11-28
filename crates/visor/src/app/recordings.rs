@@ -34,12 +34,23 @@ impl App {
         let root = self.settings.borrow().save_dir.clone();
         let entries = visor_core::library::entries(&root).unwrap_or_default();
         let busy = entries.iter().map(|e| self.busy_for(&e.dir)).collect();
+        // Thumbnails of recordings gone (trashed, renamed, moved away).
+        let dirs: Vec<PathBuf> = entries.iter().map(|e| e.dir.clone()).collect();
+        visor_media::library::prune_thumbnails(
+            &crate::library::cache_dir(),
+            &dirs,
+            crate::library::THUMB_HEIGHT,
+        );
         w.set_entries(entries, busy);
     }
 
-    pub(crate) fn library_thumbnail(&self, dir: &Path, path: Option<PathBuf>) {
+    pub(crate) fn library_thumbnail(
+        &self,
+        dir: &Path,
+        rendered: Option<(PathBuf, Option<std::time::SystemTime>)>,
+    ) {
         if let Some(w) = self.library.borrow().clone() {
-            w.thumbnail(dir, path);
+            w.thumbnail(dir, rendered);
         }
     }
 
@@ -81,6 +92,8 @@ impl App {
         if title.is_empty() {
             return;
         }
+        // Editors and agents know folders by their real paths.
+        let dir = &dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let note = |text: &str| {
             if let Some(w) = self.library.borrow().clone() {
                 w.set_note(text);
@@ -97,7 +110,9 @@ impl App {
             Some(Busy::Adding) => {
                 return note("Videos are being added to it; rename it once that's done.");
             }
-            _ => {}
+            // Open, but its editor wasn't found above: never rename under it.
+            Some(Busy::Open) => return note("Rename it in its editor."),
+            None => {}
         }
         let renamed = visor_core::Project::load(dir)
             .map_err(anyhow::Error::from)
@@ -159,7 +174,16 @@ impl App {
             return;
         }
         let dirs: Vec<PathBuf> = selected.into_iter().map(|(d, _, _)| d).collect();
-        match trash::delete_all(&dirs) {
+        #[allow(unused_mut)]
+        let mut trash = trash::TrashContext::default();
+        // Through the file manager's own call, not by asking Finder to do it
+        // (an Apple Event the app isn't allowed to send).
+        #[cfg(target_os = "macos")]
+        {
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+            trash.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        match trash.delete_all(&dirs) {
             Ok(()) => w.set_note(""),
             Err(e) => w.set_note(&format!("Couldn't move it to the Trash: {e}")),
         }

@@ -58,6 +58,9 @@ export component Library inherits Window {
     callback step(int);
     callback trash();
     callback rename(int, string);
+    // The name of card i is edited (Rust keeps which recording), or no longer.
+    callback start-rename(int);
+    callback end-rename();
     callback reveal(int);
     callback reveal-exports(int);
     callback reveal-all();
@@ -71,6 +74,17 @@ export component Library inherits Window {
     property <length> thumb-height: self.card-width * 10 / 16;
     property <length> card-height: self.thumb-height + 58px;
     property <int> menu-card: -1;
+    // A plain click on the selected card's name renames it, unless a second
+    // click follows (a double-click opens it), as in Finder.
+    property <int> rename-pending: -1;
+    rename-timer := Timer {
+        interval: 500ms;
+        running: root.rename-pending >= 0;
+        triggered => {
+            root.start-rename(root.rename-pending);
+            root.rename-pending = -1;
+        }
+    }
 
     keys := FocusScope {
         key-pressed(event) => {
@@ -170,6 +184,7 @@ export component Library inherits Window {
                         area := TouchArea {
                             pointer-event(event) => {
                                 if (event.kind == PointerEventKind.down) {
+                                    root.rename-pending = -1;
                                     if (event.button == PointerEventButton.right) {
                                         card-box.menu-x = self.mouse-x;
                                         card-box.menu-y = self.mouse-y;
@@ -230,16 +245,29 @@ export component Library inherits Window {
                                     overflow: elide;
                                     vertical-alignment: center;
                                     TouchArea {
-                                        // Clicking the name of the one selected card renames it, as in Finder.
-                                        clicked => {
-                                            if (card.selected && card.readable) {
-                                                root.renaming = i;
-                                            } else {
-                                                root.card-clicked(i, 0);
+                                        pointer-event(event) => {
+                                            if (event.kind != PointerEventKind.down) { return; }
+                                            if (event.button == PointerEventButton.right) {
+                                                card-box.menu-x = self.absolute-position.x - card-box.absolute-position.x + self.mouse-x;
+                                                card-box.menu-y = self.absolute-position.y - card-box.absolute-position.y + self.mouse-y;
+                                                root.menu-for(i);
+                                                root.menu-card = i;
+                                                menu.show();
+                                            } else if (event.button == PointerEventButton.left) {
+                                                if (event.modifiers.meta || event.modifiers.control || event.modifiers.shift) {
+                                                    root.card-clicked(i, event.modifiers.shift ? 2 : 1);
+                                                } else if (card.selected && card.readable) {
+                                                    root.rename-pending = i;
+                                                } else {
+                                                    root.card-clicked(i, 0);
+                                                }
                                                 keys.focus();
                                             }
                                         }
-                                        double-clicked => { root.open(i); }
+                                        double-clicked => {
+                                            root.rename-pending = -1;
+                                            root.open(i);
+                                        }
                                     }
                                 }
                                 if root.renaming == i: name := LineEdit {
@@ -247,12 +275,11 @@ export component Library inherits Window {
                                     init => { self.focus(); self.select-all(); }
                                     accepted(text) => {
                                         root.rename(i, text);
-                                        root.renaming = -1;
                                         keys.focus();
                                     }
                                     key-pressed(event) => {
                                         if (event.text == Key.Escape) {
-                                            root.renaming = -1;
+                                            root.end-rename();
                                             keys.focus();
                                             return accept;
                                         }
@@ -295,13 +322,13 @@ export component Library inherits Window {
                                     padding: 4px;
                                     MenuRow {
                                         text: "Open";
-                                        enabled: card.readable;
+                                        enabled: card.readable && card.badge != "Recording";
                                         clicked => { root.open(i); }
                                     }
                                     MenuRow {
                                         text: "Rename";
                                         enabled: card.readable;
-                                        clicked => { root.card-clicked(i, 0); root.renaming = i; }
+                                        clicked => { root.card-clicked(i, 0); root.start-rename(i); }
                                     }
                                     MenuRow {
                                         text: "Show in " + root.file-manager;

@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Context;
 use visor_core::Project;
@@ -14,15 +15,21 @@ use crate::export::{frame_jpeg, thumbnail_time};
 /// The recording in `dir`'s thumbnail, `height` pixels tall, as a JPEG in
 /// `cache`: its chosen thumbnail frame (else the first kept one), as the
 /// export shows it. Rendered once per state of `project.json`; a new
-/// rendering replaces the recording's older ones. Slow the first time, so
-/// call it off the UI thread.
-pub fn cached_thumbnail(dir: &Path, cache: &Path, height: u32) -> anyhow::Result<PathBuf> {
+/// rendering replaces the recording's older ones. Returns it, and the
+/// modification time of the `project.json` it shows. Slow the first time,
+/// so call it off the UI thread.
+pub fn cached_thumbnail(
+    dir: &Path,
+    cache: &Path,
+    height: u32,
+) -> anyhow::Result<(PathBuf, Option<SystemTime>)> {
     let meta = fs::metadata(dir.join(PROJECT_FILE)).context("no project.json")?;
+    let modified = meta.modified().ok();
     let folder = hash(&(dir, height));
     let state = hash(&(meta.modified().ok(), meta.len()));
     let path = cache.join(format!("{folder:016x}-{state:016x}.jpg"));
     if path.is_file() {
-        return Ok(path);
+        return Ok((path, modified));
     }
     let project = Project::load(dir)?;
     let jpeg = frame_jpeg(dir, &project, thumbnail_time(&project), height)?;
@@ -38,7 +45,7 @@ pub fn cached_thumbnail(dir: &Path, cache: &Path, height: u32) -> anyhow::Result
             let _ = fs::remove_file(old.path());
         }
     }
-    Ok(path)
+    Ok((path, modified))
 }
 
 /// Removes cached thumbnails of recordings other than `dirs` (trashed,

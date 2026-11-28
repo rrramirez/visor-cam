@@ -7,7 +7,8 @@ rename, show in the file manager or move to the Trash (`crates/visor/src/library
 
 ## How it works
 
-**Listing.** `visor_core::library::entries(root)` scans the save folder (`list_projects`:
+**Listing.** `visor_core::library::entries(root)` scans the save folder, by its real path (so folders
+compare equal to editors' and agents', which are canonical), (`list_projects`:
 folders with a `project.json`, newest first by folder creation time) and reads each
 `project.json` into an `Entry`: its title (the folder's name when it has none), when it was
 recorded and last changed, and, if it could be read, its recorded length, its length as
@@ -36,10 +37,16 @@ thumbnail until theirs is ready.
 
 **In use.** `App::busy_for` tells whether a recording is being recorded (or recorded more
 onto), open in an editor, or being added to (`App::copies`). Cards say *Recording* or *Open*.
+One being recorded doesn't open (`open_refusal`): its `project.json` isn't finished, and
+opening would run crash recovery on files still being written.
 Renaming a recording open in an editor goes through that editor's name
 (`EditorWindow::rename`; the folder follows when it closes); otherwise the title is saved
-and the folder renamed at once (`rename_to_title`). Moving to the Trash (the `trash` crate)
-asks first (`trash_question`) and is refused for any recording in use (`trash_refusal`).
+and the folder renamed at once (`rename_to_title`). The window keeps which recording is
+being renamed by folder (`LibraryWindow::renaming`), so a refresh that moves cards doesn't
+move the edit; a click on the selected card's name starts it after a moment, so a
+double-click opens instead. Moving to the Trash (the `trash` crate; on macOS through
+`NSFileManager`, not by asking Finder, which a signed app may not do) asks first
+(`trash_question`) and is refused for any recording in use (`trash_refusal`).
 
 **Selecting.** `library::Selection` keeps the selected cards and the last one clicked: a
 click picks one, ⌘-click toggles, ⇧-click picks a range from the last one clicked (as Finder
@@ -56,6 +63,8 @@ does), arrow keys move by one or by a row (`columns`, computed in Slint from the
 
 - Replacing the card model on every click (a new `VecModel`) recreates each card's
   `TouchArea`, so the second click of a double-click never reaches the first one's.
+- Folders must be compared by their canonical paths: on Windows `canonicalize` adds `\\?\`,
+  and on macOS a save folder reached through a link differs from its real path.
 - `rfd` confirmations shown while Visor isn't the active app come up as a system alert
   (UserNotificationCenter), outside Visor's windows.
 - ⌘ and ⇧ on clicks come from winit's modifier state (key events), not from the click.

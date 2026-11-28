@@ -14,7 +14,7 @@ use crate::app::{app, post};
 use crate::{Library, RecordingCard, platform, util};
 
 /// How tall cached thumbnails are, in pixels: sharp on a 2x display.
-const THUMB_HEIGHT: u32 = 360;
+pub const THUMB_HEIGHT: u32 = 360;
 
 /// What a recording is in use for, which limits what can be done to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +96,12 @@ impl Selection {
     }
 }
 
+/// Why a recording in use `busy` can't open in the editor, if it can't:
+/// one being recorded isn't saved yet.
+pub fn open_refusal(busy: Option<Busy>) -> Option<&'static str> {
+    (busy == Some(Busy::Recording)).then_some("It's being recorded; open it once it's stopped.")
+}
+
 /// Why the recordings `selected` (name, and what it's in use for) can't
 /// go to the Trash, if one can't.
 pub fn trash_refusal(selected: &[(&str, Option<Busy>)]) -> Option<String> {
@@ -135,13 +141,16 @@ pub struct LibraryWindow {
     /// Asked for and not back yet.
     pending: RefCell<HashSet<PathBuf>>,
     renderer: crossbeam_channel::Sender<PathBuf>,
+    /// The recording whose name is being edited: followed by its folder,
+    /// as the list may change under the edit.
+    renaming: RefCell<Option<PathBuf>>,
     /// The cards shown. Changed row by row, not replaced: a card made anew
     /// between two clicks would miss a double-click.
     model: Rc<VecModel<RecordingCard>>,
 }
 
 /// Where thumbnails are cached: Visor's folder in the user's cache folder.
-fn cache_dir() -> PathBuf {
+pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Visor")
@@ -179,6 +188,7 @@ impl LibraryWindow {
                 thumbs: RefCell::default(),
                 pending: RefCell::default(),
                 renderer: tx,
+                renaming: RefCell::default(),
                 model,
             }
         });
@@ -231,10 +241,17 @@ impl LibraryWindow {
         *self.entries.borrow_mut() = entries;
         *self.busy.borrow_mut() = busy;
         *self.selection.borrow_mut() = selection;
-        if self.ui.get_renaming() >= self.entries.borrow().len() as i32 {
-            self.ui.set_renaming(-1);
+        // The name being edited stays on its recording, wherever it moved.
+        let renaming = self
+            .renaming
+            .borrow()
+            .as_ref()
+            .and_then(|d| self.entries.borrow().iter().position(|e| &e.dir == d));
+        if renaming.is_none() {
+            self.renaming.borrow_mut().take();
         }
         self.show_cards();
+        self.ui.set_renaming(renaming.map_or(-1, |i| i as i32));
     }
 
     /// Selects the recording in `dir` alone (one just renamed).
@@ -246,8 +263,9 @@ impl LibraryWindow {
         }
     }
 
-    /// A thumbnail rendered (or not) for `dir`.
-    pub fn thumbnail(&self, dir: &Path, path: Option<PathBuf>) {
+    /// A thumbnail rendered (or not) for `dir`, and the state of its
+    /// `project.json` it shows.
+    pub fn thumbnail(&self, dir: &Path, rendered: Option<(PathBuf, Option<SystemTime>)>) {
         self.pending.borrow_mut().remove(dir);
         let changed = self
             .entries
@@ -255,9 +273,16 @@ impl LibraryWindow {
             .iter()
             .find(|e| e.dir == dir)
             .map(|e| e.changed_at);
-        let (Some(changed), Some(path)) = (changed, path) else {
+        let (Some(changed), Some((path, shows))) = (changed, rendered) else {
             return;
         };
+        // Edited while it rendered: render it again, for what it is now.
+        if shows != changed {
+            if self.pending.borrow_mut().insert(dir.to_path_buf()) {
+                let _ = self.renderer.send(dir.to_path_buf());
+            }
+            return;
+        }
         match Image::load_from_path(&path) {
             Ok(image) => {
                 self.thumbs
@@ -364,6 +389,10 @@ fn wire(ui: &Library, weak: Weak<LibraryWindow>) {
     }
     on!(on_card_clicked, |w, card, pick| {
         w.set_note("");
+        // A click elsewhere ends a rename without it.
+        if w.renaming.borrow_mut().take().is_some() {
+            w.ui.set_renaming(-1);
+        }
         match usize::try_from(card) {
             Ok(i) => w.selection.borrow_mut().click(
                 i,
@@ -401,12 +430,31 @@ fn wire(ui: &Library, weak: Weak<LibraryWindow>) {
             }
         };
         if let Some(e) = entry.filter(|e| e.info.is_some()) {
-            app().open_editor(e.dir);
+            let busy = {
+                let i = w.entries.borrow().iter().position(|x| x.dir == e.dir);
+                i.and_then(|i| w.busy.borrow().get(i).copied().flatten())
+            };
+            match open_refusal(busy) {
+                Some(why) => w.set_note(why),
+                None => app().open_editor(e.dir),
+            }
         }
     });
-    on!(on_rename, |w, card, title| {
-        if let Some(e) = w.entry(card) {
-            app().library_rename(&e.dir, title.trim());
+    on!(on_start_rename, |w, card| {
+        if let Some(e) = w.entry(card).filter(|e| e.info.is_some()) {
+            *w.renaming.borrow_mut() = Some(e.dir);
+            w.ui.set_renaming(card);
+        }
+    });
+    on!(on_end_rename, |w| {
+        w.renaming.borrow_mut().take();
+        w.ui.set_renaming(-1);
+    });
+    on!(on_rename, |w, _card, title| {
+        let dir = w.renaming.borrow_mut().take();
+        w.ui.set_renaming(-1);
+        if let Some(dir) = dir {
+            app().library_rename(&dir, title.trim());
         }
     });
     on!(on_reveal, |w, card| {
@@ -497,6 +545,17 @@ mod tests {
         let mut empty = Selection::default();
         empty.step(1, 3);
         assert_eq!(empty.cards(), [0]);
+    }
+
+    #[test]
+    fn a_recording_being_recorded_does_not_open() {
+        assert_eq!(open_refusal(None), None);
+        assert_eq!(open_refusal(Some(Busy::Open)), None);
+        assert_eq!(open_refusal(Some(Busy::Adding)), None);
+        assert_eq!(
+            open_refusal(Some(Busy::Recording)),
+            Some("It's being recorded; open it once it's stopped.")
+        );
     }
 
     #[test]

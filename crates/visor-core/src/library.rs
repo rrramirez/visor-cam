@@ -32,9 +32,11 @@ pub struct Info {
     pub markers: usize,
 }
 
-/// The recordings under `root`, newest first.
+/// The recordings under `root`, newest first, by their real paths (as
+/// editors and agents know them, through any link to `root`).
 pub fn entries(root: &Path) -> io::Result<Vec<Entry>> {
-    Ok(list_projects(root)?
+    let root = root.canonicalize()?;
+    Ok(list_projects(&root)?
         .into_iter()
         .map(|d| entry(&d))
         .collect())
@@ -106,6 +108,22 @@ mod tests {
             })
         );
         assert!(list[1].changed_at.is_some() && list[1].recorded_at.is_some());
+        // Reached through a link (macOS's /tmp, a linked folder): listed by
+        // their real paths, as editors know them.
+        #[cfg(unix)]
+        {
+            let link = root.with_extension("link");
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let real = root.canonicalize().unwrap();
+            assert!(
+                entries(&link)
+                    .unwrap()
+                    .iter()
+                    .all(|e| e.dir.starts_with(&real))
+            );
+            fs::remove_file(&link).unwrap();
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }
