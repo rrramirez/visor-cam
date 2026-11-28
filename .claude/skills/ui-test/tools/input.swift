@@ -80,10 +80,15 @@ case "front":
     usleep(400_000)
     print(ok)
 case "click":
+    // A modifier is pressed as a key too: some apps (winit) read it from
+    // key events, not from the click.
+    let modKey: CGKeyCode? = a.count > 4 ? (a[4] == "cmd" ? 55 : a[4] == "shift" ? 56 : nil) : nil
     if a.count > 4 { clickFlags = a[4] == "cmd" ? .maskCommand : a[4] == "shift" ? .maskShift : [] }
+    if let k = modKey { post(k, down: true, clickFlags) }
     mouse(.mouseMoved, num(2), num(3)); usleep(80_000)
     mouse(.leftMouseDown, num(2), num(3)); usleep(60_000)
     mouse(.leftMouseUp, num(2), num(3))
+    if let k = modKey { usleep(30_000); post(k, down: false, []) }
 case "dclick":
     mouse(.mouseMoved, num(2), num(3)); usleep(80_000)
     for n in [1, 2] {
