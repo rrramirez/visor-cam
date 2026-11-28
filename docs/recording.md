@@ -98,6 +98,15 @@ thumbnail and bubble layout aren't taken; its camera shows in this
 recording's bubble. `Project::take_addition(at)` takes everything from source
 time `at` on out again, for undo (see [editor-ui.md](editor-ui.md)).
 
+**Starting from videos.** *New from Video…* (menu bar), "or start from a
+video…" (recorder panel), agents' `create_recording` and `visor import`
+make a new recording from video files (`import::new_recording`): a new
+folder in the save folder named after the first file (or the name given),
+the files prepared and copied in as for *Add video*, and the first one
+made the first piece (`project.tracks`) rather than a take, so a recording
+always has one. Visor recording folders are refused (add them to a
+recording instead); on failure the folder is removed.
+
 **Files from elsewhere.** `Track::start_us` is the file time where the track
 starts (another app's video may start past 0); `Part::offset` carries it to
 the readers, which subtract it. A video stream's display matrix (a phone held
@@ -153,6 +162,7 @@ track is unreadable.
 `visor-media` `tests/decode.rs` (reading parts, letterbox, gaps),
 `tests/export.rs` and `tests/player.rs` (a take exported and played),
 `tests/recover.rs` (a take cut short), `tests/import.rs` (probing, copying,
+starting a recording from videos,
 a recording and a phone's video added and exported), `tests/decode.rs` (a
 file starting late and turned), `visor-recorder` (recording more with a
 fake screen, discard keeps the original), `visor` `agent.rs`
