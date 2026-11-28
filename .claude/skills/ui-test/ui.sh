@@ -14,7 +14,8 @@
 #   windows                    its windows: id x y w h layer title
 #   front                      bring it to the front (do this before each input)
 #   shot WINDOW OUT.png [W]    screenshot one window (resized to W px wide, default 1000)
-#   click|drag|scroll|key|type ...   input, see tools/input.swift
+#   click|dclick|drag|scroll|key|type ...   input, see tools/input.swift
+#                              (clicks only land on the test instance's windows)
 #   dragsrc FILE...            a small window to drag those files from (prints
 #                              its id x y w h, as `windows` does)
 #   cli ARGS...                run the visor command line against the test instance
@@ -137,13 +138,38 @@ video)
     ;;
 pid) test_pids | head -1 ;;
 windows) input windows "$(test_pids | head -1)" ;;
-front) input front "$(test_pids | head -1)" ;;
+front)
+    # System Events can bring Visor forward once it shows a normal window
+    # (an editor, Recordings); a menu bar app with only its panel can't be.
+    pid=$(test_pids | head -1)
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null
+    sleep 0.4
+    # shellcheck disable=SC2046 # x and y as two words
+    at=$(input windows "$pid" | awk '$6 == 0 && NF > 6 && $5 > 100 {print $2 + 40, $3 + 10; exit}')
+    [ -n "$at" ] && [ "$(input owner $at)" = "$pid" ] ||
+        { echo "the test instance isn't in front" >&2; exit 1; }
+    ;;
 shot)
     screencapture -x -o -l "$2" "$3"
     sips -Z "${4:-1000}" "$3" >/dev/null
     echo "$3"
     ;;
-click | drag | scroll | key | type) input "$@" ;;
+click | dclick | drag | scroll)
+    # Never into someone else's window: what's under the point must be the
+    # test instance's, or the drag source's.
+    owner=$(input owner "$2" "$3")
+    allowed="$(test_pids) $(pgrep -f "$dir/dragsrc" || true)"
+    grep -qw "$owner" <<<"$allowed" ||
+        { echo "refused: the window at $2,$3 isn't the test instance's (pid $owner); run front" >&2; exit 1; }
+    input "$@"
+    ;;
+key | type)
+    # Keys go to the frontmost app: it must be the test instance.
+    front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')
+    grep -qw "$front" <<<"$(test_pids)" ||
+        { echo "refused: the test instance isn't the frontmost app; run front" >&2; exit 1; }
+    input "$@"
+    ;;
 dragsrc)
     shift
     build_tool dragsrc

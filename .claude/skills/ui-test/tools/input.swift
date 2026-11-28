@@ -6,8 +6,10 @@
 //   trusted                        -> "true" / "false"
 //   prompt                         -> asks macOS to show the permission request
 //   windows <pid>                  -> "<id> <x> <y> <w> <h> <layer> <title>" per window
+//   owner <x> <y>                  -> pid of the app whose window is on top at that point
 //   front <pid>                    -> brings that app to the front
 //   click <x> <y> [shift|cmd]      -> left click (with a modifier held)
+//   dclick <x> <y>                 -> double-click
 //   drag <x1> <y1> <x2> <y2>       -> press, move slowly, release (starts drag sessions too)
 //   scroll <x> <y> <dy>            -> scroll by dy pixels (positive = up)
 //   key <keycode> [cmd,shift,alt]  -> key press, with real modifier presses around it
@@ -53,6 +55,26 @@ case "windows":
         if b["Width"]! < 2 { continue }
         print(id, Int(b["X"]!), Int(b["Y"]!), Int(b["Width"]!), Int(b["Height"]!), layer, title)
     }
+case "owner":
+    let p = CGPoint(x: num(2), y: num(3))
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    for w in list {
+        guard let b = w[kCGWindowBounds as String] as? [String: Double],
+              let layer = w[kCGWindowLayer as String] as? Int, layer < 1000,
+              (w[kCGWindowAlpha as String] as? Double ?? 1) > 0 else { continue }
+        let r = CGRect(x: b["X"]!, y: b["Y"]!, width: b["Width"]!, height: b["Height"]!)
+        // The Dock keeps a see-through window over the whole screen; it
+        // takes no clicks there. The menu bar and the Dock itself count.
+        let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+        if owner == "Dock" && r.width >= CGFloat(CGDisplayPixelsWide(CGMainDisplayID())) / 2 && r.height > 500 {
+            continue
+        }
+        if r.contains(p) {
+            print(w[kCGWindowOwnerPID as String] as? Int ?? 0)
+            exit(0)
+        }
+    }
+    print(0)
 case "front":
     let ok = NSRunningApplication(processIdentifier: pid_t(Int32(a[2])!))?.activate(options: [.activateAllWindows]) ?? false
     usleep(400_000)
@@ -62,6 +84,16 @@ case "click":
     mouse(.mouseMoved, num(2), num(3)); usleep(80_000)
     mouse(.leftMouseDown, num(2), num(3)); usleep(60_000)
     mouse(.leftMouseUp, num(2), num(3))
+case "dclick":
+    mouse(.mouseMoved, num(2), num(3)); usleep(80_000)
+    for n in [1, 2] {
+        for t in [CGEventType.leftMouseDown, .leftMouseUp] {
+            let e = CGEvent(mouseEventSource: src, mouseType: t, mouseCursorPosition: CGPoint(x: num(2), y: num(3)), mouseButton: .left)
+            e?.setIntegerValueField(.mouseEventClickState, value: Int64(n))
+            e?.post(tap: .cghidEventTap)
+            usleep(40_000)
+        }
+    }
 case "drag":
     let (x1, y1, x2, y2) = (num(2), num(3), num(4), num(5))
     mouse(.mouseMoved, x1, y1); usleep(100_000)
