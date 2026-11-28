@@ -18,7 +18,7 @@ use visor_core::{EditList, Micros, Project, TrackKind};
 
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
 use crate::composite::Bubble;
-use crate::decode::{AudioReader, VideoReader, new_ref, reuse_or_alloc};
+use crate::decode::{VideoReader, new_ref, reuse_or_alloc};
 use crate::tempo::Tempo;
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
@@ -127,12 +127,7 @@ fn run(
     let mut audio = if gif {
         None
     } else {
-        let tracks: Vec<_> = [TrackKind::Mic, TrackKind::System]
-            .into_iter()
-            .filter(|&k| project.has_track(k))
-            .map(|k| AudioReader::open_parts(dir, &project.parts(k)))
-            .collect::<anyhow::Result<_>>()?;
-        (!tracks.is_empty()).then(|| AudioMix::new(tracks))
+        AudioMix::for_project(dir, project)?
     };
 
     let speed = project.speed();

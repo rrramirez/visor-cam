@@ -24,7 +24,7 @@ use visor_core::{Blur, EditList, Micros, Project, TrackKind};
 
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
-use crate::decode::{AudioReader, VideoReader};
+use crate::decode::VideoReader;
 use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
@@ -129,11 +129,7 @@ impl Player {
         } else {
             None
         };
-        let audio_parts: Vec<_> = [TrackKind::Mic, TrackKind::System]
-            .into_iter()
-            .filter(|&k| project.has_track(k))
-            .map(|k| project.parts(k))
-            .collect();
+        let mix = AudioMix::for_project(dir, project)?;
 
         let shared = Arc::new(Shared::default());
         let speed = project.speed();
@@ -148,24 +144,20 @@ impl Player {
                 .name("visor-player-video".into())
                 .spawn(move || video_loop(screen, camera, edit, blurs, shared, clock, video_rx))?;
         }
-        let audio_tx = if audio_parts.is_empty() {
-            None
-        } else {
-            let readers = audio_parts
-                .iter()
-                .map(|p| AudioReader::open_parts(dir, p))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+        let audio_tx = if let Some(mix) = mix {
             let (tx, rx) = unbounded();
             let edit = edit.clone();
             let clock = clock.clone();
             thread::Builder::new()
                 .name("visor-player-audio".into())
                 .spawn(move || {
-                    if let Err(e) = audio_loop(AudioMix::new(readers), edit, clock, rx) {
+                    if let Err(e) = audio_loop(mix, edit, clock, rx) {
                         tracing::warn!("preview audio unavailable: {e:#}");
                     }
                 })?;
             Some(tx)
+        } else {
+            None
         };
 
         let mut player = Self {
