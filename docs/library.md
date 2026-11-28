@@ -7,8 +7,8 @@ rename, show in the file manager or move to the Trash (`crates/visor/src/library
 
 ## How it works
 
-**Listing.** `visor_core::library::entries(root)` scans the save folder, by its real path (so folders
-compare equal to editors' and agents', which are canonical), (`list_projects`:
+**Listing.** `visor_core::library::entries(root)` scans the save folder, by its real path
+(`project::real_path`, as editors and agents know folders), (`list_projects`:
 folders with a `project.json`, newest first by folder creation time) and reads each
 `project.json` into an `Entry`: its title (the folder's name when it has none), when it was
 recorded and last changed, and, if it could be read, its recorded length, its length as
@@ -63,8 +63,9 @@ does), arrow keys move by one or by a row (`columns`, computed in Slint from the
 
 - Replacing the card model on every click (a new `VecModel`) recreates each card's
   `TouchArea`, so the second click of a double-click never reaches the first one's.
-- Folders must be compared by their canonical paths: on Windows `canonicalize` adds `\\?\`,
-  and on macOS a save folder reached through a link differs from its real path.
+- Compare folders by `project::real_path`, not as configured nor by plain `canonicalize`: a
+  save folder reached through a link differs from its real path, and on Windows
+  `canonicalize` adds a `\\?\` prefix that Explorer (`platform::reveal`) doesn't take.
 - `rfd` confirmations shown while Visor isn't the active app come up as a system alert
   (UserNotificationCenter), outside Visor's windows.
 - ⌘ and ⇧ on clicks come from winit's modifier state (key events), not from the click.

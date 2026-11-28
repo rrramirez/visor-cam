@@ -751,17 +751,17 @@ impl App {
                 dir.display()
             )
         };
-        let dir = dir.canonicalize().map_err(|_| missing())?;
+        let dir = visor_core::project::real_path(&dir).map_err(|_| missing())?;
         if !dir.join(visor_core::project::PROJECT_FILE).is_file() {
             return Err(missing());
         }
-        let root = self.settings.borrow().save_dir.canonicalize().ok();
+        let root = visor_core::project::real_path(&self.settings.borrow().save_dir).ok();
         if dir.parent() != root.as_deref() {
             return Err("Only recordings in Visor's recordings folder can be used.".into());
         }
         match &*self.session.borrow() {
             Session::Recording { recorder, .. }
-                if recorder.dir().canonicalize().ok().as_ref() == Some(&dir) =>
+                if visor_core::project::real_path(recorder.dir()).ok().as_ref() == Some(&dir) =>
             {
                 return Err("That recording is still going; stop it first.".into());
             }
@@ -978,6 +978,7 @@ impl App {
                 r
             })
             .collect();
+        let root = visor_core::project::real_path(&root).unwrap_or(root);
         json!({"folder": root.display().to_string(), "recordings": recordings})
     }
 
@@ -1221,7 +1222,7 @@ impl App {
         {
             // Canonical, like the editors' folders that renames report.
             self.agent.borrow_mut().last_folder =
-                Some(dir.canonicalize().unwrap_or_else(|_| dir.clone()));
+                Some(visor_core::project::real_path(dir).unwrap_or_else(|_| dir.clone()));
         }
         let Some((reply, open_editor)) = stop else {
             // Stopped by the user.
@@ -1268,7 +1269,7 @@ impl App {
 }
 
 fn canonical(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    visor_core::project::real_path(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// The reply to `add_video`: where each addition landed in recorded time,

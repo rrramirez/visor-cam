@@ -276,13 +276,16 @@ impl LibraryWindow {
         let (Some(changed), Some((path, shows))) = (changed, rendered) else {
             return;
         };
-        // Edited while it rendered: render it again, for what it is now.
-        if shows != changed {
+        // Rendered from before an edit the listing already knows: render it
+        // again. One newer than the listing is kept, under the state it
+        // shows, and a later listing catches up with it.
+        if shows < changed {
             if self.pending.borrow_mut().insert(dir.to_path_buf()) {
                 let _ = self.renderer.send(dir.to_path_buf());
             }
             return;
         }
+        let changed = shows;
         match Image::load_from_path(&path) {
             Ok(image) => {
                 self.thumbs
@@ -441,7 +444,10 @@ fn wire(ui: &Library, weak: Weak<LibraryWindow>) {
         }
     });
     on!(on_start_rename, |w, card| {
-        if let Some(e) = w.entry(card).filter(|e| e.info.is_some()) {
+        // Only the one card selected, as it still is (a click, a key or an
+        // open may have come in between).
+        let alone = usize::try_from(card).is_ok_and(|i| w.selection.borrow().cards() == [i]);
+        if let Some(e) = w.entry(card).filter(|e| alone && e.info.is_some()) {
             *w.renaming.borrow_mut() = Some(e.dir);
             w.ui.set_renaming(card);
         }

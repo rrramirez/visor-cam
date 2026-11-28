@@ -35,7 +35,7 @@ pub struct Info {
 /// The recordings under `root`, newest first, by their real paths (as
 /// editors and agents know them, through any link to `root`).
 pub fn entries(root: &Path) -> io::Result<Vec<Entry>> {
-    let root = root.canonicalize()?;
+    let root = crate::project::real_path(root)?;
     Ok(list_projects(&root)?
         .into_iter()
         .map(|d| entry(&d))
@@ -116,12 +116,9 @@ mod tests {
             let _ = fs::remove_file(&link);
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let real = root.canonicalize().unwrap();
-            assert!(
-                entries(&link)
-                    .unwrap()
-                    .iter()
-                    .all(|e| e.dir.starts_with(&real))
-            );
+            let linked = entries(&link).unwrap();
+            assert_eq!(linked.len(), list.len());
+            assert!(linked.iter().all(|e| e.dir.starts_with(&real)));
             fs::remove_file(&link).unwrap();
         }
         fs::remove_dir_all(&root).unwrap();

@@ -1879,7 +1879,7 @@ impl App {
     /// when some of it is gone (or it never saved that). Its editor is
     /// hidden meanwhile, and comes back with the take as its last clip.
     pub fn record_more(&self, dir: PathBuf) {
-        let dir = dir.canonicalize().unwrap_or(dir);
+        let dir = visor_core::project::real_path(&dir).unwrap_or(dir);
         let busy = !matches!(*self.session.borrow(), Session::Idle)
             || self.pending_start.borrow().is_some()
             || self.more_cancelled.borrow().as_ref() == Some(&dir);
@@ -1914,7 +1914,7 @@ impl App {
     fn show_editor(&self, dir: PathBuf, name_first: bool) {
         // One path per folder, however it was reached (symlinks, /var vs
         // /private/var), so a recording never has two editors.
-        let dir = dir.canonicalize().unwrap_or(dir);
+        let dir = visor_core::project::real_path(&dir).unwrap_or(dir);
         // Not while recording more onto it, or putting it back after a
         // cancelled take: its editor is waiting for that.
         if self.more.borrow().as_ref() == Some(&dir)

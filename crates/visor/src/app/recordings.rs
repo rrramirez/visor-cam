@@ -63,8 +63,9 @@ impl App {
 
     /// What the recording in `dir` is in use for, if anything.
     fn busy_for(&self, dir: &Path) -> Option<Busy> {
-        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let same = |d: &Path| d.canonicalize().ok().as_deref() == Some(dir.as_path());
+        let dir = visor_core::project::real_path(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let same =
+            |d: &Path| visor_core::project::real_path(d).ok().as_deref() == Some(dir.as_path());
         let recording = match &*self.session.borrow() {
             Session::Recording { recorder, .. } => same(recorder.dir()),
             Session::Starting {
@@ -93,7 +94,7 @@ impl App {
             return;
         }
         // Editors and agents know folders by their real paths.
-        let dir = &dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let dir = &visor_core::project::real_path(dir).unwrap_or_else(|_| dir.to_path_buf());
         let note = |text: &str| {
             if let Some(w) = self.library.borrow().clone() {
                 w.set_note(text);

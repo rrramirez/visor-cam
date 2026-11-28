@@ -89,6 +89,7 @@ export component Library inherits Window {
     keys := FocusScope {
         key-pressed(event) => {
             if (root.renaming >= 0) { return reject; }
+            root.rename-pending = -1;
             if (event.text == Key.LeftArrow) { root.step(-1); return accept; }
             if (event.text == Key.RightArrow) { root.step(1); return accept; }
             if (event.text == Key.UpArrow) { root.step(-root.columns); return accept; }
@@ -165,7 +166,7 @@ export component Library inherits Window {
                     viewport-width: self.visible-width;
                     // A click on the background lets go of the selection.
                     TouchArea {
-                        clicked => { root.card-clicked(-1, 0); keys.focus(); }
+                        clicked => { root.rename-pending = -1; root.card-clicked(-1, 0); keys.focus(); }
                     }
                     for card[i] in root.cards: card-box := Rectangle {
                         // Where its menu opens: under the pointer, or the ⌄ button.
@@ -255,10 +256,12 @@ export component Library inherits Window {
                                                 menu.show();
                                             } else if (event.button == PointerEventButton.left) {
                                                 if (event.modifiers.meta || event.modifiers.control || event.modifiers.shift) {
-                                                    root.card-clicked(i, event.modifiers.shift ? 2 : 1);
+                                                    root.rename-pending = -1;
+                                                    root.card-clicked(i, event.modifiers.meta || event.modifiers.control ? 1 : 2);
                                                 } else if (card.selected && card.readable) {
                                                     root.rename-pending = i;
                                                 } else {
+                                                    root.rename-pending = -1;
                                                     root.card-clicked(i, 0);
                                                 }
                                                 keys.focus();
@@ -292,6 +295,7 @@ export component Library inherits Window {
                                     icon: Icons.chevron-down;
                                     tooltip: "More";
                                     clicked => {
+                                        root.rename-pending = -1;
                                         card-box.menu-x = root.card-width - 200px;
                                         card-box.menu-y = root.card-height - 30px;
                                         root.menu-for(i);

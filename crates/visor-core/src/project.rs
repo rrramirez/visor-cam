@@ -700,6 +700,32 @@ fn is_plain_file_name(name: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
+/// `path` resolved to its real, absolute form, as editors, agents and the
+/// Recordings window compare folders by: links followed, and on Windows
+/// without the `\\?\` prefix `canonicalize` adds to drive paths, which
+/// Explorer and other programs don't take.
+pub fn real_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(without_verbatim_prefix(path.canonicalize()?))
+}
+
+/// `\\?\C:\…` as `C:\…`; anything else (a network path, a path
+/// that needs the prefix to be valid, other platforms) as it is.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    match text.strip_prefix(r"\\?\") {
+        Some(rest)
+            if rest.len() < 260
+                && rest.as_bytes().get(1) == Some(&b':')
+                && rest.as_bytes()[0].is_ascii_alphabetic() =>
+        {
+            PathBuf::from(rest)
+        }
+        _ => path,
+    }
+}
+
 /// Lists project folders under `root`, newest first by when they were
 /// recorded. This is a plain directory scan; there is no library database.
 pub fn list_projects(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -899,6 +925,26 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         Project::new(title, created, 1_000_000).save(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn real_paths_drop_windows_verbatim_prefixes() {
+        let p = |s: &str| without_verbatim_prefix(PathBuf::from(s));
+        assert_eq!(
+            p(r"\\?\C:\Users\x\Videos\Visor"),
+            PathBuf::from(r"C:\Users\x\Videos\Visor")
+        );
+        // A network share keeps it: dropping it would change the path.
+        assert_eq!(
+            p(r"\\?\UNC\server\share"),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(
+            p("/Users/x/Movies/Visor"),
+            PathBuf::from("/Users/x/Movies/Visor")
+        );
+        let here = std::env::temp_dir();
+        assert_eq!(real_path(&here).unwrap(), here.canonicalize().unwrap());
     }
 
     #[test]
