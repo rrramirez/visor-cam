@@ -133,6 +133,128 @@ fn seconds(us: visor_core::Micros) -> f64 {
     (us as f64 / 1000.0).round() / 1000.0
 }
 
+/// An agent's change to a recording, before it's made (see `agent_change`).
+enum Change {
+    Edit(EditList),
+    Markers(Vec<visor_core::Marker>),
+    Blurs(Vec<visor_core::Blur>),
+    Looks(Box<visor_core::Project>),
+}
+
+/// The recording's state as `get_recording` gives it, with its exports.
+fn recording_value(dir: &Path, project: &visor_core::Project, editor_open: bool) -> Value {
+    let mut exports: Vec<(std::time::SystemTime, String, u64)> =
+        std::fs::read_dir(dir.join("exports"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let meta = e.metadata().ok().filter(|m| m.is_file())?;
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        (!name.starts_with('.')).then(|| {
+                            (
+                                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                                name,
+                                meta.len(),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    exports.sort();
+    let exports: Vec<(String, u64)> = exports.into_iter().map(|(_, n, s)| (n, s)).collect();
+    agent_edits::recording_json(project, &dir.display().to_string(), &exports, editor_open)
+}
+
+/// An optional time argument, in seconds.
+fn opt_time(args: &Value, name: &str) -> Result<Option<Micros>, String> {
+    match arg(args, name) {
+        None => Ok(None),
+        Some(_) => time_arg(args, name).map(Some),
+    }
+}
+
+/// The `action` argument, one of `allowed`.
+fn action_arg(args: &Value, allowed: &[&str]) -> Result<String, String> {
+    let action = arg(args, "action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if allowed.contains(&action) {
+        Ok(action.to_string())
+    } else {
+        Err(format!("action is one of: {}.", allowed.join(", ")))
+    }
+}
+
+/// `ranges`: [[start, end], …] in seconds.
+fn ranges_arg(v: &Value) -> Result<Vec<(Micros, Micros)>, String> {
+    let bad = || "ranges is a list of [start_seconds, end_seconds] pairs.".to_string();
+    let list = v.as_array().ok_or_else(bad)?;
+    list.iter()
+        .map(|pair| {
+            let p = pair.as_array().filter(|p| p.len() == 2).ok_or_else(bad)?;
+            let t = |v: &Value| {
+                v.as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.0)
+                    .map(|t| (t * 1e6).round() as Micros)
+                    .ok_or_else(bad)
+            };
+            Ok((t(&p[0])?, t(&p[1])?))
+        })
+        .collect()
+}
+
+/// `set_recording`'s arguments.
+fn looks_arg(args: &Value) -> Result<agent_edits::Looks, String> {
+    let mut looks = agent_edits::Looks::default();
+    if let Some(name) = arg(args, "name") {
+        looks.name = Some(name.as_str().ok_or("name is text.")?.to_string());
+    }
+    if let Some(speed) = arg(args, "speed") {
+        looks.speed = Some(speed.as_f64().ok_or("speed is a number, 0.5 to 2.")?);
+    }
+    // null: back to the first kept frame.
+    match args.get("thumbnail_seconds") {
+        None => {}
+        Some(Value::Null) => looks.thumbnail = Some(None),
+        Some(_) => looks.thumbnail = Some(Some(time_arg(args, "thumbnail_seconds")?)),
+    }
+    if let Some(bubble) = arg(args, "bubble") {
+        let b = bubble.as_object().ok_or("bubble is an object.")?;
+        let num = |k: &str| -> Result<Option<f64>, String> {
+            match b.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .map(Some)
+                    .ok_or_else(|| format!("bubble.{k} is a number.")),
+            }
+        };
+        let flag = |k: &str| -> Result<Option<bool>, String> {
+            match b.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_bool()
+                    .map(Some)
+                    .ok_or_else(|| format!("bubble.{k} is true or false.")),
+            }
+        };
+        looks.bubble_visible = flag("visible")?;
+        looks.bubble_mirror = flag("mirror")?;
+        looks.bubble_x = num("x")?;
+        looks.bubble_y = num("y")?;
+        looks.bubble_size = num("size")?;
+        looks.bubble_shape = match b.get("shape").and_then(Value::as_str) {
+            None => None,
+            Some("circle") => Some(visor_core::project::BubbleShape::Circle),
+            Some("rounded") => Some(visor_core::project::BubbleShape::RoundedRect),
+            Some(_) => return Err("bubble.shape is circle or rounded.".into()),
+        };
+    }
+    Ok(looks)
+}
+
 /// A field that is present and not null.
 fn arg<'a>(args: &'a Value, name: &str) -> Option<&'a Value> {
     args.get(name).filter(|v| !v.is_null())
@@ -233,6 +355,11 @@ impl App {
             "open_recording" => self.agent_open(&command),
             "add_video" => return self.agent_add(&command, reply),
             "list_recordings" => Ok(self.agent_list_recordings()),
+            "get_recording" => self.agent_get_recording(&command),
+            "edit_clips" => self.agent_edit_clips(&command),
+            "edit_markers" => self.agent_edit_markers(&command),
+            "edit_blurs" => self.agent_edit_blurs(&command),
+            "set_recording" => self.agent_set_recording(&command),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -808,6 +935,12 @@ impl App {
     /// undoes all its cuts. Goes through its editor when open, so the user
     /// sees the change and can undo it.
     fn agent_edit(&self, args: &Value, kind: EditKind) -> Result<Value, String> {
+        if let (EditKind::Remove, Some(ranges)) = (kind, arg(args, "ranges")) {
+            let ranges = ranges_arg(ranges)?;
+            return self.agent_change(args, |p| {
+                agent_edits::remove_ranges(p, &ranges, SLIVER).map(Change::Edit)
+            });
+        }
         let dir = self.agent_recording(args)?;
         let range = match kind {
             EditKind::Restore => None,
@@ -855,6 +988,146 @@ impl App {
             "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
             "editor_open": editor.is_some(),
         }))
+    }
+
+    /// Makes an agent's change to a recording: through its editor when
+    /// open (shown there, and undoable as the user's own would be), else
+    /// saved to its folder. Replies with the recording as it now is.
+    fn agent_change(
+        &self,
+        args: &Value,
+        make: impl FnOnce(&visor_core::Project) -> Result<Change, String>,
+    ) -> Result<Value, String> {
+        let mut dir = self.agent_recording(args)?;
+        let (editor, current) = self.agent_project(&dir)?;
+        let change = make(&current)?;
+        let project = match (&editor, change) {
+            (Some(e), Change::Edit(edit)) => e.apply_agent_edit(edit)?,
+            (Some(e), Change::Markers(m)) => e.apply_agent_markers(m)?,
+            (Some(e), Change::Blurs(b)) => e.apply_agent_blurs(b)?,
+            (Some(e), Change::Looks(after)) => e.apply_agent_looks(&after)?,
+            (None, change) => {
+                let mut p = current;
+                let renamed = match change {
+                    Change::Edit(edit) => {
+                        p.edit = edit;
+                        false
+                    }
+                    Change::Markers(m) => {
+                        p.markers = m;
+                        false
+                    }
+                    Change::Blurs(b) => {
+                        p.blurs = b;
+                        false
+                    }
+                    Change::Looks(after) => {
+                        let renamed = after.title != p.title;
+                        p = *after;
+                        renamed
+                    }
+                };
+                p.save(&dir).map_err(|e| e.to_string())?;
+                // Its folder takes the new name, as the editor's does.
+                if renamed {
+                    let root = self.settings.borrow().save_dir.clone();
+                    if let Ok(Some(to)) = visor_core::project::rename_to_title(&dir, &root) {
+                        self.agent_folder_renamed(&dir, &to);
+                        dir = to;
+                    }
+                }
+                self.refresh_tray();
+                p
+            }
+        };
+        Ok(recording_value(&dir, &project, editor.is_some()))
+    }
+
+    /// A recording's whole state, for an agent to find its way around it.
+    fn agent_get_recording(&self, args: &Value) -> Result<Value, String> {
+        let dir = self.agent_recording(args)?;
+        let (editor, project) = self.agent_project(&dir)?;
+        Ok(recording_value(&dir, &project, editor.is_some()))
+    }
+
+    fn agent_edit_clips(&self, args: &Value) -> Result<Value, String> {
+        let at = time_arg(args, "at_seconds")?;
+        let before = opt_time(args, "before_seconds")?;
+        let action = action_arg(args, &["split", "move", "bring_back"])?;
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "split" => agent_edits::split(p, at),
+                "move" => agent_edits::move_clip(p, at, before),
+                _ => agent_edits::bring_back_at(p, at),
+            }
+            .map(Change::Edit)
+        })
+    }
+
+    fn agent_edit_markers(&self, args: &Value) -> Result<Value, String> {
+        let at = time_arg(args, "at_seconds")?;
+        let text = arg(args, "text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let action = action_arg(args, &["add", "rename", "delete"])?;
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "add" => agent_edits::add_marker(p, at, &text),
+                "rename" => agent_edits::rename_marker(p, at, &text),
+                _ => agent_edits::delete_marker(p, at),
+            }
+            .map(Change::Markers)
+        })
+    }
+
+    fn agent_edit_blurs(&self, args: &Value) -> Result<Value, String> {
+        let action = action_arg(args, &["add", "change", "delete"])?;
+        let number = match arg(args, "number") {
+            None => None,
+            Some(n) => Some(n.as_u64().ok_or("number is 1, 2, …")? as usize),
+        };
+        let fraction = |name: &str| -> Result<Option<f64>, String> {
+            match arg(args, name) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .map(Some)
+                    .ok_or_else(|| format!("{name} is a fraction of the frame, 0 to 1.")),
+            }
+        };
+        let area = agent_edits::Area {
+            x: fraction("x")?,
+            y: fraction("y")?,
+            width: fraction("width")?,
+            height: fraction("height")?,
+        };
+        let (start, end) = (
+            opt_time(args, "start_seconds")?,
+            opt_time(args, "end_seconds")?,
+        );
+        let at = match action.as_str() {
+            "add" => 0,
+            _ => time_arg(args, "at_seconds")?,
+        };
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "add" => agent_edits::add_blur(p, area, start, end),
+                "change" => agent_edits::change_blur(p, at, number, area, start, end),
+                _ => agent_edits::delete_blur(p, at, number),
+            }
+            .map(Change::Blurs)
+        })
+    }
+
+    fn agent_set_recording(&self, args: &Value) -> Result<Value, String> {
+        let looks = looks_arg(args)?;
+        if looks == agent_edits::Looks::default() {
+            return Err("Say what to change: name, speed, thumbnail_seconds or bubble.".into());
+        }
+        self.agent_change(args, |p| {
+            agent_edits::set_looks(p, &looks).map(|p| Change::Looks(Box::new(p)))
+        })
     }
 
     /// The recording in `dir` as its open editor has it, else as saved, and

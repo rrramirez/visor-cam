@@ -1235,6 +1235,61 @@ impl EditorWindow {
         }
     }
 
+    /// The project after an agent's change, or why it couldn't be saved.
+    fn agent_saved(&self) -> Result<Project, String> {
+        match self.save_error.borrow_mut().take() {
+            Some(e) => Err(format!(
+                "The change shows in the editor but couldn't be saved: {e}"
+            )),
+            None => Ok(self.project()),
+        }
+    }
+
+    /// Sets an agent's markers as one step the user can undo.
+    pub fn apply_agent_markers(&self, markers: Vec<Marker>) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.change_markers(|m| *m = markers);
+        self.agent_saved()
+    }
+
+    /// Sets an agent's blurs as one step the user can undo.
+    pub fn apply_agent_blurs(&self, blurs: Vec<Blur>) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.ui.set_picked_blur(-1);
+        self.ui.set_blur_edge(-1);
+        self.change_blurs(|b| *b = blurs);
+        self.agent_saved()
+    }
+
+    /// Takes an agent's name, speed, thumbnail and camera bubble from
+    /// `after`, as the user's own controls set them (not steps to undo).
+    pub fn apply_agent_looks(&self, after: &Project) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        if after.title != self.project.borrow().title {
+            self.rename(&after.title);
+        }
+        let speed = after.speed();
+        self.ui.set_speed(speed as f32);
+        let o = after.camera_overlay.clone();
+        self.ui.set_bubble_visible(o.visible);
+        self.ui
+            .set_bubble_shape(if o.shape == BubbleShape::Circle { 0 } else { 1 });
+        self.ui.set_bubble_x(o.x as f32);
+        self.ui.set_bubble_y(o.y as f32);
+        self.ui.set_bubble_size(o.size as f32);
+        self.ui.set_bubble_mirror(o.mirror);
+        {
+            let mut p = self.project.borrow_mut();
+            p.speed = speed;
+            p.thumbnail_us = after.thumbnail_us;
+            p.camera_overlay = o;
+        }
+        self.control().set_speed(speed);
+        self.save();
+        self.refresh_edit_ui();
+        self.agent_saved()
+    }
+
     /// Changes the edit as one step to undo. Returns whether it changed.
     fn apply(&self, change: impl FnOnce(&mut EditList)) -> bool {
         let before = self.project.borrow().edit.clone();
