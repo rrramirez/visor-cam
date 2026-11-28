@@ -58,6 +58,7 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   set [--name N] [--speed X] [--thumbnail TIME|first] [--bubble on|off]
       [--bubble-shape circle|rounded] [--bubble-x X] [--bubble-y Y]
       [--bubble-size S] [--mirror on|off]
+  voiceover delete N          delete voiceover N (as info lists them)
   export [--format mp4|webm|webm_av1|gif] [--size original|1080p|720p]
          [--reduce-noise on|off] [--even-volume on|off]   waits until it's written
   add PATH...                 add video files (MP4, MOV, M4V, MKV, WebM) or other
@@ -129,16 +130,15 @@ pub fn run(args: &[String]) -> Option<i32> {
                 return Some(2);
             }
         },
-        "info" | "split" | "move" | "bring-back" | "marker" | "blur" | "set" | "export" => {
-            match finish_args(first, rest) {
-                Ok(command) => command,
-                Err(e) => {
-                    attach_console();
-                    eprintln!("visor {first}: {e}\n\n{USAGE}");
-                    return Some(2);
-                }
+        "info" | "split" | "move" | "bring-back" | "marker" | "blur" | "set" | "export"
+        | "voiceover" => match finish_args(first, rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor {first}: {e}\n\n{USAGE}");
+                return Some(2);
             }
-        }
+        },
         "remove" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
@@ -458,6 +458,17 @@ fn finish_args(name: &str, args: &[String]) -> Result<Value, String> {
             }
             c
         }
+        "voiceover" => {
+            known(&[])?;
+            match (words.first(), words.get(1)) {
+                (Some(&"delete"), Some(n)) => json!({
+                    "command": "edit_voiceovers",
+                    "action": "delete",
+                    "number": n.parse::<u64>().map_err(|_| "voiceover delete N (1, 2, … as info lists them)")?,
+                }),
+                _ => return Err("voiceover delete N".into()),
+            }
+        }
         "set" => {
             known(&[
                 "name",
@@ -658,7 +669,8 @@ pub fn call(command: &Value) -> Value {
                 | "edit_markers"
                 | "edit_blurs"
                 | "set_recording"
-                | "export_recording",
+                | "export_recording"
+                | "edit_voiceovers",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
                 "remove_from_recording"
@@ -957,6 +969,11 @@ mod tests {
             c("export --format webm --size 720p --reduce-noise on").unwrap(),
             json!({"command": "export_recording", "format": "webm", "size": "720p", "reduce_noise": true})
         );
+        assert_eq!(
+            c("voiceover delete 2").unwrap(),
+            json!({"command": "edit_voiceovers", "action": "delete", "number": 2})
+        );
+        assert!(c("voiceover delete").is_err());
         assert!(c("split").is_err());
         assert!(c("marker rename 5").is_err());
         assert!(c("blur add 0.1 0.2").is_err());

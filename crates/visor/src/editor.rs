@@ -1410,6 +1410,13 @@ impl EditorWindow {
         self.agent_saved()
     }
 
+    /// Sets an agent's voiceovers (one deleted) as one step to undo.
+    pub fn apply_agent_voiceovers(&self, v: Vec<visor_core::Voiceover>) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.change_voiceovers(|all| *all = v);
+        self.agent_saved()
+    }
+
     /// Takes an agent's name, speed, thumbnail and camera bubble from
     /// `after`, as the user's own controls set them (not steps to undo).
     pub fn apply_agent_looks(&self, after: &Project) -> Result<Project, String> {

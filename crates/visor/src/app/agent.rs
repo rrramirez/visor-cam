@@ -139,6 +139,7 @@ enum Change {
     Markers(Vec<visor_core::Marker>),
     Blurs(Vec<visor_core::Blur>),
     Looks(Box<visor_core::Project>),
+    Voiceovers(Vec<visor_core::Voiceover>),
 }
 
 /// The recording's state as `get_recording` gives it, with its exports.
@@ -385,6 +386,7 @@ impl App {
             "edit_markers" => self.agent_edit_markers(&command),
             "edit_blurs" => self.agent_edit_blurs(&command),
             "set_recording" => self.agent_set_recording(&command),
+            "edit_voiceovers" => self.agent_edit_voiceovers(&command),
             "export_recording" => return self.agent_export(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
@@ -1035,6 +1037,7 @@ impl App {
             (Some(e), Change::Markers(m)) => e.apply_agent_markers(m)?,
             (Some(e), Change::Blurs(b)) => e.apply_agent_blurs(b)?,
             (Some(e), Change::Looks(after)) => e.apply_agent_looks(&after)?,
+            (Some(e), Change::Voiceovers(v)) => e.apply_agent_voiceovers(v)?,
             (None, change) => {
                 let mut p = current;
                 let renamed = match change {
@@ -1048,6 +1051,10 @@ impl App {
                     }
                     Change::Blurs(b) => {
                         p.blurs = b;
+                        false
+                    }
+                    Change::Voiceovers(v) => {
+                        p.voiceovers = v;
                         false
                     }
                     Change::Looks(after) => {
@@ -1285,6 +1292,17 @@ impl App {
                 _ => agent_edits::delete_blur(p, at, number),
             }
             .map(Change::Blurs)
+        })
+    }
+
+    fn agent_edit_voiceovers(&self, args: &Value) -> Result<Value, String> {
+        action_arg(args, &["delete"])?;
+        let number = arg(args, "number")
+            .and_then(Value::as_u64)
+            .ok_or("number is 1, 2, … as get_recording lists the voiceovers.")?
+            as usize;
+        self.agent_change(args, |p| {
+            agent_edits::delete_voiceover(p, number).map(Change::Voiceovers)
         })
     }
 

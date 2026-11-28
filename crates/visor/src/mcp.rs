@@ -289,6 +289,19 @@ fn tool_list() -> Value {
             },
         },
         {
+            "name": "edit_voiceovers",
+            "description": "Deletes a voiceover: voice and/or camera the user recorded over the video while it played. number is its place in get_recording's voiceovers (1, 2, …). Agents can't record voiceovers. Returns the recording as get_recording does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["delete"]},
+                    "number": {"type": "integer", "minimum": 1},
+                    "folder": folder_schema(),
+                },
+                "required": ["action", "number"],
+            },
+        },
+        {
             "name": "set_recording",
             "description": "Sets a recording's name (its folder follows), speed (0.5 to 2; speech keeps its pitch), thumbnail frame (thumbnail_seconds, a kept moment; null for the first kept frame) and camera bubble (visible; shape circle or rounded; x and y of its top-left corner as fractions of the frame's width and height; size as a fraction of the frame's width; mirror). Only what's given changes. Returns the recording as get_recording does.",
             "inputSchema": {
