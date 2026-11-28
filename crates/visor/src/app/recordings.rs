@@ -100,14 +100,18 @@ impl App {
                 w.set_note(text);
             }
         };
+        let busy = self.busy_for(dir);
+        // Being recorded (more onto, its editor hidden): the take's save
+        // would put the old name back.
+        if busy == Some(Busy::Recording) {
+            return note("It's being recorded; rename it once it's stopped.");
+        }
         if let Some(editor) = self.editor_for(dir) {
             editor.rename(title);
             return self.library_changed();
         }
-        match self.busy_for(dir) {
-            Some(Busy::Recording) => {
-                return note("It's being recorded; rename it once it's stopped.");
-            }
+        match busy {
+            Some(Busy::Recording) => {}
             Some(Busy::Adding) => {
                 return note("Videos are being added to it; rename it once that's done.");
             }

@@ -44,6 +44,8 @@ export component Library inherits Window {
     default-font-size: Theme.font;
 
     in property <[RecordingCard]> cards;
+    // How many cards are selected: a click on a name renames only a lone one.
+    in property <int> selected-count;
     // The card whose name is being edited, or -1.
     in-out property <int> renaming: -1;
     // A refusal or failure to show above the grid.
@@ -258,7 +260,7 @@ export component Library inherits Window {
                                                 if (event.modifiers.meta || event.modifiers.control || event.modifiers.shift) {
                                                     root.rename-pending = -1;
                                                     root.card-clicked(i, event.modifiers.meta || event.modifiers.control ? 1 : 2);
-                                                } else if (card.selected && card.readable) {
+                                                } else if (card.selected && root.selected-count == 1 && card.readable && card.badge != "Recording") {
                                                     root.rename-pending = i;
                                                 } else {
                                                     root.rename-pending = -1;
@@ -331,7 +333,7 @@ export component Library inherits Window {
                                     }
                                     MenuRow {
                                         text: "Rename";
-                                        enabled: card.readable;
+                                        enabled: card.readable && card.badge != "Recording";
                                         clicked => { root.card-clicked(i, 0); root.start-rename(i); }
                                     }
                                     MenuRow {

@@ -800,8 +800,9 @@ pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     if dir.is_symlink() {
         return Ok(None);
     }
-    let dir = dir.canonicalize()?;
-    let root = root.canonicalize()?;
+    // Real paths, as the folder is known elsewhere (see `real_path`).
+    let dir = real_path(dir)?;
+    let root = real_path(root)?;
     if dir.parent() != Some(root.as_path()) {
         return Ok(None);
     }
@@ -818,7 +819,7 @@ pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     // file systems), which a rename can still change.
     let target = numbered(&name)
         .map(|n| root.join(n))
-        .find(|t| t.symlink_metadata().is_err() || t.canonicalize().ok().as_ref() == Some(&dir))
+        .find(|t| t.symlink_metadata().is_err() || real_path(t).ok().as_ref() == Some(&dir))
         .expect("numbered names never run out");
     fs::rename(&dir, &target)?;
     Ok(Some(target))

@@ -323,6 +323,7 @@ impl LibraryWindow {
                 }
             })
             .collect();
+        self.ui.set_selected_count(selection.cards().len() as i32);
         if self.model.row_count() == cards.len() {
             for (i, card) in cards.into_iter().enumerate() {
                 if self.model.row_data(i).as_ref() != Some(&card) {
