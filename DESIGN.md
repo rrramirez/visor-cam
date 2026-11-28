@@ -218,13 +218,16 @@ cancelled (a partial file is deleted).
 ### Permissions (macOS)
 
 Visor needs Screen Recording, Camera and Microphone permission (TCC). Visor
-ships as an ad-hoc signed `.app` (`scripts/package-macos.sh`) with
+ships as a `.app` signed with a Developer ID and notarized, in a notarized
+DMG (`scripts/package-macos.sh`; ad-hoc signed when no Developer ID
+certificate is in the keychain), with
 `NSCameraUsageDescription`, `NSMicrophoneUsageDescription` and `LSUIElement`
 (menu-bar app). During development, permissions are granted to the terminal
 that runs `cargo run`. Visor asks for camera/mic access when a device is
 chosen, shows a banner when Screen Recording is missing, and deep-links to
-System Settings. Ad-hoc signatures change on every build, so macOS may ask
-again after rebuilding.
+System Settings. Ad-hoc signatures change on every build, so macOS asks
+again after rebuilding an ad-hoc signed build; Developer ID builds keep
+their permissions across updates.
 
 ## Milestones
 
@@ -236,12 +239,11 @@ again after rebuilding.
 | M3 | Editor + export: player, timeline, trim/cut, export MP4/WebM/GIF | Done (macOS) |
 | M4 | Windows backend (WGC + WASAPI) | Written; cross-compiles and lints clean; never run on Windows |
 | M5 | Linux backend (portal + PipeWire) | Written; builds, tests and lints clean in Docker (`scripts/linux-check.sh`); never run on a desktop |
-| M6 | Packaging | macOS: ad-hoc signed `.app` (29 MB) + `.dmg` (14 MB) with a minimal FFmpeg (`scripts/build-ffmpeg-macos.sh`). Windows/Linux installers not started |
+| M6 | Packaging | macOS: Developer ID signed and notarized `.app` and `.dmg` with a minimal FFmpeg (`scripts/build-ffmpeg-macos.sh`), Sparkle updates (`scripts/release-macos.sh`). Windows/Linux installers not started |
 
 ## Known limitations and next steps
 
 - Windows and Linux backends need testing on real machines.
-- Notarization (Developer ID) isn't set up; the DMG is ad-hoc signed.
 - AV1 export links Homebrew's SVT-AV1 dylib (3 MB; Homebrew ships no static
   build). Building SVT-AV1 statically would need `cmake`.
 - App capture on Windows and Linux records one window, not every window of
