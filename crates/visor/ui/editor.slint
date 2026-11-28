@@ -62,7 +62,8 @@ export struct Tick {
 // A voiceover in the sidebar's list.
 export struct VoiceoverRow {
     label: string,
-    // Where it starts on the timeline (a fraction), to jump there.
+    // Where it first plays on the timeline (a fraction), to jump there; -1
+    // once deleted with its clips.
     pos: float,
     // How loud the video's own sound plays under it, 0–1.
     sound: float,
@@ -915,7 +916,7 @@ export component Editor inherits Window {
                                             }
                                             vo-touch := TouchArea {
                                                 mouse-cursor: pointer;
-                                                clicked => { root.seek(v.pos); keys.focus(); }
+                                                clicked => { if (v.pos >= 0) { root.seek(v.pos); } keys.focus(); }
                                             }
                                         }
                                         IconButton {

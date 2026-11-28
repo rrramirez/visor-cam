@@ -1054,6 +1054,7 @@ impl App {
             (Some(e), Change::Voiceovers(v)) => e.apply_agent_voiceovers(v)?,
             (None, change) => {
                 let mut p = current;
+                let mut deleted_voiceovers = false;
                 let renamed = match change {
                     Change::Edit(edit) => {
                         p.edit = edit;
@@ -1069,6 +1070,7 @@ impl App {
                     }
                     Change::Voiceovers(v) => {
                         p.voiceovers = v;
+                        deleted_voiceovers = true;
                         false
                     }
                     Change::Looks(after) => {
@@ -1086,6 +1088,11 @@ impl App {
                     }
                 };
                 p.save(&dir).map_err(|e| e.to_string())?;
+                // Nothing can bring a deleted voiceover back without an
+                // editor's undo: its files go now.
+                if deleted_voiceovers {
+                    visor_core::project::remove_unused_voiceover_files(&dir, &p);
+                }
                 // Its folder takes the new name, as the editor's does.
                 if renamed {
                     let root = self.settings.borrow().save_dir.clone();

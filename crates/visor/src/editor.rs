@@ -1743,6 +1743,8 @@ impl EditorWindow {
                 }
             }
         }
+        // Voiceovers deleted, in this session or before.
+        visor_core::project::remove_unused_voiceover_files(&self.dir, &project);
     }
 
     /// Opens the *Add video…* menu: fills in the recent recordings.
@@ -2356,8 +2358,8 @@ impl EditorWindow {
                 .iter()
                 .map(|v| crate::VoiceoverRow {
                     label: voiceover_label(&p, v).into(),
-                    pos: v.pieces.first().map_or(0.0, |x| {
-                        Layout::new(&p.edit, p.duration_us).display(x.start_us) as f32
+                    pos: voiceover_plays(&p, v).map_or(-1.0, |(source, ..)| {
+                        Layout::new(&p.edit, p.duration_us).display(source) as f32
                             / p.duration_us.max(1) as f32
                     }),
                     sound: v.clip_sound as f32,
@@ -2863,18 +2865,42 @@ const MIN_VOICEOVER: Micros = 500_000;
 /// "0:12–0:30 · Voice and camera": where a voiceover is in the video, and
 /// what it has.
 fn voiceover_label(project: &Project, v: &visor_core::Voiceover) -> String {
-    let start = v
-        .pieces
-        .first()
-        .map_or(0, |p| project.output_time(p.start_us));
-    let len: Micros = v.pieces.iter().map(|p| p.end_us - p.start_us).sum();
-    let end = start + (len as f64 / project.speed()).round() as Micros;
     let has = match (v.voice.is_some(), v.camera.is_some()) {
         (true, true) => "Voice and camera",
         (true, false) => "Voice",
         _ => "Camera",
     };
-    format!("{}–{} · {has}", util::clock(start), util::clock(end))
+    match voiceover_plays(project, v) {
+        Some((_, start, end)) => format!("{}–{} · {has}", util::clock(start), util::clock(end)),
+        None => format!("Deleted with its clips · {has}"),
+    }
+}
+
+/// Where what's left of a voiceover plays: the source time of its earliest
+/// moment in the video, and the earliest and latest output times it plays
+/// at (clips moved or partly deleted since). None once it's all deleted.
+fn voiceover_plays(
+    project: &Project,
+    v: &visor_core::Voiceover,
+) -> Option<(Micros, Micros, Micros)> {
+    let mut found: Option<(Micros, Micros, Micros)> = None;
+    for p in &v.pieces {
+        for r in project.edit.ranges() {
+            let (lo, hi) = (p.start_us.max(r.0), p.end_us.min(r.1));
+            if lo >= hi {
+                continue;
+            }
+            let (out_lo, out_hi) = (project.output_time(lo), project.output_time(hi - 1) + 1);
+            found = Some(match found {
+                None => (lo, out_lo, out_hi),
+                Some((src, a, b)) => {
+                    let src = if out_lo < a { lo } else { src };
+                    (src, a.min(out_lo), b.max(out_hi))
+                }
+            });
+        }
+    }
+    found
 }
 
 /// `t` if the edit keeps it, else the closest kept frame before it (the
@@ -3331,6 +3357,19 @@ mod tests {
         };
         let both = voiceover_over(&p.edit, 0, 1_000_000, Some("voice-2.m4a".into()), Some(cam));
         assert_eq!(voiceover_label(&p, &both), "0:00–0:01 · Voice and camera");
+        // From what still plays of it: part of its first piece deleted, its
+        // second moved to the front.
+        let mut q = p.clone();
+        q.edit.cut(3_000_000, 4_000_000);
+        assert_eq!(voiceover_label(&q, &v), "0:03–0:06 · Voice");
+        // Moved: from the earliest moment it plays to the latest (8–10 s
+        // plays first, 4–5 s at 0:15).
+        let last = q.edit.ranges().len() - 1;
+        q.edit.move_clip(last, 0);
+        assert_eq!(voiceover_label(&q, &v), "0:00–0:16 · Voice");
+        q.edit = EditList::full(20_000_000);
+        q.edit.cut(3_000_000, 10_000_000);
+        assert_eq!(voiceover_label(&q, &v), "Deleted with its clips · Voice");
         // From the playhead to the end; from the start once at the end, as
         // Play does.
         assert_eq!(

@@ -487,6 +487,36 @@ impl Project {
             .collect()
     }
 
+    /// Of the files `names` (a folder's), the voiceover files (`voice-N.m4a`,
+    /// `vcam-N.mp4`) no voiceover uses: left from deleted voiceovers.
+    pub fn unused_voiceover_files<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let numbered = |name: &str, prefix: &str, ext: &str| {
+            name.strip_prefix(prefix)
+                .and_then(|n| n.strip_suffix(ext))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let used: Vec<&str> = self
+            .voiceovers
+            .iter()
+            .flat_map(|v| {
+                [
+                    v.voice.as_deref(),
+                    v.camera.as_ref().map(|c| c.file.as_str()),
+                ]
+            })
+            .flatten()
+            .collect();
+        names
+            .into_iter()
+            .filter(|n| numbered(n, "voice-", ".m4a") || numbered(n, "vcam-", ".mp4"))
+            .filter(|n| !used.contains(n))
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// Whether it has any sound: mic, system audio or a voiceover's voice.
     pub fn has_sound(&self) -> bool {
         [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
@@ -508,21 +538,32 @@ impl Project {
 
     /// How loud the video's own sound plays at source time `t`: lowered
     /// under a voiceover's voice to its `clip_sound`, fading down and back
-    /// over [`DUCK_FADE`] at the ends of each of its pieces.
+    /// over [`DUCK_FADE`] at the voiceover's start and end.
     pub fn clip_sound_gain(&self, t: Micros) -> f64 {
         let mut gain: f64 = 1.0;
         for v in self.voiceovers.iter().filter(|v| v.voice.is_some()) {
             let level = v.clip_sound.clamp(0.0, 1.0);
-            for p in &v.pieces {
-                // 0 outside the piece, 1 past its fades. The fades are
-                // inside it: next to it may be another clip.
+            let last = v.pieces.len().saturating_sub(1);
+            for (i, p) in v.pieces.iter().enumerate() {
+                // 0 outside the piece, 1 past its fades. The fades are at
+                // the voiceover's start and end, inside them (next to it may
+                // be another clip), not where one piece of it joins the
+                // next: it was recorded as one.
                 if t < p.start_us || t >= p.end_us {
                     continue;
                 }
                 let fade = DUCK_FADE as f64;
-                let depth = ((t - p.start_us) as f64 / fade)
-                    .min((p.end_us - t) as f64 / fade)
-                    .min(1.0);
+                let rise = if i == 0 {
+                    (t - p.start_us) as f64 / fade
+                } else {
+                    1.0
+                };
+                let fall = if i == last {
+                    (p.end_us - t) as f64 / fade
+                } else {
+                    1.0
+                };
+                let depth = rise.min(fall).min(1.0);
                 gain = gain.min(1.0 - (1.0 - level) * depth);
             }
         }
@@ -960,6 +1001,21 @@ pub fn folder_name(title: &str) -> Option<String> {
 /// Renames the recording folder `dir` after its project's title, if it is
 /// directly inside `root` (the recordings folder) and named otherwise. A
 /// taken name gets " 2", " 3", …. Returns the new path when it moved.
+/// Deletes the files of voiceovers no longer in `project` from its folder
+/// `dir` (best effort: one that can't be removed stays).
+pub fn remove_unused_voiceover_files(dir: &Path, project: &Project) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    for name in project.unused_voiceover_files(names.iter().map(String::as_str)) {
+        let _ = fs::remove_file(dir.join(name));
+    }
+}
+
 pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     if dir.is_symlink() {
         return Ok(None);
@@ -1530,6 +1586,19 @@ mod tests {
             ]
         );
         assert!(p.has_track(TrackKind::Voice));
+        // Files of deleted voiceovers: only those.
+        assert_eq!(
+            p.unused_voiceover_files([
+                "voice-1.m4a",
+                "vcam-1.mp4",
+                "voice-2.m4a",
+                "vcam-7.mp4",
+                "voice-x.m4a",
+                "screen.mp4",
+                "voice-3.mp4",
+            ]),
+            ["voice-2.m4a", "vcam-7.mp4"]
+        );
         let mut silent = Project::new("Silent", "", 10);
         assert!(!silent.has_sound());
         silent.voiceovers = p.voiceovers.clone();
@@ -1552,6 +1621,23 @@ mod tests {
         assert!(mid_fade > 0.25 && mid_fade < 1.0, "{mid_fade}");
         assert_eq!(q.clip_sound_gain(1_000_000 - 1), 1.0);
         assert_eq!(q.clip_sound_gain(1_500_000), 1.0);
+        // Across a join between its pieces (a clip boundary), no swell.
+        q.voiceovers[0].pieces = vec![
+            VoicePiece {
+                start_us: 1_000_000,
+                end_us: 1_500_000,
+                file_us: 0,
+            },
+            VoicePiece {
+                start_us: 1_500_000,
+                end_us: 1_900_000,
+                file_us: 500_000,
+            },
+        ];
+        for t in [1_450_000, 1_499_999, 1_500_000, 1_550_000] {
+            assert!((q.clip_sound_gain(t) - 0.25).abs() < 1e-9, "{t}");
+        }
+        q.voiceovers[0].pieces.truncate(1);
         // From the very start too.
         q.voiceovers[0].pieces[0].start_us = 0;
         assert!(q.clip_sound_gain(10_000) < 1.0);
