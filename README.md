@@ -120,7 +120,9 @@ that many seconds of recorded time.
 Agents such as Claude Code, Claude Desktop or Cursor can record a demo for
 you: name the recording, start it, mark each step, pause while they set
 something up or retry a step, stop, look at what was recorded, and remove what
-went wrong before handing it to you in the editor. Turn on **Let AI agents control recording** in Preferences (it's off
+went wrong. They can also finish it off as you would in the editor: rearrange
+clips, name the chapters, blur what's private, set the speed, the camera
+bubble and the thumbnail, and export it, before handing it to you. Turn on **Let AI agents control recording** in Preferences (it's off
 until you do). Recordings an agent starts say *Agent* on the control bar,
 and your own controls and shortcuts keep working.
 
@@ -146,9 +148,17 @@ visor discard
 visor start --folder "$FOLDER"               # record more onto a stopped recording
 visor add intro.mp4 ~/Movies/Visor/Outro     # add videos or recordings at its end
 visor remove 12 19.5                         # remove 0:12–0:19.5 (recorded time)
+visor remove 3 4 12 19.5                     # ...or several stretches, as one step
 visor trim 2 1:05                            # keep only 0:02–1:05
 visor restore                                # bring everything back, in recorded order
 visor open                                   # open it in the editor
+visor info                                   # clips, markers, blurs, exports…
+visor split 30; visor move 30 --before 0     # clips
+visor bring-back 13                          # put back what's removed at 0:13
+visor marker add 42 "Step 3: share"          # markers on a stopped recording
+visor blur add 0.6 0.05 0.35 0.1 --from 5 --to 20   # hide an area (fractions)
+visor set --name "Tour" --speed 1.25 --bubble off
+visor export --format mp4 --size 1080p       # waits until it's written
 visor frame 15                               # save the frame at 0:15 as a JPEG
 visor dead-time                              # where nothing happens, to remove
 visor help                                   # every option
@@ -156,7 +166,8 @@ visor help                                   # every option
 
 Edits apply to the recording the agent last stopped (or `--folder`), in
 recorded time, so they line up with marker times. If the recording is open
-in the editor, what an agent removes shows there and **⌘Z** undoes it. Either way
+in the editor, an agent's change shows there: **⌘Z** undoes its cuts, clip
+moves, markers and blurs, and its export runs there, where you can cancel it. Either way
 Visor starts in the background if it isn't running. Replies are
 JSON. Commands reach Visor through a local port that only your user account
 can use (its token is in your settings folder).
