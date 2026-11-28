@@ -493,11 +493,6 @@ impl Project {
         &self,
         names: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
-        let numbered = |name: &str, prefix: &str, ext: &str| {
-            name.strip_prefix(prefix)
-                .and_then(|n| n.strip_suffix(ext))
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        };
         let used: Vec<&str> = self
             .voiceovers
             .iter()
@@ -511,7 +506,7 @@ impl Project {
             .collect();
         names
             .into_iter()
-            .filter(|n| numbered(n, "voice-", ".m4a") || numbered(n, "vcam-", ".mp4"))
+            .filter(|n| is_voiceover_file(n))
             .filter(|n| !used.contains(n))
             .map(str::to_owned)
             .collect()
@@ -999,6 +994,16 @@ pub fn folder_name(title: &str) -> Option<String> {
     } else {
         name.to_string()
     })
+}
+
+/// Whether `name` is a voiceover's file: `voice-N.m4a` or `vcam-N.mp4`.
+pub fn is_voiceover_file(name: &str) -> bool {
+    let numbered = |prefix: &str, ext: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|n| n.strip_suffix(ext))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    numbered("voice-", ".m4a") || numbered("vcam-", ".mp4")
 }
 
 /// Deletes the files of voiceovers no longer in `project` from its folder

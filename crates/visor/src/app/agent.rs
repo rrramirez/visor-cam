@@ -1401,11 +1401,10 @@ impl App {
                 }
             };
             let (editor, project) = self.agent_project(&dir)?;
-            // It reads the folder's files as it goes: held as a job of its
-            // editor, else as a copy, so nothing renames or tidies them away.
-            if editor.is_none() {
-                self.copy_started(&dir);
-            }
+            // It reads the folder's files as it goes: held as a copy (and a
+            // job of its editor, if open), so nothing renames or tidies them
+            // away, even once the editor closes.
+            self.copy_started(&dir);
             let guard = editor.map(|e| e.start_job());
             Ok((dir, project, min, guard))
         });
@@ -1433,14 +1432,11 @@ impl App {
                     })
                 })
                 .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
-            let held = guard.is_none();
             drop(guard);
             send(reply, result);
-            if held {
-                post(move |app| {
-                    app.copy_finished(&dir);
-                });
-            }
+            post(move |app| {
+                app.copy_finished(&dir);
+            });
         });
     }
 

@@ -1734,6 +1734,11 @@ impl EditorWindow {
             used.extend(v.camera.as_ref().map(|c| c.file.as_str()));
         }
         for name in self.added_files.borrow_mut().drain(..) {
+            // Voiceovers' files may still be read by a job that outlives
+            // the editor: `App::tidy_voiceovers` deletes them once it's done.
+            if visor_core::project::is_voiceover_file(&name) {
+                continue;
+            }
             if !used.contains(name.as_str()) {
                 let path = self.dir.join(&name);
                 if let Err(e) = std::fs::remove_file(&path)

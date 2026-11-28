@@ -74,8 +74,11 @@ can't record voiceovers.
   (whose undo can bring it back), or an export, copy or dead-time search reading the folder.
   `App::tidy_voiceovers` deletes those of voiceovers no longer in the project once nothing
   has the folder: when a closed editor's jobs are done (`rename_closed`), when a background
-  job ends (`copy_finished`), or at once after an agent's delete without an editor. Quitting
-  with the editor open leaves them for the next time.
+  job ends (`copy_finished`), or at once after an agent's delete without an editor. The
+  editor's own close leaves them to it (`remove_unused_added_files` skips them). Otherwise
+  (quitting with the editor open, a closed editor's job outlasting the 60 s the rename waits,
+  a file still open on Windows) they stay until the recording is next closed or edited by an
+  agent; nothing is lost.
 - While recording, the editor takes no clicks (a layer over it) and only Esc and Space
   as keys: moving the playhead would put the voice out of step with the picture. While the
   panel is open or it records, the editor is busy (`is_busy`, `voiceover_active`): agents'
