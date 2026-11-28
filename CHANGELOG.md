@@ -4,7 +4,7 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
-## Unreleased
+## 0.9.0
 
 ### New
 - **Record more:** forgot a step? In the editor, *Record more* (**R**) records another piece with the same screen, window or area, camera and microphone, right after a countdown, and brings you back with it as the last clip, ready to drag where it belongs. Undo still works on what you did before. A piece of another size fits in the frame with black bars, discarding it leaves the recording as it was, and a crash keeps what was recorded. If a source is gone (a closed window, an unplugged camera), the recorder opens so you can pick another. Agents can do it too: `start_recording` with `folder`, or `visor start --folder`.
