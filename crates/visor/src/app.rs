@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod agent;
+mod agent_edits;
 mod recordings;
 
 /// Work waiting for startup to finish (see `App::when_ready`).
