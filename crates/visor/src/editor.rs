@@ -176,8 +176,79 @@ impl Drop for JobGuard {
     }
 }
 
+/// What to export, as the editor's export choices name them: format 0 MP4,
+/// 1 WebM, 2 WebM (AV1), 3 GIF; size 0 original, 1 1080p, 2 720p.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportChoice {
+    pub format: i32,
+    pub size: i32,
+    pub reduce_noise: bool,
+    pub even_volume: bool,
+}
+
+impl ExportChoice {
+    /// The choices the user last exported with.
+    pub fn last() -> Self {
+        let app = app();
+        let s = app.settings.borrow();
+        Self {
+            format: s.export_format.clamp(0, 3),
+            size: s.export_resolution.clamp(0, 2),
+            reduce_noise: s.export_denoise,
+            even_volume: s.export_normalize,
+        }
+    }
+
+    /// The export options, and the format's name for a summary.
+    pub fn options(self) -> (ExportOptions, &'static str) {
+        let (format, kind) = match self.format {
+            1 => (ExportFormat::WebM { av1: false }, "WebM"),
+            2 => (ExportFormat::WebM { av1: true }, "WebM (AV1)"),
+            3 => (ExportFormat::Gif, "GIF"),
+            _ => (ExportFormat::Mp4, "MP4"),
+        };
+        let mut options = ExportOptions::new(format);
+        options.audio = visor_media::export::AudioCleanup {
+            denoise: self.reduce_noise,
+            normalize: self.even_volume,
+        };
+        options.max_height = match self.size {
+            1 => Some(1080),
+            2 => Some(720),
+            _ => None,
+        };
+        (options, kind)
+    }
+}
+
+/// Hears where an agent's export was written, or why it wasn't.
+pub type ExportReply = Box<dyn FnOnce(Result<PathBuf, String>)>;
+
+/// The recording in `dir`'s `exports` folder, created if needed.
+pub fn exports_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    let exports = dir.join("exports");
+    // A symlinked exports folder would let a shared project make the
+    // export write outside it.
+    if exports.is_symlink() {
+        anyhow::bail!("the exports folder is a link");
+    }
+    std::fs::create_dir_all(&exports)?;
+    Ok(exports)
+}
+
+/// Where a new export of `project` in `dir` goes, in format `ext`.
+pub fn export_path(dir: &Path, project: &Project, ext: &str) -> anyhow::Result<PathBuf> {
+    Ok(unique_path(
+        &exports_dir(dir)?,
+        &sanitize(&project.title),
+        ext,
+    ))
+}
+
 struct ExportJob {
     out: PathBuf,
+    /// An agent waiting for it.
+    reply: Option<ExportReply>,
     /// Format name for the summary, e.g. "MP4".
     kind: &'static str,
     cancel: Arc<AtomicBool>,
@@ -700,8 +771,13 @@ impl EditorWindow {
     /// Cancels an export and stops playback. Returns the background jobs,
     /// which may take a moment to wind down.
     pub fn stop_work(&self) -> Jobs {
-        if let Some(job) = &*self.export.borrow() {
+        if let Some(job) = &mut *self.export.borrow_mut() {
             job.cancel.store(true, Ordering::Relaxed);
+            if let Some(reply) = job.reply.take() {
+                reply(Err(
+                    "The editor was closed, which cancelled the export.".into()
+                ));
+            }
         }
         if let Some(cancel) = self.pauses_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
@@ -1902,49 +1978,53 @@ impl EditorWindow {
     }
 
     fn start_export(&self) {
-        // While adding, the export would leave out what's being added.
-        if self.export.borrow().is_some() || self.adding.borrow().is_some() {
-            return;
-        }
-        self.control().pause();
-        let (format, kind) = match self.ui.get_export_format() {
-            1 => (ExportFormat::WebM { av1: false }, "WebM"),
-            2 => (ExportFormat::WebM { av1: true }, "WebM (AV1)"),
-            3 => (ExportFormat::Gif, "GIF"),
-            _ => (ExportFormat::Mp4, "MP4"),
+        let choice = ExportChoice {
+            format: self.ui.get_export_format(),
+            size: self.ui.get_export_resolution(),
+            reduce_noise: self.ui.get_export_denoise(),
+            even_volume: self.ui.get_export_normalize(),
         };
-        let mut options = ExportOptions::new(format);
         // The next editor starts with these choices.
         {
             let app = app();
             let mut settings = app.settings.borrow_mut();
-            settings.export_format = self.ui.get_export_format();
-            settings.export_resolution = self.ui.get_export_resolution();
-            settings.export_denoise = self.ui.get_export_denoise();
-            settings.export_normalize = self.ui.get_export_normalize();
+            settings.export_format = choice.format;
+            settings.export_resolution = choice.size;
+            settings.export_denoise = choice.reduce_noise;
+            settings.export_normalize = choice.even_volume;
             settings.save();
         }
-        options.audio = visor_media::export::AudioCleanup {
-            denoise: self.ui.get_export_denoise(),
-            normalize: self.ui.get_export_normalize(),
-        };
-        options.max_height = match self.ui.get_export_resolution() {
-            1 => Some(1080),
-            2 => Some(720),
-            _ => None,
-        };
+        if let Err(e) = self.export_with(choice, None) {
+            self.ui.set_export_status(e.into());
+        }
+    }
+
+    /// Exports for an agent, here, so the user sees it and can cancel it;
+    /// `reply` hears where it was written. Refused while exporting already,
+    /// or adding videos (it would leave them out).
+    pub fn agent_export(&self, choice: ExportChoice, reply: ExportReply) -> Result<(), String> {
+        if self.export.borrow().is_some() {
+            return Err("The editor is already exporting it; try again once that's done.".into());
+        }
+        if self.adding.borrow().is_some() {
+            return Err("Videos are being added to it; export once that's done.".into());
+        }
+        self.export_with(choice, Some(reply))
+    }
+
+    fn export_with(&self, choice: ExportChoice, reply: Option<ExportReply>) -> Result<(), String> {
+        // While adding, the export would leave out what's being added.
+        if self.export.borrow().is_some() || self.adding.borrow().is_some() {
+            return Err("Busy".into());
+        }
+        self.control().pause();
+        let (options, kind) = choice.options();
         let project = self.project.borrow().clone();
-        let exports = match self.exports_dir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                self.ui
-                    .set_export_status(format!("Export failed: {e}").into());
-                return;
-            }
-        };
-        let out = unique_path(&exports, &sanitize(&project.title), format.extension());
+        let out = export_path(&self.dir, &project, options.format.extension())
+            .map_err(|e| format!("Export failed: {e}"))?;
         let job = ExportJob {
             out: out.clone(),
+            reply,
             kind,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(AtomicU32::new(0)),
@@ -1973,18 +2053,12 @@ impl EditorWindow {
         self.ui.set_export_progress(0.0);
         self.ui.set_export_status("Exporting… 0%".into());
         *self.export.borrow_mut() = Some(job);
+        Ok(())
     }
 
     /// The recording's `exports` folder, created if needed.
     fn exports_dir(&self) -> anyhow::Result<PathBuf> {
-        let exports = self.dir.join("exports");
-        // A symlinked exports folder would let a shared project make the
-        // export write outside it.
-        if exports.is_symlink() {
-            anyhow::bail!("the exports folder is a link");
-        }
-        std::fs::create_dir_all(&exports)?;
-        Ok(exports)
+        exports_dir(&self.dir)
     }
 
     /// Writes the thumbnail to the exports folder as a JPEG and shows it.
@@ -2098,8 +2172,17 @@ impl EditorWindow {
             job.result.lock().unwrap().take()
         };
         let Some(result) = finished else { return };
-        let job = self.export.borrow_mut().take().expect("job present");
+        let mut job = self.export.borrow_mut().take().expect("job present");
         self.ui.set_exporting(false);
+        if let Some(reply) = job.reply.take() {
+            reply(match &result {
+                Ok(()) => Ok(job.out.clone()),
+                Err(_) if job.cancel.load(Ordering::Relaxed) => {
+                    Err("The export was cancelled in the editor.".into())
+                }
+                Err(e) => Err(format!("The export failed: {e:#}")),
+            });
+        }
         match result {
             Ok(()) => {
                 let name = job

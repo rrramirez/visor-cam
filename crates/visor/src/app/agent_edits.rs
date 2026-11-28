@@ -357,6 +357,42 @@ pub fn set_looks(p: &Project, looks: &Looks) -> Result<Project, String> {
     Ok(p)
 }
 
+pub use crate::editor::ExportChoice;
+
+/// An agent's export arguments over the user's last choices (`last`).
+pub fn export_choice(args: &Value, last: ExportChoice) -> Result<ExportChoice, String> {
+    let get = |k: &str| args.get(k).filter(|v| !v.is_null());
+    let mut c = last;
+    if let Some(f) = get("format") {
+        c.format = match f.as_str() {
+            Some("mp4") => 0,
+            Some("webm") => 1,
+            Some("webm_av1") => 2,
+            Some("gif") => 3,
+            _ => return Err("format is mp4, webm, webm_av1 or gif.".into()),
+        };
+    }
+    if let Some(s) = get("size") {
+        c.size = match s.as_str() {
+            Some("original") => 0,
+            Some("1080p") => 1,
+            Some("720p") => 2,
+            _ => return Err("size is original, 1080p or 720p.".into()),
+        };
+    }
+    for (k, field) in [
+        ("reduce_noise", &mut c.reduce_noise),
+        ("even_volume", &mut c.even_volume),
+    ] {
+        if let Some(v) = get(k) {
+            *field = v
+                .as_bool()
+                .ok_or_else(|| format!("{k} is true or false."))?;
+        }
+    }
+    Ok(c)
+}
+
 /// A recording's state for get_recording: what an agent needs to find its
 /// way around it and change it. `exports`: file name and size.
 pub fn recording_json(
@@ -613,6 +649,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reset.thumbnail_us, None);
+    }
+
+    #[test]
+    fn exports_default_to_the_last_choices() {
+        let last = ExportChoice {
+            format: 1,
+            size: 2,
+            reduce_noise: true,
+            even_volume: false,
+        };
+        assert_eq!(export_choice(&json!({}), last).unwrap(), last);
+        let c = export_choice(
+            &json!({"format": "gif", "size": "original", "even_volume": true}),
+            last,
+        )
+        .unwrap();
+        assert_eq!(
+            (c.format, c.size, c.reduce_noise, c.even_volume),
+            (3, 0, true, true)
+        );
+        assert!(export_choice(&json!({"format": "avi"}), last).is_err());
+        assert!(export_choice(&json!({"size": "4k"}), last).is_err());
+        assert!(export_choice(&json!({"reduce_noise": "yes"}), last).is_err());
     }
 
     #[test]

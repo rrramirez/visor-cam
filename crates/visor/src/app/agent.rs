@@ -360,6 +360,7 @@ impl App {
             "edit_markers" => self.agent_edit_markers(&command),
             "edit_blurs" => self.agent_edit_blurs(&command),
             "set_recording" => self.agent_set_recording(&command),
+            "export_recording" => return self.agent_export(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -1041,6 +1042,60 @@ impl App {
             }
         };
         Ok(recording_value(&dir, &project, editor.is_some()))
+    }
+
+    /// Exports a recording and answers once the file is written: in its
+    /// editor when open (the user sees it), else in the background, its
+    /// folder not renamed meanwhile.
+    fn agent_export(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let choice = agent_edits::export_choice(args, crate::editor::ExportChoice::last())?;
+            let (editor, project) = self.agent_project(&dir)?;
+            Ok((dir, choice, editor, project))
+        });
+        let (dir, choice, editor, project) = match request {
+            Ok(r) => r,
+            Err(e) => return send(reply, Err(e)),
+        };
+        let answer = {
+            let (dir, video) = (dir.clone(), project.output_duration());
+            move |result: Result<PathBuf, String>| -> Result<Value, String> {
+                let file = result?;
+                Ok(json!({
+                    "folder": dir.display().to_string(),
+                    "file": file.display().to_string(),
+                    "bytes": std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+                    "video_seconds": seconds(video),
+                }))
+            }
+        };
+        if let Some(editor) = editor {
+            let r = reply.clone();
+            let done: crate::editor::ExportReply = Box::new(move |result| send(r, answer(result)));
+            if let Err(e) = editor.agent_export(choice, done) {
+                send(reply, Err(e));
+            }
+            return;
+        }
+        let (options, _) = choice.options();
+        let out = match crate::editor::export_path(&dir, &project, options.format.extension()) {
+            Ok(out) => out,
+            Err(e) => return send(reply, Err(format!("Couldn't export it: {e:#}"))),
+        };
+        self.copy_started(&dir);
+        std::thread::spawn(move || {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let result = visor_media::export(&dir, &project, &out, &options, &mut |_| {}, &cancel)
+                .map(|()| out.clone())
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&out);
+                    format!("The export failed: {e:#}")
+                });
+            post(move |app| {
+                app.copy_finished(&dir);
+                send(reply, answer(result));
+            });
+        });
     }
 
     /// A recording's whole state, for an agent to find its way around it.
