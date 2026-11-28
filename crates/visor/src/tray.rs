@@ -9,6 +9,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 #[derive(Debug, Clone)]
 pub enum Action {
     NewRecording,
+    NewFromVideo,
     TogglePause,
     StopRecording,
     OpenRecent(PathBuf),
@@ -32,6 +33,7 @@ pub struct Tray {
 }
 
 const ID_NEW: &str = "new";
+const ID_FROM_VIDEO: &str = "from-video";
 const ID_PAUSE: &str = "pause";
 const ID_STOP: &str = "stop";
 const ID_FOLDER: &str = "folder";
@@ -51,6 +53,7 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &new,
+            &MenuItem::with_id(ID_FROM_VIDEO, "New from Video…", true, None),
             &pause,
             &stop,
             &PredefinedMenuItem::separator(),
@@ -100,6 +103,7 @@ impl Tray {
     pub fn action(&self, event: &MenuEvent) -> Option<Action> {
         Some(match event.id().as_ref() {
             ID_NEW => Action::NewRecording,
+            ID_FROM_VIDEO => Action::NewFromVideo,
             ID_PAUSE => Action::TogglePause,
             ID_STOP => Action::StopRecording,
             ID_FOLDER => Action::OpenFolder,

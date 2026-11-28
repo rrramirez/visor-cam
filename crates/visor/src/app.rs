@@ -390,6 +390,7 @@ impl App {
     fn on_tray(&self, action: Action) {
         match action {
             Action::NewRecording => self.open_panel(),
+            Action::NewFromVideo => self.new_from_video(),
             Action::TogglePause => self.toggle_pause(),
             Action::StopRecording => self.stop_recording(false),
             Action::OpenRecent(dir) => self.open_editor(dir),
@@ -702,6 +703,7 @@ impl App {
         ui.on_start(|| app().start_recording());
         ui.on_open_preferences(|| app().open_preferences());
         ui.on_open_folder(|| app().open_library());
+        ui.on_start_from_video(|| app().new_from_video());
         ui.on_open_permission_settings(|| {
             #[cfg(target_os = "macos")]
             {

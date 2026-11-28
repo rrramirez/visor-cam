@@ -380,6 +380,7 @@ impl App {
             "add_video" => return self.agent_add(&command, reply),
             "list_recordings" => Ok(self.agent_list_recordings()),
             "get_recording" => self.agent_get_recording(&command),
+            "create_recording" => return self.agent_create(&command, reply),
             "edit_clips" => self.agent_edit_clips(&command),
             "edit_markers" => self.agent_edit_markers(&command),
             "edit_blurs" => self.agent_edit_blurs(&command),
@@ -1157,6 +1158,47 @@ impl App {
                     agent_edits::moved(v, &dir, &to);
                 }
                 send(reply, answer);
+            });
+        });
+    }
+
+    /// Starts a recording from video files, off the UI thread; it becomes
+    /// the recording edits apply to by default.
+    fn agent_create(&self, args: &Value, reply: Reply) {
+        let paths: Vec<PathBuf> = match arg(args, "paths") {
+            Some(Value::Array(p)) => p
+                .iter()
+                .filter_map(|p| p.as_str().map(PathBuf::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if paths.is_empty() {
+            return send(reply, Err("Say which video files: paths.".into()));
+        }
+        if let Some(p) = paths.iter().find(|p| !p.is_absolute() || !p.exists()) {
+            return send(reply, Err(format!("There's no file at {}.", p.display())));
+        }
+        let name = arg(args, "name").and_then(Value::as_str).map(String::from);
+        let root = self.settings.borrow().save_dir.clone();
+        std::thread::spawn(move || {
+            let made = visor_media::import::new_recording(
+                &root,
+                &paths,
+                name.as_deref(),
+                &mut |_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+            post(move |app| {
+                let result = made
+                    .map_err(|e| format!("Couldn't start it: {e:#}"))
+                    .and_then(|dir| {
+                        let dir = canonical(&dir);
+                        app.agent.borrow_mut().last_folder = Some(dir.clone());
+                        app.refresh_tray();
+                        let project = visor_core::Project::load(&dir).map_err(|e| e.to_string())?;
+                        Ok(app.recording_value(&dir, &project, false))
+                    });
+                send(reply, result);
             });
         });
     }
