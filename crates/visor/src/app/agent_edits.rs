@@ -418,6 +418,27 @@ pub fn export_choice(args: &Value, last: ExportChoice) -> Result<ExportChoice, S
     Ok(c)
 }
 
+/// Points a reply's `folder` and `file` at where the folder moved, from
+/// `from` to `to` (a rename that happened after it was made).
+pub fn moved(v: &mut Value, from: &std::path::Path, to: &std::path::Path) {
+    for key in ["folder", "file"] {
+        if let Some(path) = v
+            .get(key)
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            && let Ok(rest) = path.strip_prefix(from)
+        {
+            v[key] = to
+                .join(rest)
+                .display()
+                .to_string()
+                .trim_end_matches('/')
+                .to_string()
+                .into();
+        }
+    }
+}
+
 /// A recording's state for get_recording: what an agent needs to find its
 /// way around it and change it. `exports`: file name, size, and whether
 /// it's still being written.
@@ -713,6 +734,24 @@ mod tests {
         assert!(export_choice(&json!({"format": "avi"}), last).is_err());
         assert!(export_choice(&json!({"size": "4k"}), last).is_err());
         assert!(export_choice(&json!({"reduce_noise": "yes"}), last).is_err());
+    }
+
+    #[test]
+    fn replies_follow_a_folder_renamed_after_them() {
+        let mut v = json!({
+            "folder": "/r/Demo",
+            "file": "/r/Demo/exports/Demo.mp4",
+            "added": [1],
+            "other": "/r/Demo 2/x",
+        });
+        moved(
+            &mut v,
+            std::path::Path::new("/r/Demo"),
+            std::path::Path::new("/r/Intro"),
+        );
+        assert_eq!(v["folder"], "/r/Intro");
+        assert_eq!(v["file"], "/r/Intro/exports/Demo.mp4");
+        assert_eq!(v["other"], "/r/Demo 2/x");
     }
 
     #[test]

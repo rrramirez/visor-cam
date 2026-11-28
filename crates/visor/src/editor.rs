@@ -1555,7 +1555,9 @@ impl EditorWindow {
                     r => *result = Some(r),
                 }
             }
-            post(move |app| app.copy_finished(&dir));
+            post(move |app| {
+                app.copy_finished(&dir);
+            });
         });
         self.ui.set_add_error("".into());
         self.ui.set_adding(true);

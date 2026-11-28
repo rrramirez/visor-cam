@@ -1150,9 +1150,13 @@ impl App {
                         format!("The export failed: {e:#}")
                     });
             post(move |app| {
-                app.copy_finished(&dir);
                 app.agent_exports.borrow_mut().retain(|f| *f != out);
-                send(reply, answer(result));
+                let mut answer = answer(result);
+                // A rename held while it exported may move the folder now.
+                if let (Ok(v), Some(to)) = (&mut answer, app.copy_finished(&dir)) {
+                    agent_edits::moved(v, &dir, &to);
+                }
+                send(reply, answer);
             });
         });
     }
@@ -1453,7 +1457,9 @@ impl App {
         self.copies.borrow_mut().push(canonical(dir));
     }
 
-    pub(crate) fn copy_finished(&self, dir: &Path) {
+    /// A copy into `dir` is over. Returns where the folder moved, if a
+    /// rename held meanwhile happened now.
+    pub(crate) fn copy_finished(&self, dir: &Path) -> Option<PathBuf> {
         let dir = canonical(dir);
         {
             let mut copies = self.copies.borrow_mut();
@@ -1469,8 +1475,10 @@ impl App {
                 tracing::info!("renamed {} to {}", dir.display(), to.display());
                 self.agent_folder_renamed(&dir, &to);
                 self.refresh_tray();
+                return Some(to);
             }
         }
+        None
     }
 
     /// Exports being written, by agents in the background or in editors:
@@ -1494,11 +1502,21 @@ impl App {
         prepared: anyhow::Result<visor_media::import::Prepared>,
         reply: Reply,
     ) {
-        self.copy_finished(&dir);
-        let prepared = match prepared {
-            Ok(p) => p,
-            Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
-        };
+        let mut result = self.add_copied(&dir, prepared);
+        // Only then: a rename held while it copied may move the folder.
+        if let (Ok(v), Some(to)) = (&mut result, self.copy_finished(&dir)) {
+            agent_edits::moved(v, &dir, &to);
+        }
+        send(reply, result);
+    }
+
+    fn add_copied(
+        &self,
+        dir: &Path,
+        prepared: anyhow::Result<visor_media::import::Prepared>,
+    ) -> Result<Value, String> {
+        let dir = dir.to_path_buf();
+        let prepared = prepared.map_err(|e| format!("Couldn't add it: {e:#}"))?;
         let remove_copies = |prepared: &visor_media::import::Prepared| {
             for name in prepared.files() {
                 let _ = std::fs::remove_file(dir.join(name));
@@ -1514,33 +1532,27 @@ impl App {
             });
         if let Err(e) = still {
             remove_copies(&prepared);
-            return send(reply, Err(e));
+            return Err(e);
         }
         // Opened in the meantime: added there, to undo, unless it's
         // exporting or the like, which would leave it out.
         if let Some(editor) = self.editor_for(&dir) {
             if editor.is_busy() {
                 remove_copies(&prepared);
-                return send(
-                    reply,
-                    Err(
-                        "That recording was opened and is being exported, searched for \
-                         pauses or added to; nothing was added. Try again once that's done."
-                            .into(),
-                    ),
+                return Err(
+                    "That recording was opened and is being exported, searched for \
+                            pauses or added to; nothing was added. Try again once that's done."
+                        .into(),
                 );
             }
             let starts = editor.add_prepared(prepared);
-            return send(
-                reply,
-                Ok(added_json(&dir, &editor.project(), &starts, true)),
-            );
+            return Ok(added_json(&dir, &editor.project(), &starts, true));
         }
         let mut project = match visor_core::Project::load(&dir) {
             Ok(p) => p,
             Err(e) => {
                 remove_copies(&prepared);
-                return send(reply, Err(e.to_string()));
+                return Err(e.to_string());
             }
         };
         let starts: Vec<Micros> = prepared
@@ -1551,9 +1563,9 @@ impl App {
             .collect();
         if let Err(e) = project.save(&dir) {
             remove_copies(&prepared);
-            return send(reply, Err(format!("Couldn't save the recording: {e}")));
+            return Err(format!("Couldn't save the recording: {e}"));
         }
-        send(reply, Ok(added_json(&dir, &project, &starts, false)));
+        Ok(added_json(&dir, &project, &starts, false))
     }
 
     /// Opens a recording in the editor for the user.
