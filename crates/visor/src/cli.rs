@@ -41,10 +41,23 @@ Control the running Visor (turn on agent control in Preferences first):
 
 Edit the recording last stopped, or the one given with --folder FOLDER.
 Times are recorded seconds (or M:SS), as marks and status show them:
-  remove START END            remove START to END, closing up the space
+  remove START END [S E ...]  remove START to END (or several), closing up the space
   trim START END              keep only START to END
   restore                     bring everything back, in recorded order
   open                        open it in the editor
+  info                        everything about it: clips, markers, blurs, exports
+  split TIME                  cut the clip at TIME in two
+  move TIME [--before TIME]   play the clip at TIME before another (or last)
+  bring-back TIME             bring back the removed stretch at TIME
+  marker add TIME [TEXT] | rename TIME TEXT | delete TIME
+  blur add X Y W H [--from S] [--to E]    blur an area (fractions of the frame)
+  blur change TIME [--x .. --y .. --width .. --height .. --from S --to E] [--number N]
+  blur delete TIME [--number N]
+  set [--name N] [--speed X] [--thumbnail TIME|first] [--bubble on|off]
+      [--bubble-shape circle|rounded] [--bubble-x X] [--bubble-y Y]
+      [--bubble-size S] [--mirror on|off]
+  export [--format mp4|webm|webm_av1|gif] [--size original|1080p|720p]
+         [--reduce-noise on|off] [--even-volume on|off]   waits until it's written
   add PATH...                 add video files (MP4, MOV, M4V, MKV, WebM) or other
                               Visor recordings (their folders) at its end
   frame SECONDS [--out FILE]  save the frame at SECONDS, removed or not, as a JPEG
@@ -106,6 +119,16 @@ pub fn run(args: &[String]) -> Option<i32> {
                 return Some(2);
             }
         },
+        "info" | "split" | "move" | "bring-back" | "marker" | "blur" | "set" | "export" => {
+            match finish_args(first, rest) {
+                Ok(command) => command,
+                Err(e) => {
+                    attach_console();
+                    eprintln!("visor {first}: {e}\n\n{USAGE}");
+                    return Some(2);
+                }
+            }
+        }
         "remove" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
@@ -251,7 +274,16 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
             command["start_seconds"] = (*start).into();
             command["end_seconds"] = (*end).into();
         }
-        ("remove" | "trim", _) => return Err("give a START and an END time".into()),
+        // Several stretches, removed as one step.
+        ("remove", pairs) if pairs.len() >= 4 && pairs.len() % 2 == 0 => {
+            command["ranges"] = pairs
+                .chunks(2)
+                .map(|p| json!([p[0], p[1]]))
+                .collect::<Vec<_>>()
+                .into();
+        }
+        ("remove", _) => return Err("give a START and an END time, or several pairs".into()),
+        ("trim", _) => return Err("give a START and an END time".into()),
         ("frame", [at]) => command["seconds"] = (*at).into(),
         ("frame", _) => return Err("give one time".into()),
         (_, []) => {}
@@ -276,6 +308,198 @@ fn add_args(args: &[String]) -> Result<Value, String> {
     }
     command["paths"] = paths.into();
     Ok(command)
+}
+
+/// The commands that finish a recording off: what `get_recording`,
+/// `edit_clips`, `edit_markers`, `edit_blurs`, `set_recording` and
+/// `export_recording` take, from the command line.
+fn finish_args(name: &str, args: &[String]) -> Result<Value, String> {
+    // Words, and --flags with their values.
+    let mut words: Vec<&str> = Vec::new();
+    let mut flags: Vec<(&str, &str)> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.strip_prefix("--") {
+            Some(flag) => {
+                let value = it.next().ok_or_else(|| format!("--{flag} needs a value"))?;
+                flags.push((flag, value));
+            }
+            None => words.push(a),
+        }
+    }
+    let flag = |k: &str| flags.iter().rev().find(|(f, _)| *f == k).map(|(_, v)| *v);
+    let number = |v: &str, what: &str| {
+        v.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| format!("{what} is a number, not \"{v}\""))
+    };
+    let on_off = |v: &str, what: &str| match v {
+        "on" | "true" | "yes" => Ok(true),
+        "off" | "false" | "no" => Ok(false),
+        _ => Err(format!("{what} is on or off, not \"{v}\"")),
+    };
+    let time = |w: Option<&&str>| -> Result<f64, String> { seconds_arg(w.ok_or("give a time")?) };
+    let known = |allowed: &[&str]| -> Result<(), String> {
+        match flags
+            .iter()
+            .find(|(f, _)| *f != "folder" && !allowed.contains(f))
+        {
+            Some((f, _)) => Err(format!("unknown option --{f}")),
+            None => Ok(()),
+        }
+    };
+    let mut c = match name {
+        "info" => {
+            known(&[])?;
+            json!({"command": "get_recording"})
+        }
+        "split" | "bring-back" => {
+            known(&[])?;
+            let action = if name == "split" {
+                "split"
+            } else {
+                "bring_back"
+            };
+            json!({"command": "edit_clips", "action": action, "at_seconds": time(words.first())?})
+        }
+        "move" => {
+            known(&["before"])?;
+            let mut c = json!({"command": "edit_clips", "action": "move", "at_seconds": time(words.first())?});
+            if let Some(b) = flag("before") {
+                c["before_seconds"] = seconds_arg(b)?.into();
+            }
+            c
+        }
+        "marker" => {
+            known(&[])?;
+            let action = *words
+                .first()
+                .ok_or("marker add|rename|delete TIME [TEXT]")?;
+            let mut c = json!({"command": "edit_markers", "action": action, "at_seconds": time(words.get(1))?});
+            match action {
+                "add" | "rename" => {
+                    let text = words[2..].join(" ");
+                    if action == "rename" && text.is_empty() {
+                        return Err("give the marker's new text".into());
+                    }
+                    c["text"] = text.into();
+                }
+                "delete" => {}
+                _ => return Err("marker add|rename|delete TIME [TEXT]".into()),
+            }
+            c
+        }
+        "blur" => {
+            known(&["from", "to", "number", "x", "y", "width", "height"])?;
+            let action = *words
+                .first()
+                .ok_or("blur add X Y W H | change TIME | delete TIME")?;
+            let mut c = json!({"command": "edit_blurs", "action": action});
+            match action {
+                "add" => {
+                    let [x, y, w, h] = words
+                        .get(1..5)
+                        .and_then(|a| <[&str; 4]>::try_from(a).ok())
+                        .ok_or("blur add X Y WIDTH HEIGHT (fractions of the frame)")?;
+                    for (k, v) in [("x", x), ("y", y), ("width", w), ("height", h)] {
+                        c[k] = number(v, k)?.into();
+                    }
+                }
+                "change" | "delete" => c["at_seconds"] = time(words.get(1))?.into(),
+                _ => return Err("blur add X Y W H | change TIME | delete TIME".into()),
+            }
+            for k in ["x", "y", "width", "height"] {
+                if let Some(v) = flag(k) {
+                    c[k] = number(v, k)?.into();
+                }
+            }
+            if let Some(n) = flag("number") {
+                c["number"] = n.parse::<u64>().map_err(|_| "--number is 1, 2, …")?.into();
+            }
+            if let Some(v) = flag("from") {
+                c["start_seconds"] = seconds_arg(v)?.into();
+            }
+            if let Some(v) = flag("to") {
+                c["end_seconds"] = seconds_arg(v)?.into();
+            }
+            c
+        }
+        "set" => {
+            known(&[
+                "name",
+                "speed",
+                "thumbnail",
+                "bubble",
+                "bubble-shape",
+                "bubble-x",
+                "bubble-y",
+                "bubble-size",
+                "mirror",
+            ])?;
+            let mut c = json!({"command": "set_recording"});
+            if let Some(n) = flag("name") {
+                c["name"] = n.into();
+            }
+            if let Some(v) = flag("speed") {
+                c["speed"] = number(v, "--speed")?.into();
+            }
+            if let Some(v) = flag("thumbnail") {
+                c["thumbnail_seconds"] = if v == "first" {
+                    Value::Null
+                } else {
+                    seconds_arg(v)?.into()
+                };
+            }
+            let mut bubble = serde_json::Map::new();
+            if let Some(v) = flag("bubble") {
+                bubble.insert("visible".into(), on_off(v, "--bubble")?.into());
+            }
+            if let Some(v) = flag("bubble-shape") {
+                bubble.insert("shape".into(), v.into());
+            }
+            for (f, k) in [
+                ("bubble-x", "x"),
+                ("bubble-y", "y"),
+                ("bubble-size", "size"),
+            ] {
+                if let Some(v) = flag(f) {
+                    bubble.insert(k.into(), number(v, f)?.into());
+                }
+            }
+            if let Some(v) = flag("mirror") {
+                bubble.insert("mirror".into(), on_off(v, "--mirror")?.into());
+            }
+            if !bubble.is_empty() {
+                c["bubble"] = bubble.into();
+            }
+            if c.as_object().is_some_and(|o| o.len() == 1) {
+                return Err("say what to change".into());
+            }
+            c
+        }
+        _ => {
+            known(&["format", "size", "reduce-noise", "even-volume"])?;
+            let mut c = json!({"command": "export_recording"});
+            if let Some(v) = flag("format") {
+                c["format"] = v.into();
+            }
+            if let Some(v) = flag("size") {
+                c["size"] = v.into();
+            }
+            if let Some(v) = flag("reduce-noise") {
+                c["reduce_noise"] = on_off(v, "--reduce-noise")?.into();
+            }
+            if let Some(v) = flag("even-volume") {
+                c["even_volume"] = on_off(v, "--even-volume")?.into();
+            }
+            c
+        }
+    };
+    if let Some(f) = flag("folder") {
+        c["folder"] = f.into();
+    }
+    Ok(c)
 }
 
 /// `view_frame`'s command, and where to save the frame if not the default.
@@ -395,7 +619,13 @@ pub fn call(command: &Value) -> Value {
                 | "open_recording"
                 | "view_frame"
                 | "find_dead_time"
-                | "add_video",
+                | "add_video"
+                | "get_recording"
+                | "edit_clips"
+                | "edit_markers"
+                | "edit_blurs"
+                | "set_recording"
+                | "export_recording",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
                 "remove_from_recording"
@@ -404,7 +634,13 @@ pub fn call(command: &Value) -> Value {
                 | "open_recording"
                 | "view_frame"
                 | "find_dead_time"
-                | "add_video",
+                | "add_video"
+                | "get_recording"
+                | "edit_clips"
+                | "edit_markers"
+                | "edit_blurs"
+                | "set_recording"
+                | "export_recording",
             ) => {
                 json!({
                     "ok": false,
@@ -637,6 +873,67 @@ mod tests {
         assert!(edit_args("remove", &args("--min 1 2 3")).is_err());
         assert!(edit_args("remove", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
+    }
+
+    #[test]
+    fn finishing_commands_become_agent_tools() {
+        let c = |line: &str| {
+            let words = args(line);
+            finish_args(&words[0], &words[1..])
+        };
+        assert_eq!(
+            c("info --folder /tmp/D").unwrap(),
+            json!({"command": "get_recording", "folder": "/tmp/D"})
+        );
+        assert_eq!(
+            c("split 1:02").unwrap(),
+            json!({"command": "edit_clips", "action": "split", "at_seconds": 62.0})
+        );
+        assert_eq!(
+            c("move 30 --before 4").unwrap(),
+            json!({"command": "edit_clips", "action": "move", "at_seconds": 30.0, "before_seconds": 4.0})
+        );
+        assert_eq!(
+            c("bring-back 12").unwrap(),
+            json!({"command": "edit_clips", "action": "bring_back", "at_seconds": 12.0})
+        );
+        assert_eq!(
+            c("marker add 5 Open the settings").unwrap(),
+            json!({"command": "edit_markers", "action": "add", "at_seconds": 5.0, "text": "Open the settings"})
+        );
+        assert_eq!(
+            c("marker delete 5").unwrap(),
+            json!({"command": "edit_markers", "action": "delete", "at_seconds": 5.0})
+        );
+        assert_eq!(
+            c("blur add 0.1 0.2 0.3 0.4 --from 2 --to 9").unwrap(),
+            json!({"command": "edit_blurs", "action": "add", "x": 0.1, "y": 0.2, "width": 0.3,
+                   "height": 0.4, "start_seconds": 2.0, "end_seconds": 9.0})
+        );
+        assert_eq!(
+            c("blur change 3 --number 2 --x 0.5 --to 8").unwrap(),
+            json!({"command": "edit_blurs", "action": "change", "at_seconds": 3.0, "number": 2,
+                   "x": 0.5, "end_seconds": 8.0})
+        );
+        assert_eq!(
+            c("set --name Tour --speed 1.5 --thumbnail first --bubble off --bubble-shape rounded --bubble-size 0.25").unwrap(),
+            json!({"command": "set_recording", "name": "Tour", "speed": 1.5, "thumbnail_seconds": null,
+                   "bubble": {"visible": false, "shape": "rounded", "size": 0.25}})
+        );
+        assert_eq!(
+            c("export --format webm --size 720p --reduce-noise on").unwrap(),
+            json!({"command": "export_recording", "format": "webm", "size": "720p", "reduce_noise": true})
+        );
+        assert!(c("split").is_err());
+        assert!(c("marker rename 5").is_err());
+        assert!(c("blur add 0.1 0.2").is_err());
+        assert!(c("set").is_err());
+        // Several stretches to remove at once.
+        assert_eq!(
+            edit_args("remove", &args("2 3 5 6.5")).unwrap(),
+            json!({"command": "remove_from_recording", "ranges": [[2.0, 3.0], [5.0, 6.5]]})
+        );
+        assert!(edit_args("remove", &args("2 3 5")).is_err());
     }
 
     #[test]

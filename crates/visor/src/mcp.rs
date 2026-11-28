@@ -211,6 +211,98 @@ fn tool_list() -> Value {
             },
         },
         {
+            "name": "get_recording",
+            "description": "Everything about a recording, to find your way around it before changing it: its name, lengths, speed and frame size; its clips in the order they play (recorded start and end seconds); what's removed and which clip it comes back next to; markers; blurs (x, y, width, height as fractions of the frame); the camera bubble; the thumbnail frame; its exports; and whether it's open in the editor. Times are recorded seconds, as all tools use them.",
+            "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
+            "annotations": {"readOnlyHint": true},
+        },
+        {
+            "name": "edit_clips",
+            "description": "Changes a recording's clips, by recorded time: split cuts the clip playing at at_seconds in two there; move plays the clip at at_seconds just before the clip at before_seconds (or last, without before_seconds); bring_back puts back the removed stretch at at_seconds, next to the clip it was removed from. Returns the recording as get_recording does. Shows in the editor if it's open, where the user can undo it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["split", "move", "bring_back"]},
+                    "at_seconds": {"type": "number"},
+                    "before_seconds": {"type": "number", "description": "move only: the clip to play before. Left out: last."},
+                    "folder": folder_schema(),
+                },
+                "required": ["action", "at_seconds"],
+            },
+        },
+        {
+            "name": "edit_markers",
+            "description": "Adds, renames or deletes a marker of a stopped recording (add_marker is for while recording). add puts one at at_seconds with text; rename and delete act on the marker nearest at_seconds within 0.5 s. Markers become chapters in MP4 and WebM exports. Returns the recording as get_recording does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "rename", "delete"]},
+                    "at_seconds": {"type": "number"},
+                    "text": {"type": "string"},
+                    "folder": folder_schema(),
+                },
+                "required": ["action", "at_seconds"],
+            },
+        },
+        {
+            "name": "edit_blurs",
+            "description": "Blurs an area of the screen so it can't be read (a password, an email address), or changes or deletes a blur. The area is x, y, width, height as fractions of the frame (0 to 1, from the top left), as view_frame's image shows it; the camera bubble stays on top. add needs the area, and lasts start_seconds to end_seconds (default the whole recording). change and delete act on the blur covering at_seconds; if several do, number picks one (1, 2, … in get_recording's order). change sets only what's given. Returns the recording as get_recording does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "change", "delete"]},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "width": {"type": "number"},
+                    "height": {"type": "number"},
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "at_seconds": {"type": "number", "description": "change and delete: a moment the blur covers."},
+                    "number": {"type": "integer", "minimum": 1},
+                    "folder": folder_schema(),
+                },
+                "required": ["action"],
+            },
+        },
+        {
+            "name": "set_recording",
+            "description": "Sets a recording's name (its folder follows), speed (0.5 to 2; speech keeps its pitch), thumbnail frame (thumbnail_seconds, a kept moment; null for the first kept frame) and camera bubble (visible; shape circle or rounded; x and y of its top-left corner as fractions of the frame's width and height; size as a fraction of the frame's width; mirror). Only what's given changes. Returns the recording as get_recording does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "speed": {"type": "number", "minimum": 0.5, "maximum": 2},
+                    "thumbnail_seconds": {"type": ["number", "null"]},
+                    "bubble": {
+                        "type": "object",
+                        "properties": {
+                            "visible": {"type": "boolean"},
+                            "shape": {"type": "string", "enum": ["circle", "rounded"]},
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "size": {"type": "number"},
+                            "mirror": {"type": "boolean"},
+                        },
+                    },
+                    "folder": folder_schema(),
+                },
+            },
+        },
+        {
+            "name": "export_recording",
+            "description": "Exports a recording, as edited, to its exports folder, and returns the file once it's written. Options left out are the user's last export choices. MP4 and WebM exports get a chapter per marker, and MP4s carry the thumbnail as their cover. If the recording is open in the editor the export runs there, where the user sees it and can cancel it. A long export may outlast this call; it carries on, and get_recording lists it when done.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": {"type": "string", "enum": ["mp4", "webm", "webm_av1", "gif"]},
+                    "size": {"type": "string", "enum": ["original", "1080p", "720p"]},
+                    "reduce_noise": {"type": "boolean"},
+                    "even_volume": {"type": "boolean"},
+                    "folder": folder_schema(),
+                },
+            },
+        },
+        {
             "name": "open_recording",
             "description": "Opens a recording in Visor's editor, for the user to review, trim and export it.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
@@ -237,9 +329,13 @@ fn edit_schema() -> Value {
         "properties": {
             "start_seconds": {"type": "number"},
             "end_seconds": {"type": "number"},
+            "ranges": {
+                "type": "array",
+                "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                "description": "remove_from_recording only: several [start_seconds, end_seconds] stretches, removed in one step (one undo in the editor), in place of start_seconds and end_seconds.",
+            },
             "folder": folder_schema(),
         },
-        "required": ["start_seconds", "end_seconds"],
     })
 }
 
