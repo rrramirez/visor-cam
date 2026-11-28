@@ -1467,9 +1467,12 @@ impl App {
                 copies.remove(i);
             }
         }
-        // A rename held while it was written to (an editor closed meanwhile)
-        // happens now, if nothing else has the folder.
-        if !self.copying(&dir) && self.editor_for(&dir).is_none() {
+        // A rename held while it was written to (its editor closed, and that
+        // editor's own jobs wound down, meanwhile) happens now, if nothing
+        // else has the folder.
+        let held = self.held_renames.borrow().contains(&dir);
+        if held && !self.copying(&dir) && self.editor_for(&dir).is_none() {
+            self.held_renames.borrow_mut().retain(|d| *d != dir);
             let root = self.settings.borrow().save_dir.clone();
             if let Ok(Some(to)) = visor_core::project::rename_to_title(&dir, &root) {
                 tracing::info!("renamed {} to {}", dir.display(), to.display());

@@ -45,7 +45,8 @@ several stretches as one step.
 adds videos; the reply comes from `poll_export`, or an error if the editor closes first.
 Otherwise it runs on a thread into `exports/`, one per recording at a time, written under a
 hidden name (`.name.mp4`) and renamed when done, so one cut short by quitting never looks
-finished; folder renames wait (`App::copies`) and happen when it's written (`copy_finished`).
+finished; a rename held meanwhile (`App::copies`, `App::held_renames`) happens when it's written
+(`copy_finished`).
 New export names skip those still being set up (`App::exports_writing`), whose files may not
 exist yet, and `get_recording` lists them with `in_progress` (bytes 0 until the file appears).
 

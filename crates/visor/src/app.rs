@@ -107,6 +107,9 @@ pub struct App {
     copies: RefCell<Vec<PathBuf>>,
     /// Files agents' background exports are writing.
     agent_exports: RefCell<Vec<PathBuf>>,
+    /// Folders whose rename (on their editor closing, its jobs done) waits
+    /// for a copy or export into them; `copy_finished` makes it.
+    held_renames: RefCell<Vec<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -202,6 +205,7 @@ impl App {
             more_cancelled: RefCell::default(),
             copies: RefCell::default(),
             agent_exports: RefCell::default(),
+            held_renames: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });
@@ -1991,6 +1995,9 @@ impl App {
         }
         if self.copying(dir) {
             // copy_finished renames it once that's done.
+            if !self.held_renames.borrow().iter().any(|d| d == dir) {
+                self.held_renames.borrow_mut().push(dir.to_path_buf());
+            }
             tracing::info!(
                 "not renaming {} yet: something is being written into it",
                 dir.display()
