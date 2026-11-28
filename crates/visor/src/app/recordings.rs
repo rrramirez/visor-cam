@@ -111,6 +111,9 @@ impl App {
             Ok(Some(to)) => {
                 self.agent_folder_renamed(dir, &to);
                 self.refresh_tray();
+                if let Some(w) = self.library.borrow().clone() {
+                    w.select(&to);
+                }
             }
             Ok(None) => self.library_changed(),
             Err(e) => note(&format!("Couldn't rename it: {e:#}")),

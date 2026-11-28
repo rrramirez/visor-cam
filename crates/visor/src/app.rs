@@ -1931,6 +1931,8 @@ impl App {
             Ok(editor) => {
                 self.editors.borrow_mut().push(editor);
                 self.update_dock();
+                // It's Open there now.
+                self.library_changed();
                 platform::activate();
             }
             Err(e) => {

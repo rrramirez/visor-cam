@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, SystemTime};
 
-use slint::{ComponentHandle, Image, ModelRc, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, VecModel};
 use visor_core::library::Entry;
 
 use crate::app::{app, post};
@@ -135,6 +135,9 @@ pub struct LibraryWindow {
     /// Asked for and not back yet.
     pending: RefCell<HashSet<PathBuf>>,
     renderer: crossbeam_channel::Sender<PathBuf>,
+    /// The cards shown. Changed row by row, not replaced: a card made anew
+    /// between two clicks would miss a double-click.
+    model: Rc<VecModel<RecordingCard>>,
 }
 
 /// Where thumbnails are cached: Visor's folder in the user's cache folder.
@@ -164,6 +167,8 @@ impl LibraryWindow {
                     post(move |app| app.library_thumbnail(&dir, result.ok()));
                 }
             })?;
+        let model = Rc::new(VecModel::<RecordingCard>::default());
+        ui.set_cards(ModelRc::from(model.clone()));
         let this = Rc::new_cyclic(|weak: &Weak<LibraryWindow>| {
             wire(&ui, weak.clone());
             LibraryWindow {
@@ -174,6 +179,7 @@ impl LibraryWindow {
                 thumbs: RefCell::default(),
                 pending: RefCell::default(),
                 renderer: tx,
+                model,
             }
         });
         Ok(this)
@@ -231,6 +237,15 @@ impl LibraryWindow {
         self.show_cards();
     }
 
+    /// Selects the recording in `dir` alone (one just renamed).
+    pub fn select(&self, dir: &Path) {
+        let found = self.entries.borrow().iter().position(|e| e.dir == dir);
+        if let Some(i) = found {
+            self.selection.borrow_mut().click(i, Pick::Only);
+            self.show_cards();
+        }
+    }
+
     /// A thumbnail rendered (or not) for `dir`.
     pub fn thumbnail(&self, dir: &Path, path: Option<PathBuf>) {
         self.pending.borrow_mut().remove(dir);
@@ -280,7 +295,15 @@ impl LibraryWindow {
                 }
             })
             .collect();
-        self.ui.set_cards(ModelRc::new(VecModel::from(cards)));
+        if self.model.row_count() == cards.len() {
+            for (i, card) in cards.into_iter().enumerate() {
+                if self.model.row_data(i).as_ref() != Some(&card) {
+                    self.model.set_row_data(i, card);
+                }
+            }
+        } else {
+            self.model.set_vec(cards);
+        }
     }
 
     /// The recordings selected: folder, name and what they're in use for.
