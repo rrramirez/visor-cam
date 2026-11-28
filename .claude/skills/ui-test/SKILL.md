@@ -108,9 +108,12 @@ front, so the padded file still reads fine) and delete it afterwards.
   them. Pickers and the countdown are separate windows: `windows` lists them, and the
   countdown isn't on layer 0.
 - `launch` refuses while a test instance runs. `stop` first, and `stop` at the end.
-- Visor reads ⌘ and ⇧ for clicks from key presses (winit), not from the click: ⌘-click and
-  ⇧-click selection only work while Visor is the active app and `key` can press the modifier.
-  If it isn't active, cover multi-selection with unit tests and list it under **To test**.
+- Visor reads ⌘ and ⇧ for clicks from key presses (winit), not from the click; `click X Y
+  cmd|shift` presses the key around the click, which works only while Visor is the active app.
+- macOS may refuse to make the test instance the active app while another app is (System
+  Events and clicks alike), so keys and modifier-clicks don't reach it. Then ask the user to
+  click the test window's title bar once and leave the mouse and keyboard alone, and run the
+  keyboard checks right away.
 - Confirmations (`rfd::MessageDialog`) shown while Visor isn't the active app come up as a
   system alert owned by UserNotificationCenter, not Visor, so the click guard refuses them.
   Answer them by hand, or test from a state where Visor is active.
