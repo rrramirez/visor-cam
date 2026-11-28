@@ -23,6 +23,9 @@ tray-icon = "0.26"
 global-hotkey = "0.9"
 dirs = "7"
 rfd = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Move to Trash on macOS, Windows and Linux.
+trash = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
