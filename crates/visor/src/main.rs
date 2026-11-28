@@ -17,6 +17,7 @@ mod app;
 mod cli;
 mod editor;
 mod instance;
+mod library;
 mod mcp;
 mod platform;
 mod settings;
