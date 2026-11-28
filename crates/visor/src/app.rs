@@ -1963,14 +1963,28 @@ impl App {
         // a cancelled export or a thumbnail being saved may still write to
         // the old path, and on Windows the player's files stay open for a
         // moment.
+        // Until its jobs are done (a thumbnail being saved…), the folder is
+        // held as a copy, so a voiceover's files aren't tidied from under
+        // them.
+        self.copy_started(dir);
         let (dir, root) = (dir.to_path_buf(), self.settings.borrow().save_dir.clone());
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             while jobs.running() {
                 if std::time::Instant::now() > deadline {
+                    let d = dir.clone();
+                    post(move |app| {
+                        app.copy_finished(&d);
+                    });
                     return tracing::warn!("not renaming {}: still busy", dir.display());
                 }
                 std::thread::sleep(Duration::from_millis(100));
+            }
+            {
+                let d = dir.clone();
+                post(move |app| {
+                    app.copy_finished(&d);
+                });
             }
             for attempt in 1..=10 {
                 let (tx, rx) = crossbeam_channel::bounded(1);

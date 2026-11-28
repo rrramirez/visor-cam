@@ -1078,8 +1078,8 @@ impl App {
                         // Not while a copy or export writes into the folder.
                         if renamed && self.copying(&dir) {
                             return Err(
-                                "Something is being written into it (videos added, or an export); \
-                                        rename it once that's done."
+                                "Something is using its folder (videos being added, an export or \
+                                 a search); rename it once that's done."
                                     .into(),
                             );
                         }
@@ -1400,15 +1400,14 @@ impl App {
                     (min * 1e6) as Micros
                 }
             };
-            let (editor, project) = self.agent_project(&dir)?;
-            // It reads the folder's files as it goes: held as a copy (and a
-            // job of its editor, if open), so nothing renames or tidies them
-            // away, even once the editor closes.
+            let (_, project) = self.agent_project(&dir)?;
+            // It reads the folder's files as it goes: held as a copy, so
+            // nothing renames or tidies them away (an editor closing
+            // meanwhile included).
             self.copy_started(&dir);
-            let guard = editor.map(|e| e.start_job());
-            Ok((dir, project, min, guard))
+            Ok((dir, project, min))
         });
-        let (dir, project, min, guard) = match request {
+        let (dir, project, min) = match request {
             Ok(request) => request,
             Err(e) => return send(reply, Err(e)),
         };
@@ -1432,7 +1431,6 @@ impl App {
                     })
                 })
                 .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
-            drop(guard);
             send(reply, result);
             post(move |app| {
                 app.copy_finished(&dir);

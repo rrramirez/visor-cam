@@ -134,10 +134,12 @@ track is unreadable.
   closes, for redo, and a take recorded meanwhile mustn't write over them.
 - What's added is copied in; its original is never written to. A recording
   can't be added to itself, nor one still being recorded (`is_interrupted`).
-- A folder isn't renamed while a copy or an agent's export writes into it
-  (`App::copies`). When its editor closes meanwhile, the rename waits for
-  that editor's jobs, is then held (`App::held_renames`), and `copy_finished`
-  makes it once nothing writes into the folder and no editor has it.
+- A folder isn't renamed while something uses it (`App::copies`): a copy
+  into it, an agent's background export or dead-time search, or a closed
+  editor's jobs still winding down (held from `editor_closed` until they're
+  done, at most 60 s). A rename that comes up meanwhile is held
+  (`App::held_renames`), and `copy_finished` makes it once nothing uses the
+  folder and no editor has it.
 
 ## Gotchas
 

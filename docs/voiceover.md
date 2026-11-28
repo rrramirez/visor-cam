@@ -71,14 +71,15 @@ can't record voiceovers.
 - Pieces are in source time and in play order as recorded; `file_us` grows along them, so
   each piece plays the right moment of the files whatever the clip order later becomes.
 - A voiceover's files stay in the folder while anything may still need them: its editor
-  (whose undo can bring it back), or an export, copy or dead-time search reading the folder.
+  (whose undo can bring it back), or whatever holds the folder in `App::copies` (a copy,
+  an export or dead-time search, a closed editor's jobs winding down).
   `App::tidy_voiceovers` deletes those of voiceovers no longer in the project once nothing
-  has the folder: when a closed editor's jobs are done (`rename_closed`), when a background
-  job ends (`copy_finished`), or at once after an agent's delete without an editor. The
-  editor's own close leaves them to it (`remove_unused_added_files` skips them). Otherwise
-  (quitting with the editor open, a closed editor's job outlasting the 60 s the rename waits,
-  a file still open on Windows) they stay until the recording is next closed or edited by an
-  agent; nothing is lost.
+  has the folder: when one of those ends (`copy_finished`), when a closed editor's folder is
+  renamed (`rename_closed`), or at once after an agent deletes a voiceover without an
+  editor. The editor's own close leaves them to it (`remove_unused_added_files` skips
+  them). Otherwise (quitting with the editor open, a file still open on Windows) they stay
+  until the recording is next closed, an agent deletes a voiceover from it, or a background
+  job on it ends; nothing is lost.
 - While recording, the editor takes no clicks (a layer over it) and only Esc and Space
   as keys: moving the playhead would put the voice out of step with the picture. While the
   panel is open or it records, the editor is busy (`is_busy`, `voiceover_active`): agents'

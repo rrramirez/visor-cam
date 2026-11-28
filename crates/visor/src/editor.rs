@@ -850,12 +850,6 @@ impl EditorWindow {
         slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
     }
 
-    /// Marks work reading the recording's folder from elsewhere (an agent),
-    /// so the folder isn't renamed under it.
-    pub fn start_job(&self) -> JobGuard {
-        self.jobs.start()
-    }
-
     /// Cancels an export and stops playback. Returns the background jobs,
     /// which may take a moment to wind down.
     pub fn stop_work(&self) -> Jobs {

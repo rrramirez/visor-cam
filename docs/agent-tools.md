@@ -35,8 +35,8 @@ it shows at once and the user can undo it like their own: the edit, markers and 
 undo step each (`apply_agent_edit`, `apply_agent_markers`, `apply_agent_blurs`); name, speed,
 thumbnail and bubble are set as the editor's controls set them, not undoable
 (`apply_agent_looks`). Without an editor the change is saved to `project.json`, and a new name
-renames the folder at once (`rename_to_title`), refused while a copy or export writes into it
-(`App::copies`). `remove_from_recording` with `ranges` removes
+renames the folder at once (`rename_to_title`), refused while something uses it: a copy,
+export or dead-time search (`App::copies`). `remove_from_recording` with `ranges` removes
 several stretches as one step. Voiceovers can be deleted (`edit_voiceovers`, one undo step in
 the editor) but not recorded; see [voiceover.md](voiceover.md).
 
