@@ -62,6 +62,38 @@ impl App {
         });
     }
 
+    /// The mic stream the recorder panel has open, if it's device `id`
+    /// (a device opened twice may not work).
+    pub(crate) fn shared_mic(&self, id: &str) -> Option<Arc<MicStream>> {
+        self.devices
+            .borrow()
+            .mic
+            .as_ref()
+            .filter(|(i, _)| i == id)
+            .map(|(_, s)| s.clone())
+    }
+
+    /// Likewise for the camera.
+    pub(crate) fn shared_camera(&self, id: &str) -> Option<Arc<CameraStream>> {
+        self.devices
+            .borrow()
+            .camera
+            .as_ref()
+            .filter(|(i, _)| i == id)
+            .map(|(_, s)| s.clone())
+    }
+
+    /// Whether Visor may use the mic (`camera` false) or the camera; asks
+    /// when it hasn't been decided yet.
+    pub(crate) fn device_allowed(&self, camera: bool) -> bool {
+        let which = if camera {
+            Permission::Camera
+        } else {
+            Permission::Microphone
+        };
+        self.ensure_permission(which, |_| {})
+    }
+
     /// Lists the recordings again, if the Recordings window is showing.
     pub fn library_changed(&self) {
         let Some(w) = self.library.borrow().clone().filter(|w| w.is_visible()) else {
