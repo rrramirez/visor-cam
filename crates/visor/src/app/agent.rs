@@ -133,6 +133,152 @@ fn seconds(us: visor_core::Micros) -> f64 {
     (us as f64 / 1000.0).round() / 1000.0
 }
 
+/// An agent's change to a recording, before it's made (see `agent_change`).
+enum Change {
+    Edit(EditList),
+    Markers(Vec<visor_core::Marker>),
+    Blurs(Vec<visor_core::Blur>),
+    Looks(Box<visor_core::Project>),
+}
+
+/// The recording's state as `get_recording` gives it, with its exports.
+fn recording_value(
+    dir: &Path,
+    project: &visor_core::Project,
+    editor_open: bool,
+    writing: &[PathBuf],
+) -> Value {
+    let mut exports: Vec<(std::time::SystemTime, String, u64)> =
+        std::fs::read_dir(dir.join("exports"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let meta = e.metadata().ok().filter(|m| m.is_file())?;
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        (!name.starts_with('.')).then(|| {
+                            (
+                                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                                name,
+                                meta.len(),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    exports.sort();
+    let mut exports: Vec<(String, u64, bool)> = exports
+        .into_iter()
+        .map(|(_, n, s)| {
+            let busy = writing.iter().any(|w| w == &dir.join("exports").join(&n));
+            (n, s, busy)
+        })
+        .collect();
+    // Exports being set up, whose file isn't written yet.
+    for w in writing
+        .iter()
+        .filter(|w| w.parent() == Some(dir.join("exports").as_path()))
+    {
+        let name = w
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !exports.iter().any(|(n, _, _)| *n == name) {
+            exports.push((name, 0, true));
+        }
+    }
+    agent_edits::recording_json(project, &dir.display().to_string(), &exports, editor_open)
+}
+
+/// An optional time argument, in seconds.
+fn opt_time(args: &Value, name: &str) -> Result<Option<Micros>, String> {
+    match arg(args, name) {
+        None => Ok(None),
+        Some(_) => time_arg(args, name).map(Some),
+    }
+}
+
+/// The `action` argument, one of `allowed`.
+fn action_arg(args: &Value, allowed: &[&str]) -> Result<String, String> {
+    let action = arg(args, "action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if allowed.contains(&action) {
+        Ok(action.to_string())
+    } else {
+        Err(format!("action is one of: {}.", allowed.join(", ")))
+    }
+}
+
+/// `ranges`: [[start, end], …] in seconds.
+fn ranges_arg(v: &Value) -> Result<Vec<(Micros, Micros)>, String> {
+    let bad = || "ranges is a list of [start_seconds, end_seconds] pairs.".to_string();
+    let list = v.as_array().ok_or_else(bad)?;
+    list.iter()
+        .map(|pair| {
+            let p = pair.as_array().filter(|p| p.len() == 2).ok_or_else(bad)?;
+            let t = |v: &Value| {
+                v.as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.0)
+                    .map(|t| (t * 1e6).round() as Micros)
+                    .ok_or_else(bad)
+            };
+            Ok((t(&p[0])?, t(&p[1])?))
+        })
+        .collect()
+}
+
+/// `set_recording`'s arguments.
+fn looks_arg(args: &Value) -> Result<agent_edits::Looks, String> {
+    let mut looks = agent_edits::Looks::default();
+    if let Some(name) = arg(args, "name") {
+        looks.name = Some(name.as_str().ok_or("name is text.")?.to_string());
+    }
+    if let Some(speed) = arg(args, "speed") {
+        looks.speed = Some(speed.as_f64().ok_or("speed is a number, 0.5 to 2.")?);
+    }
+    // null: back to the first kept frame.
+    match args.get("thumbnail_seconds") {
+        None => {}
+        Some(Value::Null) => looks.thumbnail = Some(None),
+        Some(_) => looks.thumbnail = Some(Some(time_arg(args, "thumbnail_seconds")?)),
+    }
+    if let Some(bubble) = arg(args, "bubble") {
+        let b = bubble.as_object().ok_or("bubble is an object.")?;
+        let num = |k: &str| -> Result<Option<f64>, String> {
+            match b.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .map(Some)
+                    .ok_or_else(|| format!("bubble.{k} is a number.")),
+            }
+        };
+        let flag = |k: &str| -> Result<Option<bool>, String> {
+            match b.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_bool()
+                    .map(Some)
+                    .ok_or_else(|| format!("bubble.{k} is true or false.")),
+            }
+        };
+        looks.bubble_visible = flag("visible")?;
+        looks.bubble_mirror = flag("mirror")?;
+        looks.bubble_x = num("x")?;
+        looks.bubble_y = num("y")?;
+        looks.bubble_size = num("size")?;
+        looks.bubble_shape = match b.get("shape").and_then(Value::as_str) {
+            None => None,
+            Some("circle") => Some(visor_core::project::BubbleShape::Circle),
+            Some("rounded") => Some(visor_core::project::BubbleShape::RoundedRect),
+            Some(_) => return Err("bubble.shape is circle or rounded.".into()),
+        };
+    }
+    Ok(looks)
+}
+
 /// A field that is present and not null.
 fn arg<'a>(args: &'a Value, name: &str) -> Option<&'a Value> {
     args.get(name).filter(|v| !v.is_null())
@@ -233,6 +379,12 @@ impl App {
             "open_recording" => self.agent_open(&command),
             "add_video" => return self.agent_add(&command, reply),
             "list_recordings" => Ok(self.agent_list_recordings()),
+            "get_recording" => self.agent_get_recording(&command),
+            "edit_clips" => self.agent_edit_clips(&command),
+            "edit_markers" => self.agent_edit_markers(&command),
+            "edit_blurs" => self.agent_edit_blurs(&command),
+            "set_recording" => self.agent_set_recording(&command),
+            "export_recording" => return self.agent_export(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -808,6 +960,15 @@ impl App {
     /// undoes all its cuts. Goes through its editor when open, so the user
     /// sees the change and can undo it.
     fn agent_edit(&self, args: &Value, kind: EditKind) -> Result<Value, String> {
+        if let (EditKind::Remove, Some(ranges)) = (kind, arg(args, "ranges")) {
+            let ranges = ranges_arg(ranges)?;
+            // With what a single removal answers too.
+            let mut v = self.agent_change(args, |p| {
+                agent_edits::remove_ranges(p, &ranges, SLIVER).map(Change::Edit)
+            })?;
+            v["kept"] = v["clips"].clone();
+            return Ok(v);
+        }
         let dir = self.agent_recording(args)?;
         let range = match kind {
             EditKind::Restore => None,
@@ -855,6 +1016,244 @@ impl App {
             "kept": project.edit.ranges().iter().map(|r| [seconds(r.0), seconds(r.1)]).collect::<Vec<_>>(),
             "editor_open": editor.is_some(),
         }))
+    }
+
+    /// Makes an agent's change to a recording: through its editor when
+    /// open (shown there, and undoable as the user's own would be), else
+    /// saved to its folder. Replies with the recording as it now is.
+    fn agent_change(
+        &self,
+        args: &Value,
+        make: impl FnOnce(&visor_core::Project) -> Result<Change, String>,
+    ) -> Result<Value, String> {
+        let mut dir = self.agent_recording(args)?;
+        let (editor, current) = self.agent_project(&dir)?;
+        let change = make(&current)?;
+        let project = match (&editor, change) {
+            (Some(e), Change::Edit(edit)) => e.apply_agent_edit(edit)?,
+            (Some(e), Change::Markers(m)) => e.apply_agent_markers(m)?,
+            (Some(e), Change::Blurs(b)) => e.apply_agent_blurs(b)?,
+            (Some(e), Change::Looks(after)) => e.apply_agent_looks(&after)?,
+            (None, change) => {
+                let mut p = current;
+                let renamed = match change {
+                    Change::Edit(edit) => {
+                        p.edit = edit;
+                        false
+                    }
+                    Change::Markers(m) => {
+                        p.markers = m;
+                        false
+                    }
+                    Change::Blurs(b) => {
+                        p.blurs = b;
+                        false
+                    }
+                    Change::Looks(after) => {
+                        let renamed = after.title != p.title;
+                        // Not while a copy or export writes into the folder.
+                        if renamed && self.copying(&dir) {
+                            return Err(
+                                "Something is being written into it (videos added, or an export); \
+                                        rename it once that's done."
+                                    .into(),
+                            );
+                        }
+                        p = *after;
+                        renamed
+                    }
+                };
+                p.save(&dir).map_err(|e| e.to_string())?;
+                // Its folder takes the new name, as the editor's does.
+                if renamed {
+                    let root = self.settings.borrow().save_dir.clone();
+                    if let Ok(Some(to)) = visor_core::project::rename_to_title(&dir, &root) {
+                        self.agent_folder_renamed(&dir, &to);
+                        dir = to;
+                    }
+                }
+                self.refresh_tray();
+                p
+            }
+        };
+        Ok(self.recording_value(&dir, &project, editor.is_some()))
+    }
+
+    /// Exports a recording and answers once the file is written: in its
+    /// editor when open (the user sees it), else in the background, its
+    /// folder not renamed meanwhile.
+    fn agent_export(&self, args: &Value, reply: Reply) {
+        let request = self.agent_recording(args).and_then(|dir| {
+            let choice = agent_edits::export_choice(args, crate::editor::ExportChoice::last())?;
+            let (editor, project) = self.agent_project(&dir)?;
+            Ok((dir, choice, editor, project))
+        });
+        let (dir, choice, editor, project) = match request {
+            Ok(r) => r,
+            Err(e) => return send(reply, Err(e)),
+        };
+        let answer = {
+            let (dir, video) = (dir.clone(), project.output_duration());
+            move |result: Result<PathBuf, String>| -> Result<Value, String> {
+                let file = result?;
+                Ok(json!({
+                    "folder": dir.display().to_string(),
+                    "file": file.display().to_string(),
+                    "bytes": std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+                    "video_seconds": seconds(video),
+                }))
+            }
+        };
+        if let Some(editor) = editor {
+            let r = reply.clone();
+            let done: crate::editor::ExportReply = Box::new(move |result| send(r, answer(result)));
+            if let Err(e) = editor.agent_export(choice, done) {
+                send(reply, Err(e));
+            }
+            return;
+        }
+        // One at a time: two could pick the same file name.
+        let exports = dir.join("exports");
+        if self
+            .agent_exports
+            .borrow()
+            .iter()
+            .any(|f| f.parent() == Some(exports.as_path()))
+        {
+            return send(
+                reply,
+                Err("It's already being exported; try again once that's done.".into()),
+            );
+        }
+        let (options, _) = choice.options();
+        let out = match crate::editor::export_path(&dir, &project, options.format.extension()) {
+            Ok(out) => out,
+            Err(e) => return send(reply, Err(format!("Couldn't export it: {e:#}"))),
+        };
+        self.copy_started(&dir);
+        self.agent_exports.borrow_mut().push(out.clone());
+        std::thread::spawn(move || {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            // Written under a hidden name and named once done: one cut short
+            // (Visor quit) never looks like a finished export.
+            let name = out
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let partial = out.with_file_name(format!(".{name}"));
+            let result =
+                visor_media::export(&dir, &project, &partial, &options, &mut |_| {}, &cancel)
+                    .and_then(|()| Ok(std::fs::rename(&partial, &out)?))
+                    .map(|()| out.clone())
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&partial);
+                        format!("The export failed: {e:#}")
+                    });
+            post(move |app| {
+                app.agent_exports.borrow_mut().retain(|f| *f != out);
+                let mut answer = answer(result);
+                // A rename held while it exported may move the folder now.
+                if let (Ok(v), Some(to)) = (&mut answer, app.copy_finished(&dir)) {
+                    agent_edits::moved(v, &dir, &to);
+                }
+                send(reply, answer);
+            });
+        });
+    }
+
+    /// A recording's whole state, for an agent to find its way around it.
+    fn agent_get_recording(&self, args: &Value) -> Result<Value, String> {
+        let dir = self.agent_recording(args)?;
+        let (editor, project) = self.agent_project(&dir)?;
+        Ok(self.recording_value(&dir, &project, editor.is_some()))
+    }
+
+    /// The recording's state as `get_recording` gives it, with its exports
+    /// (those still being written marked so).
+    fn recording_value(
+        &self,
+        dir: &Path,
+        project: &visor_core::Project,
+        editor_open: bool,
+    ) -> Value {
+        recording_value(dir, project, editor_open, &self.exports_writing())
+    }
+
+    fn agent_edit_clips(&self, args: &Value) -> Result<Value, String> {
+        let at = time_arg(args, "at_seconds")?;
+        let before = opt_time(args, "before_seconds")?;
+        let action = action_arg(args, &["split", "move", "bring_back"])?;
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "split" => agent_edits::split(p, at),
+                "move" => agent_edits::move_clip(p, at, before),
+                _ => agent_edits::bring_back_at(p, at),
+            }
+            .map(Change::Edit)
+        })
+    }
+
+    fn agent_edit_markers(&self, args: &Value) -> Result<Value, String> {
+        let at = time_arg(args, "at_seconds")?;
+        let text = arg(args, "text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let action = action_arg(args, &["add", "rename", "delete"])?;
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "add" => agent_edits::add_marker(p, at, &text),
+                "rename" => agent_edits::rename_marker(p, at, &text),
+                _ => agent_edits::delete_marker(p, at),
+            }
+            .map(Change::Markers)
+        })
+    }
+
+    fn agent_edit_blurs(&self, args: &Value) -> Result<Value, String> {
+        let action = action_arg(args, &["add", "change", "delete"])?;
+        let number = match arg(args, "number") {
+            None => None,
+            Some(n) => Some(n.as_u64().ok_or("number is 1, 2, …")? as usize),
+        };
+        let fraction = |name: &str| -> Result<Option<f64>, String> {
+            match arg(args, name) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .map(Some)
+                    .ok_or_else(|| format!("{name} is a fraction of the frame, 0 to 1.")),
+            }
+        };
+        let area = agent_edits::Area {
+            x: fraction("x")?,
+            y: fraction("y")?,
+            width: fraction("width")?,
+            height: fraction("height")?,
+        };
+        let (start, end) = (
+            opt_time(args, "start_seconds")?,
+            opt_time(args, "end_seconds")?,
+        );
+        let at = opt_time(args, "at_seconds")?;
+        self.agent_change(args, |p| {
+            match action.as_str() {
+                "add" => agent_edits::add_blur(p, area, start, end),
+                "change" => agent_edits::change_blur(p, at, number, area, start, end),
+                _ => agent_edits::delete_blur(p, at, number),
+            }
+            .map(Change::Blurs)
+        })
+    }
+
+    fn agent_set_recording(&self, args: &Value) -> Result<Value, String> {
+        let looks = looks_arg(args)?;
+        if looks == agent_edits::Looks::default() {
+            return Err("Say what to change: name, speed, thumbnail_seconds or bubble.".into());
+        }
+        self.agent_change(args, |p| {
+            agent_edits::set_looks(p, &looks).map(|p| Change::Looks(Box::new(p)))
+        })
     }
 
     /// The recording in `dir` as its open editor has it, else as saved, and
@@ -1058,12 +1457,44 @@ impl App {
         self.copies.borrow_mut().push(canonical(dir));
     }
 
-    pub(crate) fn copy_finished(&self, dir: &Path) {
+    /// A copy into `dir` is over. Returns where the folder moved, if a
+    /// rename held meanwhile happened now.
+    pub(crate) fn copy_finished(&self, dir: &Path) -> Option<PathBuf> {
         let dir = canonical(dir);
-        let mut copies = self.copies.borrow_mut();
-        if let Some(i) = copies.iter().position(|d| *d == dir) {
-            copies.remove(i);
+        {
+            let mut copies = self.copies.borrow_mut();
+            if let Some(i) = copies.iter().position(|d| *d == dir) {
+                copies.remove(i);
+            }
         }
+        // A rename held while it was written to (its editor closed, and that
+        // editor's own jobs wound down, meanwhile) happens now, if nothing
+        // else has the folder.
+        let held = self.held_renames.borrow().contains(&dir);
+        if held && !self.copying(&dir) && self.editor_for(&dir).is_none() {
+            self.held_renames.borrow_mut().retain(|d| *d != dir);
+            let root = self.settings.borrow().save_dir.clone();
+            if let Ok(Some(to)) = visor_core::project::rename_to_title(&dir, &root) {
+                tracing::info!("renamed {} to {}", dir.display(), to.display());
+                self.agent_folder_renamed(&dir, &to);
+                self.refresh_tray();
+                return Some(to);
+            }
+        }
+        None
+    }
+
+    /// Exports being written, by agents in the background or in editors:
+    /// their files may not exist yet.
+    pub(crate) fn exports_writing(&self) -> Vec<PathBuf> {
+        let mut writing = self.agent_exports.borrow().clone();
+        writing.extend(
+            self.editors
+                .borrow()
+                .iter()
+                .filter_map(|e| e.exporting_to()),
+        );
+        writing
     }
 
     /// Copied in for an agent with no editor open: adds it, if the
@@ -1074,11 +1505,21 @@ impl App {
         prepared: anyhow::Result<visor_media::import::Prepared>,
         reply: Reply,
     ) {
-        self.copy_finished(&dir);
-        let prepared = match prepared {
-            Ok(p) => p,
-            Err(e) => return send(reply, Err(format!("Couldn't add it: {e:#}"))),
-        };
+        let mut result = self.add_copied(&dir, prepared);
+        // Only then: a rename held while it copied may move the folder.
+        if let (Ok(v), Some(to)) = (&mut result, self.copy_finished(&dir)) {
+            agent_edits::moved(v, &dir, &to);
+        }
+        send(reply, result);
+    }
+
+    fn add_copied(
+        &self,
+        dir: &Path,
+        prepared: anyhow::Result<visor_media::import::Prepared>,
+    ) -> Result<Value, String> {
+        let dir = dir.to_path_buf();
+        let prepared = prepared.map_err(|e| format!("Couldn't add it: {e:#}"))?;
         let remove_copies = |prepared: &visor_media::import::Prepared| {
             for name in prepared.files() {
                 let _ = std::fs::remove_file(dir.join(name));
@@ -1094,33 +1535,27 @@ impl App {
             });
         if let Err(e) = still {
             remove_copies(&prepared);
-            return send(reply, Err(e));
+            return Err(e);
         }
         // Opened in the meantime: added there, to undo, unless it's
         // exporting or the like, which would leave it out.
         if let Some(editor) = self.editor_for(&dir) {
             if editor.is_busy() {
                 remove_copies(&prepared);
-                return send(
-                    reply,
-                    Err(
-                        "That recording was opened and is being exported, searched for \
-                         pauses or added to; nothing was added. Try again once that's done."
-                            .into(),
-                    ),
+                return Err(
+                    "That recording was opened and is being exported, searched for \
+                            pauses or added to; nothing was added. Try again once that's done."
+                        .into(),
                 );
             }
             let starts = editor.add_prepared(prepared);
-            return send(
-                reply,
-                Ok(added_json(&dir, &editor.project(), &starts, true)),
-            );
+            return Ok(added_json(&dir, &editor.project(), &starts, true));
         }
         let mut project = match visor_core::Project::load(&dir) {
             Ok(p) => p,
             Err(e) => {
                 remove_copies(&prepared);
-                return send(reply, Err(e.to_string()));
+                return Err(e.to_string());
             }
         };
         let starts: Vec<Micros> = prepared
@@ -1131,9 +1566,9 @@ impl App {
             .collect();
         if let Err(e) = project.save(&dir) {
             remove_copies(&prepared);
-            return send(reply, Err(format!("Couldn't save the recording: {e}")));
+            return Err(format!("Couldn't save the recording: {e}"));
         }
-        send(reply, Ok(added_json(&dir, &project, &starts, false)));
+        Ok(added_json(&dir, &project, &starts, false))
     }
 
     /// Opens a recording in the editor for the user.

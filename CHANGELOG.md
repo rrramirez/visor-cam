@@ -7,6 +7,7 @@ is also what the update window shows.
 ## Unreleased
 
 ### New
+- **Agents can finish a video:** besides recording and cutting, agents can now read everything about a recording (`get_recording`), split, move and bring back clips, add, rename and delete markers on a stopped recording, blur areas, set the name, speed, thumbnail and camera bubble, remove several stretches in one step, and export (`export_recording`, with your last export choices unless they say otherwise). If the recording is open in the editor, you see each change there and can undo it with **⌘Z**, and an export runs there, where you can cancel it. When an export in the editor is done (yours or an agent's), it says what it was made with (format, size and sound options). The command line has them too: `visor info`, `split`, `move`, `bring-back`, `marker`, `blur`, `set` and `export`.
 - **Recordings window:** all your recordings in one place, newest first, each with its thumbnail, date and length. Open it from the recorder's folder button or *Recordings…* in the menu bar. Double-click one to open it in the editor, click its name to rename it, show it in Finder or its exports, or select several and move them to the Trash. Recordings being recorded or open in an editor are marked, and stay out of the Trash. Agents can list recordings too: `list_recordings`, or `visor list`.
 
 ## 0.9.0

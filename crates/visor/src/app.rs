@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod agent;
+mod agent_edits;
 mod recordings;
 
 /// Work waiting for startup to finish (see `App::when_ready`).
@@ -104,6 +105,11 @@ pub struct App {
     /// nor swept for what an unfinished addition left, as the copy writes
     /// to the folder.
     copies: RefCell<Vec<PathBuf>>,
+    /// Files agents' background exports are writing.
+    agent_exports: RefCell<Vec<PathBuf>>,
+    /// Folders whose rename (on their editor closing, its jobs done) waits
+    /// for a copy or export into them; `copy_finished` makes it.
+    held_renames: RefCell<Vec<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -198,6 +204,8 @@ impl App {
             more: RefCell::default(),
             more_cancelled: RefCell::default(),
             copies: RefCell::default(),
+            agent_exports: RefCell::default(),
+            held_renames: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });
@@ -1986,8 +1994,12 @@ impl App {
             return false;
         }
         if self.copying(dir) {
+            // copy_finished renames it once that's done.
+            if !self.held_renames.borrow().iter().any(|d| d == dir) {
+                self.held_renames.borrow_mut().push(dir.to_path_buf());
+            }
             tracing::info!(
-                "not renaming {}: videos are being added to it",
+                "not renaming {} yet: something is being written into it",
                 dir.display()
             );
             return false;

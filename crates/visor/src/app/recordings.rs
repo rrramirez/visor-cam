@@ -113,7 +113,9 @@ impl App {
         match busy {
             Some(Busy::Recording) => {}
             Some(Busy::Adding) => {
-                return note("Videos are being added to it; rename it once that's done.");
+                return note(
+                    "Something is being written into it (videos added, or an export); rename it once that's done.",
+                );
             }
             // Open, but its editor wasn't found above: never rename under it.
             Some(Busy::Open) => return note("Rename it in its editor."),
