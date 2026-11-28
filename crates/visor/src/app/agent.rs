@@ -1089,9 +1089,9 @@ impl App {
                 };
                 p.save(&dir).map_err(|e| e.to_string())?;
                 // Nothing can bring a deleted voiceover back without an
-                // editor's undo: its files go now.
+                // editor's undo: its files go, once nothing reads them.
                 if deleted_voiceovers {
-                    visor_core::project::remove_unused_voiceover_files(&dir, &p);
+                    self.tidy_voiceovers(&dir);
                 }
                 // Its folder takes the new name, as the editor's does.
                 if renamed {
@@ -1401,6 +1401,11 @@ impl App {
                 }
             };
             let (editor, project) = self.agent_project(&dir)?;
+            // It reads the folder's files as it goes: held as a job of its
+            // editor, else as a copy, so nothing renames or tidies them away.
+            if editor.is_none() {
+                self.copy_started(&dir);
+            }
             let guard = editor.map(|e| e.start_job());
             Ok((dir, project, min, guard))
         });
@@ -1428,8 +1433,14 @@ impl App {
                     })
                 })
                 .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
+            let held = guard.is_none();
             drop(guard);
             send(reply, result);
+            if held {
+                post(move |app| {
+                    app.copy_finished(&dir);
+                });
+            }
         });
     }
 
@@ -1527,6 +1538,19 @@ impl App {
         });
     }
 
+    /// Deletes the files of voiceovers deleted from the recording in `dir`,
+    /// unless something may still read them: its editor (whose undo can
+    /// bring them back), or a copy, export or search in it. Runs again when
+    /// those are done (`copy_finished`, `rename_closed`).
+    pub(crate) fn tidy_voiceovers(&self, dir: &Path) {
+        if self.copying(dir) || self.editor_for(dir).is_some() {
+            return;
+        }
+        if let Ok(project) = visor_core::Project::load(dir) {
+            visor_core::project::remove_unused_voiceover_files(dir, &project);
+        }
+    }
+
     /// Whether videos are being copied into `dir` (see `App::copies`).
     pub(crate) fn copying(&self, dir: &Path) -> bool {
         self.copies.borrow().contains(&canonical(dir))
@@ -1551,6 +1575,7 @@ impl App {
         // A rename held while it was written to (its editor closed, and that
         // editor's own jobs wound down, meanwhile) happens now, if nothing
         // else has the folder.
+        self.tidy_voiceovers(&dir);
         let held = self.held_renames.borrow().contains(&dir);
         if held && !self.copying(&dir) && self.editor_for(&dir).is_none() {
             self.held_renames.borrow_mut().retain(|d| *d != dir);

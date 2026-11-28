@@ -1743,8 +1743,6 @@ impl EditorWindow {
                 }
             }
         }
-        // Voiceovers deleted, in this session or before.
-        visor_core::project::remove_unused_voiceover_files(&self.dir, &project);
     }
 
     /// Opens the *Add video…* menu: fills in the recent recordings.

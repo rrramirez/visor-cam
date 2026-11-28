@@ -538,7 +538,8 @@ impl Project {
 
     /// How loud the video's own sound plays at source time `t`: lowered
     /// under a voiceover's voice to its `clip_sound`, fading down and back
-    /// over [`DUCK_FADE`] at the voiceover's start and end.
+    /// over [`DUCK_FADE`] at the voiceover's start and end. Where they
+    /// overlap, the later one's (its voice is the one heard).
     pub fn clip_sound_gain(&self, t: Micros) -> f64 {
         let mut gain: f64 = 1.0;
         for v in self.voiceovers.iter().filter(|v| v.voice.is_some()) {
@@ -564,7 +565,9 @@ impl Project {
                     1.0
                 };
                 let depth = rise.min(fall).min(1.0);
-                gain = gain.min(1.0 - (1.0 - level) * depth);
+                // A later voiceover wins over one under it, as its voice
+                // does, fading from that one's level.
+                gain += (level - gain) * depth;
             }
         }
         gain
@@ -998,9 +1001,6 @@ pub fn folder_name(title: &str) -> Option<String> {
     })
 }
 
-/// Renames the recording folder `dir` after its project's title, if it is
-/// directly inside `root` (the recordings folder) and named otherwise. A
-/// taken name gets " 2", " 3", …. Returns the new path when it moved.
 /// Deletes the files of voiceovers no longer in `project` from its folder
 /// `dir` (best effort: one that can't be removed stays).
 pub fn remove_unused_voiceover_files(dir: &Path, project: &Project) {
@@ -1016,6 +1016,9 @@ pub fn remove_unused_voiceover_files(dir: &Path, project: &Project) {
     }
 }
 
+/// Renames the recording folder `dir` after its project's title, if it is
+/// directly inside `root` (the recordings folder) and named otherwise. A
+/// taken name gets " 2", " 3", …. Returns the new path when it moved.
 pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     if dir.is_symlink() {
         return Ok(None);
@@ -1638,6 +1641,24 @@ mod tests {
             assert!((q.clip_sound_gain(t) - 0.25).abs() < 1e-9, "{t}");
         }
         q.voiceovers[0].pieces.truncate(1);
+        // Overlapping: the later voiceover's level, as its voice is heard.
+        let mut both = q.clone();
+        both.voiceovers[0].pieces = vec![VoicePiece {
+            start_us: 0,
+            end_us: 2_000_000,
+            file_us: 0,
+        }];
+        both.voiceovers[0].clip_sound = 0.0;
+        let mut later = both.voiceovers[0].clone();
+        later.pieces = vec![VoicePiece {
+            start_us: 500_000,
+            end_us: 1_500_000,
+            file_us: 0,
+        }];
+        later.clip_sound = 1.0;
+        both.voiceovers.push(later);
+        assert_eq!(both.clip_sound_gain(1_000_000), 1.0);
+        assert_eq!(both.clip_sound_gain(1_800_000), 0.0);
         // From the very start too.
         q.voiceovers[0].pieces[0].start_us = 0;
         assert!(q.clip_sound_gain(10_000) < 1.0);

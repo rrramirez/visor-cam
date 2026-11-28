@@ -2006,6 +2006,8 @@ impl App {
             );
             return false;
         }
+        // Its editor's jobs are done and nothing else reads it.
+        self.tidy_voiceovers(dir);
         match visor_core::project::rename_to_title(dir, root) {
             Ok(Some(to)) => {
                 tracing::info!("renamed {} to {}", dir.display(), to.display());

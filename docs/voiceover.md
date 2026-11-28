@@ -31,7 +31,8 @@ samples from before the offset that the seek landed on.
 are *ducked*: multiplied by `Project::clip_sound_gain(t)`, which is the voiceover's
 `clip_sound` (default 0.25) under the voice, ramping over `DUCK_FADE` (150 ms) inside the
 voiceover's first and last pieces (so what plays next to it, maybe another clip, isn't
-lowered; where one of its pieces joins the next it stays down), and 1 elsewhere. The voice itself isn't ducked. The gain is looked up once per 480
+lowered; where one of its pieces joins the next it stays down), and 1 elsewhere. Where
+voiceovers overlap the later one's level applies, as its voice is the one heard. The voice itself isn't ducked. The gain is looked up once per 480
 frames (10 ms). Export and the player both use `for_project`, so they sound the same. *Remove pauses* (`dead_time::find`), the
 timeline's waveform and `Project::has_sound` (which shows the export's sound options) count
 voices too, so a narrated stretch over a still, silent video isn't a pause.
@@ -69,9 +70,12 @@ can't record voiceovers.
 
 - Pieces are in source time and in play order as recorded; `file_us` grows along them, so
   each piece plays the right moment of the files whatever the clip order later becomes.
-- A voiceover's files stay in the folder while any undo or redo step could bring it back:
-  the editor deletes those of voiceovers no longer in the project when it closes
-  (`remove_unused_voiceover_files`), an agent's delete without an editor at once.
+- A voiceover's files stay in the folder while anything may still need them: its editor
+  (whose undo can bring it back), or an export, copy or dead-time search reading the folder.
+  `App::tidy_voiceovers` deletes those of voiceovers no longer in the project once nothing
+  has the folder: when a closed editor's jobs are done (`rename_closed`), when a background
+  job ends (`copy_finished`), or at once after an agent's delete without an editor. Quitting
+  with the editor open leaves them for the next time.
 - While recording, the editor takes no clicks (a layer over it) and only Esc and Space
   as keys: moving the playhead would put the voice out of step with the picture. While the
   panel is open or it records, the editor is busy (`is_busy`, `voiceover_active`): agents'
