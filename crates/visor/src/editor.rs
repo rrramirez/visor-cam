@@ -431,6 +431,13 @@ impl EditorWindow {
         self.export.borrow().is_some()
             || self.ui.get_finding_pauses()
             || self.adding.borrow().is_some()
+            || self.voiceover_active()
+    }
+
+    /// Whether a voiceover is being set up or recorded: what it covers
+    /// mustn't change meanwhile.
+    pub fn voiceover_active(&self) -> bool {
+        self.vo.try_borrow().map_or(true, |v| v.is_some())
     }
 
     /// Hides the editor to record more onto its recording.
@@ -1515,7 +1522,7 @@ impl EditorWindow {
                 let now = std::mem::replace(&mut self.project.borrow_mut().voiceovers, v);
                 to.borrow_mut().push(Step::Voiceovers(now));
                 self.save();
-                self.reload_media();
+                self.reload_keeping_place();
             }
             Step::Added(at) => {
                 let part = self.project.borrow_mut().take_addition(at);
@@ -2113,6 +2120,11 @@ impl EditorWindow {
         if self.adding.borrow().is_some() {
             return Err("Videos are being added to it; export once that's done.".into());
         }
+        if self.voiceover_active() {
+            return Err(
+                "The user is recording a voiceover in it; export once they're done.".into(),
+            );
+        }
         self.export_with(choice, Some(reply))
     }
 
@@ -2367,7 +2379,15 @@ impl EditorWindow {
         self.redo.borrow_mut().clear();
         self.project.borrow_mut().voiceovers = after;
         self.save();
+        self.reload_keeping_place();
+    }
+
+    /// Reopens the media for changed voiceovers, the playhead where it was
+    /// (the recording's length hasn't changed).
+    fn reload_keeping_place(&self) {
+        let at = self.player.borrow().position();
         self.reload_media();
+        self.control().seek(at);
     }
 
     /// What a voiceover would cover now: the selection's kept part, else
@@ -2391,14 +2411,12 @@ impl EditorWindow {
                 ));
             }
         }
-        let from = kept_frame(&p.edit, self.player.borrow().position());
-        let played = p.edit.to_output(from)?;
-        let len = p.edit.duration().saturating_sub(played);
-        (len > 0).then(|| (from, len, format!("From {} to the end", clock(from))))
+        let (from, len) = from_playhead(&p.edit, self.player.borrow().position())?;
+        Some((from, len, format!("From {} to the end", clock(from))))
     }
 
     fn open_voiceover(&self) {
-        if self.vo.borrow().is_some() || self.is_busy() {
+        if self.is_busy() {
             return;
         }
         let Some((from, len, span)) = self.voiceover_stretch() else {
@@ -2407,11 +2425,8 @@ impl EditorWindow {
         self.control().pause();
         let mics = visor_capture::mic::list();
         let cameras = visor_capture::camera::list();
-        let (last_mic, last_camera) = {
-            let app = app();
-            let s = app.settings.borrow();
-            (s.last_mic.clone(), s.last_camera.clone())
-        };
+        let choice = crate::settings::VoiceoverDevices::current(&app().settings.borrow());
+        let (last_mic, last_camera) = (choice.mic.clone(), choice.camera.clone());
         let index = |id: &Option<String>, ids: Vec<&str>| {
             id.as_deref()
                 .and_then(|id| ids.iter().position(|i| *i == id))
@@ -2436,9 +2451,9 @@ impl EditorWindow {
             &last_camera,
             cameras.iter().map(|c| c.id.as_str()).collect(),
         ));
-        self.ui.set_vo_voice(!mics.is_empty());
+        self.ui.set_vo_voice(choice.voice && !mics.is_empty());
         self.ui
-            .set_vo_cam_on(last_camera.is_some() && !cameras.is_empty());
+            .set_vo_cam_on(choice.camera_on && !cameras.is_empty());
         self.ui.set_vo_span(span.into());
         self.ui.set_vo_note("".into());
         self.ui.set_vo_has_preview(false);
@@ -2497,14 +2512,19 @@ impl EditorWindow {
             (mic_id, cam_id, mic_now, cam_now)
         };
         {
+            // The panel's own choices; the recorder's stay as they are.
             let app = app();
             let mut s = app.settings.borrow_mut();
-            if mic_id.is_some() {
-                s.last_mic = mic_id.clone();
+            let mut choice = crate::settings::VoiceoverDevices::current(&s);
+            choice.voice = voice;
+            choice.camera_on = cam_on;
+            if let Some(id) = &mic_id {
+                choice.mic = Some(id.clone());
             }
-            if cam_id.is_some() {
-                s.last_camera = cam_id.clone();
+            if let Some(id) = &cam_id {
+                choice.camera = Some(id.clone());
             }
+            s.voiceover = Some(choice);
             s.save();
         }
         let mut note = String::new();
@@ -2754,6 +2774,16 @@ impl EditorWindow {
         match recorder.stop() {
             Ok(made) => {
                 let duration = made.duration_us.min(vo.len);
+                if duration < MIN_VOICEOVER {
+                    // Stopped as it began: nothing worth keeping.
+                    for name in [&made.voice, &made.camera.as_ref().map(|c| c.file.clone())]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(self.dir.join(name));
+                    }
+                    return;
+                }
                 let v = {
                     let p = self.project.borrow();
                     voiceover_over(&p.edit, vo.from, duration, made.voice, made.camera)
@@ -2813,6 +2843,22 @@ fn voiceover_over(
         clip_sound: 0.25,
     }
 }
+
+/// What a voiceover from the playhead at source time `pos` covers: its
+/// start and length, to the end. Once (nearly) at the end, from the start.
+fn from_playhead(edit: &EditList, pos: Micros) -> Option<(Micros, Micros)> {
+    let from = kept_frame(edit, pos);
+    let played = edit.to_output(from)?;
+    let left = edit.duration().saturating_sub(played);
+    if left >= MIN_VOICEOVER {
+        return Some((from, left));
+    }
+    let first = edit.ranges().first()?.0;
+    Some((first, edit.duration()))
+}
+
+/// Shorter than this, a voiceover isn't kept (nor started).
+const MIN_VOICEOVER: Micros = 500_000;
 
 /// "0:12–0:30 · Voice and camera": where a voiceover is in the video, and
 /// what it has.
@@ -3285,6 +3331,14 @@ mod tests {
         };
         let both = voiceover_over(&p.edit, 0, 1_000_000, Some("voice-2.m4a".into()), Some(cam));
         assert_eq!(voiceover_label(&p, &both), "0:00–0:01 · Voice and camera");
+        // From the playhead to the end; from the start once at the end, as
+        // Play does.
+        assert_eq!(
+            from_playhead(&p.edit, 3_000_000),
+            Some((3_000_000, 14_000_000))
+        );
+        assert_eq!(from_playhead(&p.edit, 20_000_000), Some((0, 17_000_000)));
+        assert_eq!(from_playhead(&p.edit, 19_900_000), Some((0, 17_000_000)));
         // Nothing played: nothing covered.
         assert!(
             voiceover_over(&p.edit, 6_000_000, 1_000_000, None, None)

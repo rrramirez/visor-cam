@@ -685,7 +685,8 @@ pub fn call(command: &Value) -> Value {
                 | "edit_markers"
                 | "edit_blurs"
                 | "set_recording"
-                | "export_recording",
+                | "export_recording"
+                | "edit_voiceovers",
             ) => {
                 json!({
                     "ok": false,

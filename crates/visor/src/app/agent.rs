@@ -121,6 +121,18 @@ fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
         .ok_or_else(|| format!("{name} is a number of seconds."))
 }
 
+/// Refuses an edit while the user records a voiceover in the recording's
+/// editor: what it covers mustn't change, nor the player be replaced.
+fn not_during_voiceover(editor: &Option<Rc<EditorWindow>>) -> Result<(), String> {
+    if editor.as_ref().is_some_and(|e| e.voiceover_active()) {
+        return Err(
+            "The user is recording a voiceover in that recording; try again once they're done."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn past_the_end(what: &str, duration: Micros) -> String {
     format!(
         "{what} is past the end: the recording is {} seconds long.",
@@ -455,8 +467,8 @@ impl App {
             return send(
                 reply,
                 Err(
-                    "That recording is being exported, searched for pauses or added to; \
-                     try again once that's done."
+                    "That recording is busy in the editor (exporting, finding pauses, adding \
+                     videos or recording a voiceover); try again once that's done."
                         .into(),
                 ),
             );
@@ -987,6 +999,7 @@ impl App {
             }
         };
         let (editor, current) = self.agent_project(&dir)?;
+        not_during_voiceover(&editor)?;
         let duration = current.duration_us;
         if let Some((start, _)) = range
             && start >= duration
@@ -1031,6 +1044,7 @@ impl App {
     ) -> Result<Value, String> {
         let mut dir = self.agent_recording(args)?;
         let (editor, current) = self.agent_project(&dir)?;
+        not_during_voiceover(&editor)?;
         let change = make(&current)?;
         let project = match (&editor, change) {
             (Some(e), Change::Edit(edit)) => e.apply_agent_edit(edit)?,
@@ -1603,8 +1617,9 @@ impl App {
             if editor.is_busy() {
                 remove_copies(&prepared);
                 return Err(
-                    "That recording was opened and is being exported, searched for \
-                            pauses or added to; nothing was added. Try again once that's done."
+                    "That recording was opened and is busy (exporting, finding pauses, \
+                     adding videos or recording a voiceover); nothing was added. Try again \
+                     once that's done."
                         .into(),
                 );
             }

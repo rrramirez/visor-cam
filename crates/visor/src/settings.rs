@@ -32,6 +32,32 @@ pub struct Settings {
     /// Editor sidebar sections the user folded ("edit", "camera", "speed",
     /// "thumbnail").
     pub folded_sections: Vec<String>,
+    /// The voiceover panel's own choices, once it has been used (the
+    /// recorder's aren't changed by it).
+    pub voiceover: Option<VoiceoverDevices>,
+}
+
+/// What the voiceover panel records from.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceoverDevices {
+    pub voice: bool,
+    pub mic: Option<String>,
+    pub camera_on: bool,
+    pub camera: Option<String>,
+}
+
+impl VoiceoverDevices {
+    /// The panel's choices: as last left, or the first time, the
+    /// recorder's (voice on, the camera if it records one).
+    pub fn current(s: &Settings) -> Self {
+        s.voiceover.clone().unwrap_or_else(|| Self {
+            voice: true,
+            mic: s.last_mic.clone(),
+            camera_on: s.last_camera.is_some(),
+            camera: s.last_camera.clone(),
+        })
+    }
 }
 
 impl Default for Settings {
@@ -54,6 +80,7 @@ impl Default for Settings {
             last_mic: None,
             system_audio: false,
             folded_sections: Vec::new(),
+            voiceover: None,
         }
     }
 }
@@ -103,5 +130,35 @@ mod tests {
         assert!(!s.agent_control);
         assert!(!s.export_denoise);
         assert!(s.save_dir.ends_with("Visor"));
+    }
+
+    #[test]
+    fn the_voiceover_panel_keeps_its_own_choices() {
+        let mut s = Settings {
+            last_mic: Some("usb".into()),
+            ..Settings::default()
+        };
+        // First time: the recorder's, voice on, no camera as it has none.
+        let first = VoiceoverDevices::current(&s);
+        assert_eq!(
+            first,
+            VoiceoverDevices {
+                voice: true,
+                mic: Some("usb".into()),
+                camera_on: false,
+                camera: None
+            }
+        );
+        // Then its own, camera off included, whatever the recorder uses.
+        s.voiceover = Some(VoiceoverDevices {
+            voice: false,
+            camera_on: false,
+            camera: Some("cam".into()),
+            ..first
+        });
+        s.last_camera = Some("other".into());
+        let again = VoiceoverDevices::current(&s);
+        assert!(!again.voice && !again.camera_on);
+        assert_eq!(again.camera.as_deref(), Some("cam"));
     }
 }

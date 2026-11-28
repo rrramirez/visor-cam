@@ -236,7 +236,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "get_recording",
-            "description": "Everything about a recording, to find your way around it before changing it: its name, lengths, speed and frame size; its clips in the order they play (recorded start and end seconds); what's removed and which clip it comes back next to; markers; blurs (x, y, width, height as fractions of the frame); the camera bubble; the thumbnail frame; its exports; and whether it's open in the editor. Times are recorded seconds, as all tools use them.",
+            "description": "Everything about a recording, to find your way around it before changing it: its name, lengths, speed and frame size; its clips in the order they play (recorded start and end seconds); what's removed and which clip it comes back next to; markers; blurs (x, y, width, height as fractions of the frame); the camera bubble; the thumbnail frame; voiceovers (number, the recorded stretches they cover, whether they have a voice and a camera, and how loud the video plays under them); its exports; and whether it's open in the editor. Times are recorded seconds, as all tools use them.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
             "annotations": {"readOnlyHint": true},
         },
