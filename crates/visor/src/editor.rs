@@ -200,8 +200,9 @@ impl ExportChoice {
     }
 
     /// What an export was made with, for the summary when it's done: the
-    /// format, size and sound options (a GIF has no size choice nor sound).
-    pub fn summary(self) -> Vec<&'static str> {
+    /// format, size and sound options (a GIF has no size choice nor sound,
+    /// and a recording without sound, `has_audio` false, no sound options).
+    pub fn summary(self, has_audio: bool) -> Vec<&'static str> {
         let (_, kind) = self.options();
         let mut out = vec![kind];
         if self.format != 3 {
@@ -210,10 +211,10 @@ impl ExportChoice {
                 2 => "720p",
                 _ => "Original size",
             });
-            if self.reduce_noise {
+            if has_audio && self.reduce_noise {
                 out.push("Background noise reduced");
             }
-            if self.even_volume {
+            if has_audio && self.even_volume {
                 out.push("Volume evened out");
             }
         }
@@ -2224,8 +2225,16 @@ impl EditorWindow {
                     .into_owned();
                 // What it was made with (an agent's choices too, which the
                 // pickers don't show).
-                let mut detail: Vec<String> =
-                    job.choice.summary().into_iter().map(String::from).collect();
+                let has_audio = {
+                    let p = self.project.borrow();
+                    p.has_track(TrackKind::Mic) || p.has_track(TrackKind::System)
+                };
+                let mut detail: Vec<String> = job
+                    .choice
+                    .summary(has_audio)
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
                 if let Ok(meta) = std::fs::metadata(&job.out) {
                     detail.push(util::file_size(meta.len()));
                 }
@@ -2684,16 +2693,14 @@ mod tests {
             reduce_noise,
             even_volume,
         };
-        assert_eq!(
-            c(0, 2, true, false).summary(),
-            ["MP4", "720p", "Background noise reduced"]
-        );
-        assert_eq!(
-            c(1, 0, false, true).summary(),
-            ["WebM", "Original size", "Volume evened out"]
-        );
+        let mp4 = c(0, 2, true, false).summary(true);
+        assert_eq!(mp4, ["MP4", "720p", "Background noise reduced"]);
+        let webm = c(1, 0, false, true).summary(true);
+        assert_eq!(webm, ["WebM", "Original size", "Volume evened out"]);
         // A GIF has neither a size choice nor sound.
-        assert_eq!(c(3, 1, true, true).summary(), ["GIF"]);
+        assert_eq!(c(3, 1, true, true).summary(true), ["GIF"]);
+        // Nor does a recording without sound get sound options.
+        assert_eq!(c(0, 1, true, true).summary(false), ["MP4", "1080p"]);
     }
 
     #[test]
