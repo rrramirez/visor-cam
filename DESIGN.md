@@ -246,6 +246,8 @@ their permissions across updates.
 
 ## Known limitations and next steps
 
+- Adding a recording that has voiceovers to another one (*Add video*) brings its clips,
+  markers and blurs but not its voiceovers.
 - Windows and Linux backends need testing on real machines.
 - AV1 export links Homebrew's SVT-AV1 dylib (3 MB; Homebrew ships no static
   build). Building SVT-AV1 statically would need `cmake`.

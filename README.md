@@ -77,7 +77,7 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    - **Add video**: *Add video…* adds another Visor recording (from the
      recent ones, or any folder) or video files (MP4, MOV, M4V, MKV, WebM)
      at the end, as clips; or drop them on the editor. A recording comes as
-     you edited it, with its markers and blurs. They're copied in, and
+     you edited it, with its markers and blurs (not its voiceovers). They're copied in, and
      **⌘Z** takes them out again. To start a recording from video files
      instead, use *New from Video…* in the menu bar or "or start from a
      video…" in the recorder.

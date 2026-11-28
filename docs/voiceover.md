@@ -44,13 +44,18 @@ duration and the files; `discard` deletes them. `N` is the lowest number no `voi
 
 **Editor.** *Record voiceover…* opens a panel (`vo-panel`): voice and camera switches with
 pickers, a level meter and a camera preview, and what it will cover
-(`voiceover_stretch`: the selection's kept part, else from the playhead to the end). Record
+(`voiceover_stretch`: the selection's kept part, else from the playhead to the end, or
+from the start once the playhead is at the end, `from_playhead`). Its devices and on/off
+choices are its own (`Settings::voiceover`, starting from the recorder's), so it never
+changes what the recorder records from. Record
 starts the recorder paused and counts down 3-2-1, then plays from the start at 1×, muted
 (`Player::set_muted`), and resumes the recorder. `vo_tick` stops it once it has run as long
 as the stretch or playback ended; Stop or Space stops it sooner, Esc throws it away. Stop
 turns the recording into a voiceover over what played (`voiceover_over`) and adds it as a
 `Step::Voiceovers` (the whole list as it was), as do deleting one and the *Clip sound*
-slider. Afterwards the player gets back its speed and sound (`end_voiceover_playback`).
+slider; the playhead stays where it was (`reload_keeping_place`). Afterwards the player
+gets back its speed and sound (`end_voiceover_playback`). A voiceover shorter than half a
+second (`MIN_VOICEOVER`) isn't kept, and its files are deleted.
 The Voiceovers section lists them (`voiceover_label`: "0:00–0:04 · Voice and camera").
 
 **Agents.** `get_recording` lists `voiceovers` (number, pieces in recorded seconds, voice,
@@ -65,11 +70,16 @@ can't record voiceovers.
 - A voiceover's files stay in the folder while any undo or redo step could bring it back;
   `remove_unused_added_files` (on close) counts voiceover files as used.
 - While recording, the editor takes no clicks (a layer over it) and only Esc and Space
-  as keys: moving the playhead would put the voice out of step with the picture.
+  as keys: moving the playhead would put the voice out of step with the picture. While the
+  panel is open or it records, the editor is busy (`is_busy`, `voiceover_active`): agents'
+  edits, exports and additions are refused.
 - Recording is always at 1×, whatever the recording's speed; an export at another speed
   plays the voice at that speed too (pitch kept).
 
 ## Gotchas
+
+- *Add video* of a recording with voiceovers doesn't bring them (`Addition` has no
+  voiceovers, and their files aren't copied).
 
 - The panel's state is in a `RefCell`, and asking for camera or mic permission or opening
   a device can run the event loop, where the preview timer borrows it too. Don't hold a
