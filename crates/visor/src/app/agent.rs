@@ -938,9 +938,12 @@ impl App {
     fn agent_edit(&self, args: &Value, kind: EditKind) -> Result<Value, String> {
         if let (EditKind::Remove, Some(ranges)) = (kind, arg(args, "ranges")) {
             let ranges = ranges_arg(ranges)?;
-            return self.agent_change(args, |p| {
+            // With what a single removal answers too.
+            let mut v = self.agent_change(args, |p| {
                 agent_edits::remove_ranges(p, &ranges, SLIVER).map(Change::Edit)
-            });
+            })?;
+            v["kept"] = v["clips"].clone();
+            return Ok(v);
         }
         let dir = self.agent_recording(args)?;
         let range = match kind {
