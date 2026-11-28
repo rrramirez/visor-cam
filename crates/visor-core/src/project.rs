@@ -47,6 +47,7 @@ impl Tracks {
             TrackKind::Camera => self.camera.as_ref(),
             TrackKind::Mic => self.mic.as_ref(),
             TrackKind::System => self.system.as_ref(),
+            TrackKind::Voice => None,
         }
     }
 
@@ -64,6 +65,8 @@ pub enum TrackKind {
     Camera,
     Mic,
     System,
+    /// Voiceovers' voice, recorded over the video afterwards.
+    Voice,
 }
 
 /// A piece recorded onto the recording after it stopped (*Record more*).
@@ -79,6 +82,76 @@ pub struct Take {
     /// onto this one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added: bool,
+}
+
+/// Voice and/or camera recorded over the video afterwards, while it played.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Voiceover {
+    /// The recorded moments it covers, in the order they played, each
+    /// played from `file_us` in its files.
+    pub pieces: Vec<VoicePiece>,
+    /// Its voice file, if it recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Its camera, shown in the bubble in place of any other there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Track>,
+    /// How loud the video's own sound plays under the voice (0–1).
+    #[serde(default = "clip_sound_default")]
+    pub clip_sound: f64,
+}
+
+fn clip_sound_default() -> f64 {
+    0.25
+}
+
+/// A stretch of source time a voiceover covers, and where in its files it
+/// starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoicePiece {
+    pub start_us: Micros,
+    pub end_us: Micros,
+    pub file_us: Micros,
+}
+
+/// How long the video's own sound takes to dip under a voice, and to come
+/// back after it.
+pub const DUCK_FADE: Micros = 150_000;
+
+/// `parts` with `file` (from file time `offset`) laid over `[start, end)`,
+/// splitting what was there.
+fn carve(parts: &mut Vec<Part>, start: Micros, end: Micros, file: &str, offset: Micros) {
+    if end <= start {
+        return;
+    }
+    let mut out = Vec::with_capacity(parts.len() + 2);
+    for p in parts.drain(..) {
+        if p.end <= start || p.start >= end {
+            out.push(p);
+            continue;
+        }
+        if p.start < start {
+            out.push(Part {
+                end: start,
+                ..p.clone()
+            });
+        }
+        if p.end > end {
+            out.push(Part {
+                start: end,
+                offset: p.offset + (end - p.start),
+                ..p.clone()
+            });
+        }
+    }
+    out.push(Part {
+        start,
+        end,
+        file: Some(file.to_string()),
+        offset,
+    });
+    out.sort_by_key(|p| p.start);
+    *parts = out;
 }
 
 /// A stretch of source time that one file of a track covers; no file when
@@ -229,6 +302,9 @@ pub struct Project {
     /// Areas of the screen hidden under a blur, e.g. a password.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blurs: Vec<Blur>,
+    /// Voice and camera recorded over it afterwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voiceovers: Vec<Voiceover>,
 }
 
 /// An area of the screen blurred for a stretch of the recording. The area
@@ -337,12 +413,63 @@ impl Project {
             thumbnail_us: None,
             markers: Vec::new(),
             blurs: Vec::new(),
+            voiceovers: Vec::new(),
         }
     }
 
     /// The files of track `kind` over source time, in order: the first
     /// piece's, then each take's.
     pub fn parts(&self, kind: TrackKind) -> Vec<Part> {
+        match kind {
+            // Voiceovers' voice, silence elsewhere.
+            TrackKind::Voice => {
+                let mut parts = vec![Part {
+                    start: 0,
+                    end: self.duration_us,
+                    file: None,
+                    offset: 0,
+                }];
+                for v in &self.voiceovers {
+                    if let Some(voice) = &v.voice {
+                        for p in &v.pieces {
+                            carve(
+                                &mut parts,
+                                p.start_us,
+                                p.end_us.min(self.duration_us),
+                                voice,
+                                p.file_us,
+                            );
+                        }
+                    }
+                }
+                return parts.into_iter().filter(|p| p.end > p.start).collect();
+            }
+            // A voiceover's camera in place of what was recorded there.
+            TrackKind::Camera if self.voiceovers.iter().any(|v| v.camera.is_some()) => {
+                let mut parts = self.recorded_parts(kind);
+                for v in &self.voiceovers {
+                    if let Some(cam) = &v.camera {
+                        for p in &v.pieces {
+                            let offset = p.file_us + cam.start_us.unwrap_or(0);
+                            carve(
+                                &mut parts,
+                                p.start_us,
+                                p.end_us.min(self.duration_us),
+                                &cam.file,
+                                offset,
+                            );
+                        }
+                    }
+                }
+                return parts;
+            }
+            _ => {}
+        }
+        self.recorded_parts(kind)
+    }
+
+    /// The files of track `kind` as recorded (or added), before voiceovers.
+    fn recorded_parts(&self, kind: TrackKind) -> Vec<Part> {
         let first_end = self.takes.first().map_or(self.duration_us, |t| t.start_us);
         std::iter::once((0, first_end, &self.tracks))
             .chain(
@@ -362,7 +489,38 @@ impl Project {
 
     /// Whether any piece of the recording has track `kind`.
     pub fn has_track(&self, kind: TrackKind) -> bool {
-        self.tracks.get(kind).is_some() || self.takes.iter().any(|t| t.tracks.get(kind).is_some())
+        let voiceover = self.voiceovers.iter().any(|v| match kind {
+            TrackKind::Voice => v.voice.is_some(),
+            TrackKind::Camera => v.camera.is_some(),
+            _ => false,
+        });
+        voiceover
+            || self.tracks.get(kind).is_some()
+            || self.takes.iter().any(|t| t.tracks.get(kind).is_some())
+    }
+
+    /// How loud the video's own sound plays at source time `t`: lowered
+    /// under a voiceover's voice to its `clip_sound`, fading down and back
+    /// over [`DUCK_FADE`].
+    pub fn clip_sound_gain(&self, t: Micros) -> f64 {
+        let mut gain: f64 = 1.0;
+        for v in self.voiceovers.iter().filter(|v| v.voice.is_some()) {
+            let level = v.clip_sound.clamp(0.0, 1.0);
+            for p in &v.pieces {
+                // 0 outside the piece's fades, 1 well inside it.
+                let into =
+                    |edge: Micros, t: Micros| t.saturating_sub(edge) as f64 / DUCK_FADE as f64;
+                let depth = if t + DUCK_FADE <= p.start_us || t >= p.end_us + DUCK_FADE {
+                    0.0
+                } else {
+                    let rise = into(p.start_us.saturating_sub(DUCK_FADE), t);
+                    let fall = into(t, p.end_us + DUCK_FADE);
+                    rise.min(fall).min(1.0)
+                };
+                gain = gain.min(1.0 - (1.0 - level) * depth);
+            }
+        }
+        gain
     }
 
     /// Where what was recorded onto this recording ends: its first piece,
@@ -1310,6 +1468,88 @@ mod tests {
         assert_eq!(fit_rect((800, 800), (1600, 900)), (350, 0, 900, 900));
         assert_eq!(fit_rect((1600, 900), (800, 800)), (0, 174, 800, 450));
         assert_eq!(fit_rect((1280, 720), (1920, 1080)), (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn voiceovers_lay_voice_and_camera_over_what_they_cover() {
+        let mut p = Project::new("Demo", "2026-11-28T10:00:00Z", 20);
+        p.tracks.screen = track(SCREEN_FILE);
+        p.tracks.mic = track(MIC_FILE);
+        p.tracks.camera = track(CAMERA_FILE);
+        assert!(!p.has_track(TrackKind::Voice));
+        assert_eq!(p.clip_sound_gain(5), 1.0);
+        // Over 4–8 and then 12–14 (clips played in that order), from the
+        // files' start.
+        p.voiceovers.push(Voiceover {
+            pieces: vec![
+                VoicePiece {
+                    start_us: 4,
+                    end_us: 8,
+                    file_us: 0,
+                },
+                VoicePiece {
+                    start_us: 12,
+                    end_us: 14,
+                    file_us: 4,
+                },
+            ],
+            voice: Some("voice-1.m4a".into()),
+            camera: track("vcam-1.mp4"),
+            clip_sound: 0.25,
+        });
+        let part = |start, end, file: Option<&str>, offset| Part {
+            start,
+            end,
+            file: file.map(String::from),
+            offset,
+        };
+        assert_eq!(
+            p.parts(TrackKind::Voice),
+            [
+                part(0, 4, None, 0),
+                part(4, 8, Some("voice-1.m4a"), 0),
+                part(8, 12, None, 8),
+                part(12, 14, Some("voice-1.m4a"), 4),
+                part(14, 20, None, 14),
+            ]
+        );
+        assert_eq!(
+            p.parts(TrackKind::Camera),
+            [
+                part(0, 4, Some(CAMERA_FILE), 0),
+                part(4, 8, Some("vcam-1.mp4"), 0),
+                part(8, 12, Some(CAMERA_FILE), 8),
+                part(12, 14, Some("vcam-1.mp4"), 4),
+                part(14, 20, Some(CAMERA_FILE), 14),
+            ]
+        );
+        assert!(p.has_track(TrackKind::Voice));
+        // The screen and mic are as recorded.
+        assert_eq!(p.parts(TrackKind::Mic), [part(0, 20, Some(MIC_FILE), 0)]);
+        // The clip's sound: lowered under the voice, fading.
+        let mut q = p.clone();
+        q.duration_us = 2_000_000;
+        q.voiceovers[0].pieces = vec![VoicePiece {
+            start_us: 1_000_000,
+            end_us: 1_500_000,
+            file_us: 0,
+        }];
+        assert!((q.clip_sound_gain(1_250_000) - 0.25).abs() < 1e-9);
+        assert_eq!(q.clip_sound_gain(500_000), 1.0);
+        let mid_fade = q.clip_sound_gain(1_000_000 - DUCK_FADE / 2);
+        assert!(mid_fade > 0.25 && mid_fade < 1.0, "{mid_fade}");
+        assert_eq!(q.clip_sound_gain(1_500_000 + DUCK_FADE), 1.0);
+
+        // Saved and loaded; old projects have none and don't write any.
+        let dir = std::env::temp_dir().join(format!("visor-vo-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        p.save(&dir).unwrap();
+        assert_eq!(Project::load(&dir).unwrap(), p);
+        fs::remove_dir_all(&dir).unwrap();
+        let old = serde_json::to_string(&Project::new("Old", "", 10)).unwrap();
+        assert!(!old.contains("voiceovers"));
+        let loaded: Project = serde_json::from_str(&old).unwrap();
+        assert!(loaded.voiceovers.is_empty());
     }
 
     #[test]

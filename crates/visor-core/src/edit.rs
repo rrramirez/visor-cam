@@ -135,6 +135,29 @@ impl EditList {
         }
     }
 
+    /// The recorded stretches that play from source time `from` for `len`,
+    /// across clips in play order, each with how far into that play it
+    /// starts. `from` outside every clip: none.
+    pub fn play_span(&self, from: Micros, len: Micros) -> Vec<(Range, Micros)> {
+        let Some(first) = self.clip_at(from) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut done = 0;
+        for (i, r) in self.keep.iter().enumerate().skip(first) {
+            if done >= len {
+                break;
+            }
+            let start = if i == first { from } else { r.0 };
+            let end = (start + (len - done)).min(r.1);
+            if end > start {
+                out.push((Range(start, end), done));
+                done += end - start;
+            }
+        }
+        out
+    }
+
     /// Whether the ranges are non-overlapping, non-empty and end by
     /// `duration`, as the edit operations keep them. Lists loaded from disk
     /// are checked with this.
@@ -524,6 +547,18 @@ impl EditList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stretch_plays_on_across_clips() {
+        let mut e = EditList::full(20);
+        e.cut(5, 8);
+        e.split(12);
+        e.move_clip(2, 0);
+        // Plays 12–20, 0–5, 8–12.
+        assert_eq!(e.play_span(15, 7), [(Range(15, 20), 0), (Range(0, 2), 5)]);
+        assert_eq!(e.play_span(3, 100), [(Range(3, 5), 0), (Range(8, 12), 2)]);
+        assert!(e.play_span(6, 3).is_empty());
+    }
 
     #[test]
     fn an_appended_edit_keeps_its_order_and_what_it_removed() {
