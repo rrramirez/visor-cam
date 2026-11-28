@@ -65,6 +65,11 @@ pub struct EditorWindow {
     me: Weak<EditorWindow>,
 }
 
+type CameraOpened = crossbeam_channel::Receiver<(
+    String,
+    anyhow::Result<Arc<visor_capture::camera::CameraStream>>,
+)>;
+
 /// A voiceover being set up or recorded.
 struct Vo {
     mics: Vec<visor_capture::mic::MicDevice>,
@@ -72,6 +77,9 @@ struct Vo {
     mic: Option<(String, Arc<visor_capture::mic::MicStream>)>,
     camera: Option<(String, Arc<visor_capture::camera::CameraStream>)>,
     preview: Option<crossbeam_channel::Receiver<Arc<visor_core::VideoFrame>>>,
+    /// The camera being opened in the background, and where it arrives.
+    camera_opening: Option<String>,
+    camera_rx: Option<CameraOpened>,
     /// What it covers: from source time, for at most this long.
     from: Micros,
     len: Micros,
@@ -2445,6 +2453,8 @@ impl EditorWindow {
             mic: None,
             camera: None,
             preview: None,
+            camera_opening: None,
+            camera_rx: None,
             from,
             len,
             recorder: None,
@@ -2468,19 +2478,29 @@ impl EditorWindow {
     /// Opens the devices the panel now shows, and remembers them.
     fn vo_devices_changed(&self) {
         let (voice, cam_on) = (self.ui.get_vo_voice(), self.ui.get_vo_cam_on());
-        let mut note = String::new();
-        let mut guard = self.vo.borrow_mut();
-        let Some(vo) = guard.as_mut() else { return };
-        let mic_id = usize::try_from(self.ui.get_vo_mic())
-            .ok()
-            .and_then(|i| vo.mics.get(i))
-            .map(|m| m.id.clone())
-            .filter(|_| voice);
-        let cam_id = usize::try_from(self.ui.get_vo_camera())
-            .ok()
-            .and_then(|i| vo.cameras.get(i))
-            .map(|c| c.id.clone())
-            .filter(|_| cam_on);
+        // Asking for permission and opening a device let the event loop run
+        // (the preview timer among it), so the state isn't held meanwhile.
+        let (mic_id, cam_id, mic_now, cam_now) = {
+            let guard = self.vo.borrow();
+            let Some(vo) = guard.as_ref() else { return };
+            let mic_id = usize::try_from(self.ui.get_vo_mic())
+                .ok()
+                .and_then(|i| vo.mics.get(i))
+                .map(|m| m.id.clone())
+                .filter(|_| voice);
+            let cam_id = usize::try_from(self.ui.get_vo_camera())
+                .ok()
+                .and_then(|i| vo.cameras.get(i))
+                .map(|c| c.id.clone())
+                .filter(|_| cam_on);
+            let mic_now = vo.mic.as_ref().map(|(i, _)| i.clone());
+            let cam_now = vo
+                .camera
+                .as_ref()
+                .map(|(i, _)| i.clone())
+                .or_else(|| vo.camera_opening.clone());
+            (mic_id, cam_id, mic_now, cam_now)
+        };
         {
             let app = app();
             let mut s = app.settings.borrow_mut();
@@ -2492,8 +2512,9 @@ impl EditorWindow {
             }
             s.save();
         }
-        if vo.mic.as_ref().map(|(i, _)| i) != mic_id.as_ref() {
-            vo.mic = None;
+        let mut note = String::new();
+        if mic_now != mic_id {
+            let mut mic = None;
             if let Some(id) = mic_id {
                 if !app().device_allowed(false) {
                     note = "Allow Visor to use the microphone (System Settings › Privacy & Security), then try again.".into();
@@ -2502,38 +2523,85 @@ impl EditorWindow {
                         visor_capture::mic::MicStream::open(Some(&id)).map(Arc::new)
                     });
                     match stream {
-                        Ok(s) => vo.mic = Some((id, s)),
+                        Ok(s) => mic = Some((id, s)),
                         Err(e) => note = format!("The microphone isn't available: {e:#}"),
                     }
                 }
             }
+            if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                vo.mic = mic;
+            }
         }
-        if vo.camera.as_ref().map(|(i, _)| i) != cam_id.as_ref() {
-            vo.camera = None;
-            vo.preview = None;
+        if cam_now != cam_id {
+            if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                vo.camera = None;
+                vo.preview = None;
+                vo.camera_opening = None;
+                vo.camera_rx = None;
+            }
             self.ui.set_vo_has_preview(false);
             if let Some(id) = cam_id {
                 if !app().device_allowed(true) {
                     note = "Allow Visor to use the camera (System Settings › Privacy & Security), then try again.".into();
+                } else if let Some(s) = app().shared_camera(&id) {
+                    self.vo_camera_opened(id, Ok(s));
                 } else {
-                    let stream = app().shared_camera(&id).map(Ok).unwrap_or_else(|| {
-                        visor_capture::camera::CameraStream::open(&id).map(Arc::new)
-                    });
-                    match stream {
-                        Ok(s) => {
-                            vo.preview = Some(s.subscribe());
-                            vo.camera = Some((id, s));
-                        }
-                        Err(e) => note = format!("The camera isn't available: {e:#}"),
+                    // Opening a camera takes a moment: not on the UI thread.
+                    // The preview timer takes it when it's open.
+                    let (tx, rx) = crossbeam_channel::bounded(1);
+                    if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                        vo.camera_opening = Some(id.clone());
+                        vo.camera_rx = Some(rx);
                     }
+                    std::thread::spawn(move || {
+                        let result = visor_capture::camera::CameraStream::open(&id).map(Arc::new);
+                        let _ = tx.send((id, result));
+                    });
                 }
             }
         }
         self.ui.set_vo_note(note.into());
     }
 
+    /// A camera opened for the panel, if it's still the one chosen.
+    fn vo_camera_opened(
+        &self,
+        id: String,
+        result: anyhow::Result<Arc<visor_capture::camera::CameraStream>>,
+    ) {
+        let mut guard = self.vo.borrow_mut();
+        let Some(vo) = guard.as_mut() else { return };
+        let shared = vo.camera_opening.is_none();
+        if !shared && vo.camera_opening.as_deref() != Some(id.as_str()) {
+            return;
+        }
+        vo.camera_opening = None;
+        vo.camera_rx = None;
+        match result {
+            Ok(s) => {
+                vo.preview = Some(s.subscribe());
+                vo.camera = Some((id, s));
+            }
+            Err(e) => {
+                drop(guard);
+                self.ui
+                    .set_vo_note(format!("The camera isn't available: {e:#}").into());
+            }
+        }
+    }
+
     fn vo_preview(&self) {
-        let guard = self.vo.borrow();
+        let opened = self
+            .vo
+            .try_borrow()
+            .ok()
+            .and_then(|g| g.as_ref()?.camera_rx.as_ref()?.try_recv().ok());
+        if let Some((id, result)) = opened {
+            self.vo_camera_opened(id, result);
+        }
+        let Ok(guard) = self.vo.try_borrow() else {
+            return;
+        };
         let Some(vo) = guard.as_ref() else { return };
         if vo.recorder.is_some() {
             return;
@@ -2575,6 +2643,11 @@ impl EditorWindow {
         let started = {
             let mut guard = self.vo.borrow_mut();
             let Some(vo) = guard.as_mut() else { return };
+            if vo.camera_opening.is_some() {
+                self.ui
+                    .set_vo_note("The camera is still starting: a moment.".into());
+                return;
+            }
             let mic = vo.mic.as_ref().map(|(_, m)| m.subscribe());
             let cam = vo.camera.as_ref().map(|(_, c)| (c.subscribe(), c.size()));
             if mic.is_none() && cam.is_none() {
