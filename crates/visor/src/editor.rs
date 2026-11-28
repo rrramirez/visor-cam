@@ -199,6 +199,27 @@ impl ExportChoice {
         }
     }
 
+    /// What an export was made with, for the summary when it's done: the
+    /// format, size and sound options (a GIF has no size choice nor sound).
+    pub fn summary(self) -> Vec<&'static str> {
+        let (_, kind) = self.options();
+        let mut out = vec![kind];
+        if self.format != 3 {
+            out.push(match self.size {
+                1 => "1080p",
+                2 => "720p",
+                _ => "Original size",
+            });
+            if self.reduce_noise {
+                out.push("Background noise reduced");
+            }
+            if self.even_volume {
+                out.push("Volume evened out");
+            }
+        }
+        out
+    }
+
     /// The export options, and the format's name for a summary.
     pub fn options(self) -> (ExportOptions, &'static str) {
         let (format, kind) = match self.format {
@@ -252,8 +273,8 @@ struct ExportJob {
     out: PathBuf,
     /// An agent waiting for it.
     reply: Option<ExportReply>,
-    /// Format name for the summary, e.g. "MP4".
-    kind: &'static str,
+    /// What it's made with, said when it's done.
+    choice: ExportChoice,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
     result: Arc<Mutex<Option<anyhow::Result<()>>>>,
@@ -2028,14 +2049,14 @@ impl EditorWindow {
             return Err("Busy".into());
         }
         self.control().pause();
-        let (options, kind) = choice.options();
+        let (options, _) = choice.options();
         let project = self.project.borrow().clone();
         let out = export_path(&self.dir, &project, options.format.extension())
             .map_err(|e| format!("Export failed: {e}"))?;
         let job = ExportJob {
             out: out.clone(),
             reply,
-            kind,
+            choice,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(AtomicU32::new(0)),
             result: Arc::new(Mutex::new(None)),
@@ -2201,7 +2222,10 @@ impl EditorWindow {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let mut detail = vec![job.kind.to_string()];
+                // What it was made with (an agent's choices too, which the
+                // pickers don't show).
+                let mut detail: Vec<String> =
+                    job.choice.summary().into_iter().map(String::from).collect();
                 if let Ok(meta) = std::fs::metadata(&job.out) {
                     detail.push(util::file_size(meta.len()));
                 }
@@ -2650,6 +2674,26 @@ mod tests {
         assert_eq!(kept_frame(&edit, 5_000_000), 3_999_999);
         // Before everything kept: the first kept frame.
         assert_eq!(kept_frame(&edit, 0), 1_000_000);
+    }
+
+    #[test]
+    fn exports_say_what_they_were_made_with() {
+        let c = |format, size, reduce_noise, even_volume| ExportChoice {
+            format,
+            size,
+            reduce_noise,
+            even_volume,
+        };
+        assert_eq!(
+            c(0, 2, true, false).summary(),
+            ["MP4", "720p", "Background noise reduced"]
+        );
+        assert_eq!(
+            c(1, 0, false, true).summary(),
+            ["WebM", "Original size", "Volume evened out"]
+        );
+        // A GIF has neither a size choice nor sound.
+        assert_eq!(c(3, 1, true, true).summary(), ["GIF"]);
     }
 
     #[test]

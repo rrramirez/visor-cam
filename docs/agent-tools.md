@@ -42,7 +42,8 @@ several stretches as one step.
 **Exporting.** `export_recording` takes the user's last export choices for anything not given
 (`ExportChoice::last`, `export_choice`). With the editor open it runs there
 (`EditorWindow::agent_export`), shown and cancellable, and refused while the editor exports or
-adds videos; the reply comes from `poll_export`, or an error if the editor closes first.
+adds videos. Its choices aren't put in the editor's pickers (which keep the user's own); the
+card when it's done says what it was made with (`ExportChoice::summary`), as for any export; the reply comes from `poll_export`, or an error if the editor closes first.
 Otherwise it runs on a thread into `exports/`, one per recording at a time, written under a
 hidden name (`.name.mp4`) and renamed when done, so one cut short by quitting never looks
 finished; a rename held meanwhile (`App::copies`, `App::held_renames`) happens when it's written
