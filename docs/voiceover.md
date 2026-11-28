@@ -29,9 +29,12 @@ samples from before the offset that the seek landed on.
 
 **Mixing.** `AudioMix::for_project` mixes mic, system audio and voice parts. Mic and system
 are *ducked*: multiplied by `Project::clip_sound_gain(t)`, which is the voiceover's
-`clip_sound` (default 0.25) inside a voice piece, ramping over `DUCK_FADE` (150 ms) at each
-edge, and 1 elsewhere. The voice itself isn't ducked. The gain is looked up once per 480
-frames (10 ms). Export and the player both use `for_project`, so they sound the same.
+`clip_sound` (default 0.25) inside a voice piece, ramping over `DUCK_FADE` (150 ms) inside
+each end of it (so what plays next to the piece, maybe another clip, isn't lowered), and 1
+elsewhere. The voice itself isn't ducked. The gain is looked up once per 480
+frames (10 ms). Export and the player both use `for_project`, so they sound the same. *Remove pauses* (`dead_time::find`), the
+timeline's waveform and `Project::has_sound` (which shows the export's sound options) count
+voices too, so a narrated stretch over a still, silent video isn't a pause.
 
 **Recording.** `VoiceRecorder::start(dir, n, mic, camera)` writes `voice-N.m4a` and/or
 `vcam-N.mp4` from the mic's and camera's broadcast streams, on one clock that starts
@@ -75,8 +78,9 @@ can't record voiceovers.
   borrowed".
 - A device the recorder panel already has open is shared (`App::shared_mic`,
   `shared_camera`) rather than opened twice, which may fail.
-- A part starting partway into its file needs the reader to seek there; before voiceovers
-  every file was read from its start, and a voiceover's `file_us` was silently ignored.
+- A part starting partway into its file: the readers seek there when they move into it.
+  Decoding from the file's start would give the same result (what comes before the offset
+  is dropped) but take as long as everything before it, at each piece, while playing.
 
 ## Tests
 
@@ -84,6 +88,6 @@ can't record voiceovers.
 envelope), `edit` (`a_stretch_plays_on_across_clips`), `visor-recorder`
 (`a_voiceover_records_voice_and_camera_without_a_screen`), `visor-media` `tests/voiceover.rs`
 (an export: the video's sound at a quarter under the voice, the voiceover camera in the
-bubble), `visor` `editor.rs` (`a_voiceover_covers_what_played_while_it_recorded`),
+bubble, both from the right point in their files; *Remove pauses* hearing a voice), `visor` `editor.rs` (`a_voiceover_covers_what_played_while_it_recorded`),
 `agent_edits.rs` and `cli.rs` (listing and deleting). The panel, countdown and recording with
 real devices are checked live (the `ui-test` skill).

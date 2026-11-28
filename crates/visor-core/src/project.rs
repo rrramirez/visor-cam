@@ -487,6 +487,13 @@ impl Project {
             .collect()
     }
 
+    /// Whether it has any sound: mic, system audio or a voiceover's voice.
+    pub fn has_sound(&self) -> bool {
+        [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
+            .into_iter()
+            .any(|k| self.has_track(k))
+    }
+
     /// Whether any piece of the recording has track `kind`.
     pub fn has_track(&self, kind: TrackKind) -> bool {
         let voiceover = self.voiceovers.iter().any(|v| match kind {
@@ -501,22 +508,21 @@ impl Project {
 
     /// How loud the video's own sound plays at source time `t`: lowered
     /// under a voiceover's voice to its `clip_sound`, fading down and back
-    /// over [`DUCK_FADE`].
+    /// over [`DUCK_FADE`] at the ends of each of its pieces.
     pub fn clip_sound_gain(&self, t: Micros) -> f64 {
         let mut gain: f64 = 1.0;
         for v in self.voiceovers.iter().filter(|v| v.voice.is_some()) {
             let level = v.clip_sound.clamp(0.0, 1.0);
             for p in &v.pieces {
-                // 0 outside the piece's fades, 1 well inside it.
-                let into =
-                    |edge: Micros, t: Micros| t.saturating_sub(edge) as f64 / DUCK_FADE as f64;
-                let depth = if t + DUCK_FADE <= p.start_us || t >= p.end_us + DUCK_FADE {
-                    0.0
-                } else {
-                    let rise = into(p.start_us.saturating_sub(DUCK_FADE), t);
-                    let fall = into(t, p.end_us + DUCK_FADE);
-                    rise.min(fall).min(1.0)
-                };
+                // 0 outside the piece, 1 past its fades. The fades are
+                // inside it: next to it may be another clip.
+                if t < p.start_us || t >= p.end_us {
+                    continue;
+                }
+                let fade = DUCK_FADE as f64;
+                let depth = ((t - p.start_us) as f64 / fade)
+                    .min((p.end_us - t) as f64 / fade)
+                    .min(1.0);
                 gain = gain.min(1.0 - (1.0 - level) * depth);
             }
         }
@@ -1524,6 +1530,10 @@ mod tests {
             ]
         );
         assert!(p.has_track(TrackKind::Voice));
+        let mut silent = Project::new("Silent", "", 10);
+        assert!(!silent.has_sound());
+        silent.voiceovers = p.voiceovers.clone();
+        assert!(silent.has_sound());
         // The screen and mic are as recorded.
         assert_eq!(p.parts(TrackKind::Mic), [part(0, 20, Some(MIC_FILE), 0)]);
         // The clip's sound: lowered under the voice, fading.
@@ -1536,9 +1546,15 @@ mod tests {
         }];
         assert!((q.clip_sound_gain(1_250_000) - 0.25).abs() < 1e-9);
         assert_eq!(q.clip_sound_gain(500_000), 1.0);
-        let mid_fade = q.clip_sound_gain(1_000_000 - DUCK_FADE / 2);
+        // The fades are inside the piece: what plays next to it (another
+        // clip, maybe) isn't lowered.
+        let mid_fade = q.clip_sound_gain(1_000_000 + DUCK_FADE / 2);
         assert!(mid_fade > 0.25 && mid_fade < 1.0, "{mid_fade}");
-        assert_eq!(q.clip_sound_gain(1_500_000 + DUCK_FADE), 1.0);
+        assert_eq!(q.clip_sound_gain(1_000_000 - 1), 1.0);
+        assert_eq!(q.clip_sound_gain(1_500_000), 1.0);
+        // From the very start too.
+        q.voiceovers[0].pieces[0].start_us = 0;
+        assert!(q.clip_sound_gain(10_000) < 1.0);
 
         // Saved and loaded; old projects have none and don't write any.
         let dir = std::env::temp_dir().join(format!("visor-vo-{}", std::process::id()));

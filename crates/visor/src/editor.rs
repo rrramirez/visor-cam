@@ -359,7 +359,7 @@ impl EditorWindow {
             ui.set_export_denoise(settings.export_denoise);
             ui.set_export_normalize(settings.export_normalize);
         }
-        ui.set_has_audio(project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System));
+        ui.set_has_audio(project.has_sound());
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -1560,9 +1560,7 @@ impl EditorWindow {
             Err(e) => tracing::error!("could not reopen the player: {e:#}"),
         }
         self.ui.set_has_camera(project.has_track(TrackKind::Camera));
-        self.ui.set_has_audio(
-            project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System),
-        );
+        self.ui.set_has_audio(project.has_sound());
         *self.nudged.borrow_mut() = None;
         self.refresh_edit_ui();
         self.load_previews();
@@ -2025,7 +2023,7 @@ impl EditorWindow {
         let screen = project
             .has_track(TrackKind::Screen)
             .then(|| project.parts(TrackKind::Screen));
-        let audio: Vec<_> = [TrackKind::Mic, TrackKind::System]
+        let audio: Vec<_> = [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
             .into_iter()
             .filter(|&k| project.has_track(k))
             .map(|k| project.parts(k))
@@ -2299,10 +2297,7 @@ impl EditorWindow {
                     .into_owned();
                 // What it was made with (an agent's choices too, which the
                 // pickers don't show).
-                let has_audio = {
-                    let p = self.project.borrow();
-                    p.has_track(TrackKind::Mic) || p.has_track(TrackKind::System)
-                };
+                let has_audio = self.project.borrow().has_sound();
                 let mut detail: Vec<String> = job
                     .choice
                     .summary(has_audio)

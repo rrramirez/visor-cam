@@ -69,7 +69,7 @@ pub fn find(
         let parts = project.parts(TrackKind::Screen);
         screen_changes(dir, &parts, size, cancel, &mut active)?;
     }
-    let audio: Vec<_> = [TrackKind::Mic, TrackKind::System]
+    let audio: Vec<_> = [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
         .into_iter()
         .filter(|&k| project.has_track(k))
         .map(|k| project.parts(k))
