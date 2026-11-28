@@ -98,6 +98,15 @@ thumbnail and bubble layout aren't taken; its camera shows in this
 recording's bubble. `Project::take_addition(at)` takes everything from source
 time `at` on out again, for undo (see [editor-ui.md](editor-ui.md)).
 
+**Starting from videos.** *New from Video…* (menu bar), "or start from a
+video…" (recorder panel), agents' `create_recording` and `visor import`
+make a new recording from video files (`import::new_recording`): a new
+folder in the save folder named after the first file (or the name given),
+the files prepared and copied in as for *Add video*, and the first one
+made the first piece (`project.tracks`) rather than a take, so a recording
+always has one. Visor recording folders are refused (add them to a
+recording instead); on failure the folder is removed.
+
 **Files from elsewhere.** `Track::start_us` is the file time where the track
 starts (another app's video may start past 0); `Part::offset` carries it to
 the readers, which subtract it. A video stream's display matrix (a phone held
@@ -125,10 +134,12 @@ track is unreadable.
   closes, for redo, and a take recorded meanwhile mustn't write over them.
 - What's added is copied in; its original is never written to. A recording
   can't be added to itself, nor one still being recorded (`is_interrupted`).
-- A folder isn't renamed while a copy or an agent's export writes into it
-  (`App::copies`). When its editor closes meanwhile, the rename waits for
-  that editor's jobs, is then held (`App::held_renames`), and `copy_finished`
-  makes it once nothing writes into the folder and no editor has it.
+- A folder isn't renamed while something uses it (`App::copies`): a copy
+  into it, an agent's background export or dead-time search, or a closed
+  editor's jobs still winding down (held from `editor_closed` until they're
+  done, at most 60 s). A rename that comes up meanwhile is held
+  (`App::held_renames`), and `copy_finished` makes it once nothing uses the
+  folder and no editor has it.
 
 ## Gotchas
 
@@ -153,6 +164,7 @@ track is unreadable.
 `visor-media` `tests/decode.rs` (reading parts, letterbox, gaps),
 `tests/export.rs` and `tests/player.rs` (a take exported and played),
 `tests/recover.rs` (a take cut short), `tests/import.rs` (probing, copying,
+starting a recording from videos,
 a recording and a phone's video added and exported), `tests/decode.rs` (a
 file starting late and turned), `visor-recorder` (recording more with a
 fake screen, discard keeps the original), `visor` `agent.rs`

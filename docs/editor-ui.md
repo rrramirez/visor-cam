@@ -27,6 +27,10 @@ copied in that the recording no longer uses are deleted when the editor
 closes (`remove_unused_added_files`), and closing cancels a copy. Drops come
 from winit's `DroppedFile`, one event per file, gathered for 100 ms.
 
+**Voiceovers.** *Record voiceover…*, its panel, countdown and recording, and
+the Voiceovers section are described in [voiceover.md](voiceover.md); each
+recording, deletion or *Clip sound* change is one `Step::Voiceovers`.
+
 **Timeline.** It shows the whole recording laid out by `visor_core::Layout`:
 each clip in the order it plays, with what was deleted next to it (dimmed)
 where it would come back. Every source time has one place on it, so a

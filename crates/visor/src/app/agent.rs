@@ -121,6 +121,18 @@ fn time_arg(args: &Value, name: &str) -> Result<Micros, String> {
         .ok_or_else(|| format!("{name} is a number of seconds."))
 }
 
+/// Refuses an edit while the user records a voiceover in the recording's
+/// editor: what it covers mustn't change, nor the player be replaced.
+fn not_during_voiceover(editor: &Option<Rc<EditorWindow>>) -> Result<(), String> {
+    if editor.as_ref().is_some_and(|e| e.voiceover_active()) {
+        return Err(
+            "The user is recording a voiceover in that recording; try again once they're done."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn past_the_end(what: &str, duration: Micros) -> String {
     format!(
         "{what} is past the end: the recording is {} seconds long.",
@@ -139,6 +151,7 @@ enum Change {
     Markers(Vec<visor_core::Marker>),
     Blurs(Vec<visor_core::Blur>),
     Looks(Box<visor_core::Project>),
+    Voiceovers(Vec<visor_core::Voiceover>),
 }
 
 /// The recording's state as `get_recording` gives it, with its exports.
@@ -380,10 +393,12 @@ impl App {
             "add_video" => return self.agent_add(&command, reply),
             "list_recordings" => Ok(self.agent_list_recordings()),
             "get_recording" => self.agent_get_recording(&command),
+            "create_recording" => return self.agent_create(&command, reply),
             "edit_clips" => self.agent_edit_clips(&command),
             "edit_markers" => self.agent_edit_markers(&command),
             "edit_blurs" => self.agent_edit_blurs(&command),
             "set_recording" => self.agent_set_recording(&command),
+            "edit_voiceovers" => self.agent_edit_voiceovers(&command),
             "export_recording" => return self.agent_export(&command, reply),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
@@ -452,8 +467,8 @@ impl App {
             return send(
                 reply,
                 Err(
-                    "That recording is being exported, searched for pauses or added to; \
-                     try again once that's done."
+                    "That recording is busy in the editor (exporting, finding pauses, adding \
+                     videos or recording a voiceover); try again once that's done."
                         .into(),
                 ),
             );
@@ -984,6 +999,7 @@ impl App {
             }
         };
         let (editor, current) = self.agent_project(&dir)?;
+        not_during_voiceover(&editor)?;
         let duration = current.duration_us;
         if let Some((start, _)) = range
             && start >= duration
@@ -1028,14 +1044,17 @@ impl App {
     ) -> Result<Value, String> {
         let mut dir = self.agent_recording(args)?;
         let (editor, current) = self.agent_project(&dir)?;
+        not_during_voiceover(&editor)?;
         let change = make(&current)?;
         let project = match (&editor, change) {
             (Some(e), Change::Edit(edit)) => e.apply_agent_edit(edit)?,
             (Some(e), Change::Markers(m)) => e.apply_agent_markers(m)?,
             (Some(e), Change::Blurs(b)) => e.apply_agent_blurs(b)?,
             (Some(e), Change::Looks(after)) => e.apply_agent_looks(&after)?,
+            (Some(e), Change::Voiceovers(v)) => e.apply_agent_voiceovers(v)?,
             (None, change) => {
                 let mut p = current;
+                let mut deleted_voiceovers = false;
                 let renamed = match change {
                     Change::Edit(edit) => {
                         p.edit = edit;
@@ -1049,13 +1068,18 @@ impl App {
                         p.blurs = b;
                         false
                     }
+                    Change::Voiceovers(v) => {
+                        p.voiceovers = v;
+                        deleted_voiceovers = true;
+                        false
+                    }
                     Change::Looks(after) => {
                         let renamed = after.title != p.title;
                         // Not while a copy or export writes into the folder.
                         if renamed && self.copying(&dir) {
                             return Err(
-                                "Something is being written into it (videos added, or an export); \
-                                        rename it once that's done."
+                                "Something is using its folder (videos being added, an export or \
+                                 a search); rename it once that's done."
                                     .into(),
                             );
                         }
@@ -1064,6 +1088,11 @@ impl App {
                     }
                 };
                 p.save(&dir).map_err(|e| e.to_string())?;
+                // Nothing can bring a deleted voiceover back without an
+                // editor's undo: its files go, once nothing reads them.
+                if deleted_voiceovers {
+                    self.tidy_voiceovers(&dir);
+                }
                 // Its folder takes the new name, as the editor's does.
                 if renamed {
                     let root = self.settings.borrow().save_dir.clone();
@@ -1161,6 +1190,47 @@ impl App {
         });
     }
 
+    /// Starts a recording from video files, off the UI thread; it becomes
+    /// the recording edits apply to by default.
+    fn agent_create(&self, args: &Value, reply: Reply) {
+        let paths: Vec<PathBuf> = match arg(args, "paths") {
+            Some(Value::Array(p)) => p
+                .iter()
+                .filter_map(|p| p.as_str().map(PathBuf::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if paths.is_empty() {
+            return send(reply, Err("Say which video files: paths.".into()));
+        }
+        if let Some(p) = paths.iter().find(|p| !p.is_absolute() || !p.exists()) {
+            return send(reply, Err(format!("There's no file at {}.", p.display())));
+        }
+        let name = arg(args, "name").and_then(Value::as_str).map(String::from);
+        let root = self.settings.borrow().save_dir.clone();
+        std::thread::spawn(move || {
+            let made = visor_media::import::new_recording(
+                &root,
+                &paths,
+                name.as_deref(),
+                &mut |_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+            post(move |app| {
+                let result = made
+                    .map_err(|e| format!("Couldn't start it: {e:#}"))
+                    .and_then(|dir| {
+                        let dir = canonical(&dir);
+                        app.agent.borrow_mut().last_folder = Some(dir.clone());
+                        app.refresh_tray();
+                        let project = visor_core::Project::load(&dir).map_err(|e| e.to_string())?;
+                        Ok(app.recording_value(&dir, &project, false))
+                    });
+                send(reply, result);
+            });
+        });
+    }
+
     /// A recording's whole state, for an agent to find its way around it.
     fn agent_get_recording(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
@@ -1246,6 +1316,17 @@ impl App {
         })
     }
 
+    fn agent_edit_voiceovers(&self, args: &Value) -> Result<Value, String> {
+        action_arg(args, &["delete"])?;
+        let number = arg(args, "number")
+            .and_then(Value::as_u64)
+            .ok_or("number is 1, 2, … as get_recording lists the voiceovers.")?
+            as usize;
+        self.agent_change(args, |p| {
+            agent_edits::delete_voiceover(p, number).map(Change::Voiceovers)
+        })
+    }
+
     fn agent_set_recording(&self, args: &Value) -> Result<Value, String> {
         let looks = looks_arg(args)?;
         if looks == agent_edits::Looks::default() {
@@ -1319,11 +1400,14 @@ impl App {
                     (min * 1e6) as Micros
                 }
             };
-            let (editor, project) = self.agent_project(&dir)?;
-            let guard = editor.map(|e| e.start_job());
-            Ok((dir, project, min, guard))
+            let (_, project) = self.agent_project(&dir)?;
+            // It reads the folder's files as it goes: held as a copy, so
+            // nothing renames or tidies them away (an editor closing
+            // meanwhile included).
+            self.copy_started(&dir);
+            Ok((dir, project, min))
         });
-        let (dir, project, min, guard) = match request {
+        let (dir, project, min) = match request {
             Ok(request) => request,
             Err(e) => return send(reply, Err(e)),
         };
@@ -1347,8 +1431,10 @@ impl App {
                     })
                 })
                 .map_err(|e| format!("Couldn't look for dead time: {e:#}"));
-            drop(guard);
             send(reply, result);
+            post(move |app| {
+                app.copy_finished(&dir);
+            });
         });
     }
 
@@ -1446,6 +1532,19 @@ impl App {
         });
     }
 
+    /// Deletes the files of voiceovers deleted from the recording in `dir`,
+    /// unless something may still read them: its editor (whose undo can
+    /// bring them back), or a copy, export or search in it. Runs again when
+    /// those are done (`copy_finished`, `rename_closed`).
+    pub(crate) fn tidy_voiceovers(&self, dir: &Path) {
+        if self.copying(dir) || self.editor_for(dir).is_some() {
+            return;
+        }
+        if let Ok(project) = visor_core::Project::load(dir) {
+            visor_core::project::remove_unused_voiceover_files(dir, &project);
+        }
+    }
+
     /// Whether videos are being copied into `dir` (see `App::copies`).
     pub(crate) fn copying(&self, dir: &Path) -> bool {
         self.copies.borrow().contains(&canonical(dir))
@@ -1470,6 +1569,7 @@ impl App {
         // A rename held while it was written to (its editor closed, and that
         // editor's own jobs wound down, meanwhile) happens now, if nothing
         // else has the folder.
+        self.tidy_voiceovers(&dir);
         let held = self.held_renames.borrow().contains(&dir);
         if held && !self.copying(&dir) && self.editor_for(&dir).is_none() {
             self.held_renames.borrow_mut().retain(|d| *d != dir);
@@ -1543,8 +1643,9 @@ impl App {
             if editor.is_busy() {
                 remove_copies(&prepared);
                 return Err(
-                    "That recording was opened and is being exported, searched for \
-                            pauses or added to; nothing was added. Try again once that's done."
+                    "That recording was opened and is busy (exporting, finding pauses, \
+                     adding videos or recording a voiceover); nothing was added. Try again \
+                     once that's done."
                         .into(),
                 );
             }

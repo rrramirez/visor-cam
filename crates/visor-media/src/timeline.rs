@@ -159,10 +159,15 @@ impl FrameCursor {
 /// Mixes several 48 kHz stereo tracks, addressed by source sample position.
 pub(crate) struct AudioMix {
     tracks: Vec<MixTrack>,
+    /// How loud the ducked tracks play at a source time (voiceovers lower
+    /// the video's own sound under them).
+    duck: Option<Box<dyn Fn(Micros) -> f64 + Send>>,
 }
 
 struct MixTrack {
     reader: AudioReader,
+    /// Played quieter under voiceovers.
+    ducked: bool,
     /// Interleaved stereo samples starting at `start` (in sample frames).
     buffer: VecDeque<f32>,
     start: i64,
@@ -171,18 +176,53 @@ struct MixTrack {
 }
 
 impl AudioMix {
-    pub fn new(readers: Vec<AudioReader>) -> Self {
+    /// Tracks, each ducked or not under `duck`'s level (by source time).
+    pub fn with_duck(
+        readers: Vec<(AudioReader, bool)>,
+        duck: Option<Box<dyn Fn(Micros) -> f64 + Send>>,
+    ) -> Self {
         let tracks = readers
             .into_iter()
-            .map(|reader| MixTrack {
+            .map(|(reader, ducked)| MixTrack {
                 reader,
+                ducked,
                 buffer: VecDeque::new(),
                 start: 0,
                 ended: false,
                 primed: false,
             })
             .collect();
-        Self { tracks }
+        Self { tracks, duck }
+    }
+
+    /// The mix of a project's sound: its mic and system audio, lowered
+    /// under voiceovers, and the voiceovers' voice.
+    pub fn for_project(
+        dir: &std::path::Path,
+        project: &visor_core::Project,
+    ) -> anyhow::Result<Option<Self>> {
+        use visor_core::TrackKind;
+        let readers = [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
+            .into_iter()
+            .filter(|&k| project.has_track(k))
+            .map(|k| {
+                Ok((
+                    AudioReader::open_parts(dir, &project.parts(k))?,
+                    k != TrackKind::Voice,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if readers.is_empty() {
+            return Ok(None);
+        }
+        let duck: Option<Box<dyn Fn(Micros) -> f64 + Send>> = if project.voiceovers.is_empty() {
+            None
+        } else {
+            let mut only = visor_core::Project::new("", "", project.duration_us);
+            only.voiceovers = project.voiceovers.clone();
+            Some(Box::new(move |t| only.clip_sound_gain(t)))
+        };
+        Ok(Some(Self::with_duck(readers, duck)))
     }
 
     /// `len` mixed stereo frames starting at source sample `at`.
@@ -229,8 +269,33 @@ impl AudioMix {
                 t.start += (drop / ch) as i64;
             }
             let offset = (t.start - at).max(0) as usize * ch;
-            for (dst, src) in mixed.iter_mut().skip(offset).zip(t.buffer.iter()) {
-                *dst += *src;
+            match (&self.duck, t.ducked) {
+                (Some(duck), true) => {
+                    // The level, looked up per 10 ms block (480 frames):
+                    // its fades are much longer.
+                    let (mut block, mut gain) = (i64::MIN, 1.0f32);
+                    for (i, (dst, src)) in mixed
+                        .iter_mut()
+                        .skip(offset)
+                        .zip(t.buffer.iter())
+                        .enumerate()
+                    {
+                        let frame = at + ((offset + i) / ch) as i64;
+                        if frame / 480 != block {
+                            block = frame / 480;
+                            let us = (block.max(0) as u128 * 480 * 1_000_000
+                                / u128::from(SAMPLE_RATE))
+                                as Micros;
+                            gain = duck(us) as f32;
+                        }
+                        *dst += *src * gain;
+                    }
+                }
+                _ => {
+                    for (dst, src) in mixed.iter_mut().skip(offset).zip(t.buffer.iter()) {
+                        *dst += *src;
+                    }
+                }
             }
         }
         for s in &mut mixed {

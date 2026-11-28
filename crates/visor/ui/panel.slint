@@ -51,6 +51,7 @@ export component RecorderPanel inherits Window {
     callback select-area();
     callback refresh();
     callback start();
+    callback start-from-video();
     callback open-preferences();
     callback open-folder();
     callback open-permission-settings();
@@ -221,6 +222,19 @@ export component RecorderPanel inherits Window {
             icon: Icons.record;
             font-size: Theme.font-large;
             clicked => { root.start(); }
+        }
+        // Or build a video from files: a phone's screen recording, say.
+        HorizontalLayout {
+            alignment: center;
+            Text {
+                text: "or start from a video…";
+                color: from-video.has-hover ? Theme.text : Theme.muted;
+                font-size: Theme.font-small;
+                from-video := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.start-from-video(); }
+                }
+            }
         }
         Text {
             text: root.hint;

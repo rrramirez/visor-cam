@@ -77,8 +77,17 @@ Electron) and FFmpeg. See [DESIGN.md](DESIGN.md) for the architecture.
    - **Add video**: *Add video…* adds another Visor recording (from the
      recent ones, or any folder) or video files (MP4, MOV, M4V, MKV, WebM)
      at the end, as clips; or drop them on the editor. A recording comes as
-     you edited it, with its markers and blurs. They're copied in, and
-     **⌘Z** takes them out again.
+     you edited it, with its markers and blurs (not its voiceovers). They're copied in, and
+     **⌘Z** takes them out again. To start a recording from video files
+     instead, use *New from Video…* in the menu bar or "or start from a
+     video…" in the recorder.
+   - **Voiceover**: *Record voiceover…* records your voice and/or camera
+     while the selection (or from the playhead to the end) plays without
+     its sound, after a countdown; Stop when done, Esc to throw it away.
+     The voice plays over the video, whose own sound drops to the
+     voiceover's *Clip sound* level (25% to start) under it, and your camera
+     shows in the bubble there. A voiceover moves with the clips it covers;
+     the Voiceovers section lists them to jump to or delete.
    - *Remove pauses* finds every stretch of 2 seconds or more where the screen
      stays still and nothing is heard, and removes them all in one step. It
      leaves a moment around what happens, and ignores a spinner or a clock
@@ -147,6 +156,8 @@ visor stop --open-editor                     # ...and opens it for you to edit
 visor discard
 visor start --folder "$FOLDER"               # record more onto a stopped recording
 visor add intro.mp4 ~/Movies/Visor/Outro     # add videos or recordings at its end
+visor import phone.mov --name "App tour"     # start a recording from video files
+visor voiceover delete 1                     # delete a voiceover (as info lists them)
 visor remove 12 19.5                         # remove 0:12–0:19.5 (recorded time)
 visor remove 3 4 12 19.5                     # ...or several stretches, as one step
 visor trim 2 1:05                            # keep only 0:02–1:05

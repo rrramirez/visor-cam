@@ -24,7 +24,7 @@ use visor_core::{Blur, EditList, Micros, Project, TrackKind};
 
 use crate::Resampler;
 use crate::audio_writer::{CHANNELS, SAMPLE_RATE};
-use crate::decode::{AudioReader, VideoReader};
+use crate::decode::VideoReader;
 use crate::tempo::{self, Tempo};
 use crate::timeline::{AudioMix, FrameCursor, SampleMap, micros_to_samples};
 
@@ -96,6 +96,8 @@ pub struct Player {
     seeks_sent: u64,
     edit: EditList,
     duration: Micros,
+    /// Plays the picture only (while a voiceover records over it).
+    muted: Arc<AtomicBool>,
 }
 
 impl Player {
@@ -129,11 +131,7 @@ impl Player {
         } else {
             None
         };
-        let audio_parts: Vec<_> = [TrackKind::Mic, TrackKind::System]
-            .into_iter()
-            .filter(|&k| project.has_track(k))
-            .map(|k| project.parts(k))
-            .collect();
+        let mix = AudioMix::for_project(dir, project)?;
 
         let shared = Arc::new(Shared::default());
         let speed = project.speed();
@@ -148,24 +146,22 @@ impl Player {
                 .name("visor-player-video".into())
                 .spawn(move || video_loop(screen, camera, edit, blurs, shared, clock, video_rx))?;
         }
-        let audio_tx = if audio_parts.is_empty() {
-            None
-        } else {
-            let readers = audio_parts
-                .iter()
-                .map(|p| AudioReader::open_parts(dir, p))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+        let muted = Arc::new(AtomicBool::new(false));
+        let audio_tx = if let Some(mix) = mix {
             let (tx, rx) = unbounded();
             let edit = edit.clone();
             let clock = clock.clone();
+            let muted = muted.clone();
             thread::Builder::new()
                 .name("visor-player-audio".into())
                 .spawn(move || {
-                    if let Err(e) = audio_loop(AudioMix::new(readers), edit, clock, rx) {
+                    if let Err(e) = audio_loop(mix, edit, clock, rx, muted) {
                         tracing::warn!("preview audio unavailable: {e:#}");
                     }
                 })?;
             Some(tx)
+        } else {
+            None
         };
 
         let mut player = Self {
@@ -177,9 +173,15 @@ impl Player {
             seeks_sent: 0,
             duration: project.duration_us,
             edit,
+            muted,
         };
         player.seek(0);
         Ok(player)
+    }
+
+    /// Plays the picture only, silent, or with its sound again.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn play(&mut self) {
@@ -537,6 +539,7 @@ fn audio_loop(
     mut edit: EditList,
     clock: Arc<Mutex<Clock>>,
     rx: Receiver<Cmd>,
+    muted: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let host = cpal::default_host();
     let device = host
@@ -556,8 +559,10 @@ fn audio_loop(
         config.config(),
         move |out: &mut [f32], _| {
             let mut ring = cb_ring.lock().unwrap();
+            let silent = muted.load(Ordering::Relaxed);
             for s in out.iter_mut() {
-                *s = ring.pop_front().unwrap_or(0.0);
+                let sample = ring.pop_front().unwrap_or(0.0);
+                *s = if silent { 0.0 } else { sample };
             }
         },
         // Underruns are expected while paused (nothing is queued).

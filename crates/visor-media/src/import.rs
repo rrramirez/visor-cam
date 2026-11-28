@@ -482,3 +482,61 @@ pub fn leftovers(dir: &Path, project: &Project) -> Vec<String> {
         })
         .collect()
 }
+
+/// Starts a new recording under `root` from video files (not Visor
+/// recordings): they're copied in as its clips, in the order given. Named
+/// `name`, else after the first file. Returns its folder; on failure or
+/// `cancel`, nothing is left.
+pub fn new_recording(
+    root: &Path,
+    paths: &[PathBuf],
+    name: Option<&str>,
+    progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
+) -> anyhow::Result<PathBuf> {
+    if paths.is_empty() {
+        return Err(anyhow!("give one or more video files"));
+    }
+    if let Some(r) = paths.iter().find(|p| is_recording(p)) {
+        return Err(anyhow!(
+            "{} is a Visor recording: open it and add videos there instead",
+            r.display()
+        ));
+    }
+    let title = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            paths[0]
+                .file_stem()
+                .map(|s| s.to_string_lossy().trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "Recording".into());
+    let folder = visor_core::project::folder_name(&title).unwrap_or_else(|| "Recording".into());
+    let dir = visor_core::project::create_unique_dir(root, &folder)?;
+    let made = (|| {
+        let mut project = Project::new(title, visor_core::time::rfc3339_now(), 0);
+        let prepared = prepare(&dir, &project, paths)?;
+        prepared.copy(&dir, progress, cancel)?;
+        for addition in prepared.additions {
+            project.add(addition);
+        }
+        // The first video is the recording's first piece, as a recorded
+        // one would be (its frame size is the recording's); the rest are
+        // takes after it.
+        if project.takes.first().is_some_and(|t| t.start_us == 0) {
+            project.tracks = project.takes.remove(0).tracks;
+        }
+        project.save(&dir)?;
+        anyhow::Ok(())
+    })();
+    match made {
+        Ok(()) => Ok(dir),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&dir);
+            Err(e)
+        }
+    }
+}

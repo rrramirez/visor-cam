@@ -219,8 +219,24 @@ fn tool_list() -> Value {
             },
         },
         {
+            "name": "create_recording",
+            "description": "Starts a new recording from video files (MP4, MOV, M4V, MKV or WebM, e.g. a screen recording made on a phone), without recording: they're copied in as its clips, in the order given, and it's named name (else after the first file). Then edit it like any recording, or open it for the user. Returns it as get_recording does; edits default to it from then on.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Absolute paths (or starting with ~/) of the video files.",
+                    },
+                    "name": {"type": "string"},
+                },
+                "required": ["paths"],
+            },
+        },
+        {
             "name": "get_recording",
-            "description": "Everything about a recording, to find your way around it before changing it: its name, lengths, speed and frame size; its clips in the order they play (recorded start and end seconds); what's removed and which clip it comes back next to; markers; blurs (x, y, width, height as fractions of the frame); the camera bubble; the thumbnail frame; its exports; and whether it's open in the editor. Times are recorded seconds, as all tools use them.",
+            "description": "Everything about a recording, to find your way around it before changing it: its name, lengths, speed and frame size; its clips in the order they play (recorded start and end seconds); what's removed and which clip it comes back next to; markers; blurs (x, y, width, height as fractions of the frame); the camera bubble; the thumbnail frame; voiceovers (number, the recorded stretches they cover, whether they have a voice and a camera, and how loud the video plays under them); its exports; and whether it's open in the editor. Times are recorded seconds, as all tools use them.",
             "inputSchema": {"type": "object", "properties": {"folder": folder_schema()}},
             "annotations": {"readOnlyHint": true},
         },
@@ -270,6 +286,19 @@ fn tool_list() -> Value {
                     "folder": folder_schema(),
                 },
                 "required": ["action"],
+            },
+        },
+        {
+            "name": "edit_voiceovers",
+            "description": "Deletes a voiceover: voice and/or camera the user recorded over the video while it played. number is its place in get_recording's voiceovers (1, 2, …). Agents can't record voiceovers. Returns the recording as get_recording does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["delete"]},
+                    "number": {"type": "integer", "minimum": 1},
+                    "folder": folder_schema(),
+                },
+                "required": ["action", "number"],
             },
         },
         {

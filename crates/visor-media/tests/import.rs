@@ -303,3 +303,89 @@ fn finds_what_an_interrupted_addition_left() {
     assert_eq!(left, ["screen-2.mov", "screen-2.partial"]);
     common::cleanup(&dir);
 }
+
+#[test]
+fn starts_a_recording_from_videos() {
+    use std::sync::atomic::AtomicBool;
+    use visor_media::import::new_recording;
+    let root = temp_dir("new-from-video");
+    let src = temp_dir("new-from-video-src");
+    let (video, tone) = (src.join("v.mp4"), src.join("t.m4a"));
+    write_video(&video, 320, 180, 2 * FPS, 128);
+    write_tone(&tone, 2_000_000, 0.4);
+    let phone = src.join("Screen Recording.mov");
+    remux(&[&video, &tone], &phone, 0, None);
+    let quiet = src.join("quiet.mp4");
+    write_video(&quiet, 640, 360, FPS, 90);
+
+    let dir = new_recording(
+        &root,
+        &[phone.clone(), quiet.clone()],
+        None,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(dir.file_name().unwrap(), "Screen Recording");
+    let p = visor_core::Project::load(&dir).unwrap();
+    assert_eq!(p.title, "Screen Recording");
+    // The first video is the first piece (as recorded), the next a take.
+    assert!(p.tracks.screen.is_some() && p.tracks.mic.is_some());
+    assert_eq!(p.takes.len(), 1);
+    let ranges = p.edit.ranges();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0].0, 0);
+    assert_eq!(ranges[1].0, ranges[0].1);
+    assert_eq!(p.duration_us, ranges[1].1);
+    // It exports like any recording.
+    let out = dir.join("out.mp4");
+    visor_media::export(
+        &dir,
+        &p,
+        &out,
+        &visor_media::ExportOptions::new(visor_media::ExportFormat::Mp4),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(out.metadata().unwrap().len() > 0);
+
+    // Named as asked.
+    let named = new_recording(
+        &root,
+        std::slice::from_ref(&quiet),
+        Some("Demo"),
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(visor_core::Project::load(&named).unwrap().title, "Demo");
+
+    // Refused: a recording folder, or a file it can't play; nothing is left.
+    let before = std::fs::read_dir(&root).unwrap().count();
+    assert!(
+        new_recording(
+            &root,
+            std::slice::from_ref(&named),
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
+    let bad = src.join("bad.mp4");
+    std::fs::write(&bad, "no").unwrap();
+    assert!(
+        new_recording(
+            &root,
+            &[quiet.clone(), bad],
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), before);
+    common::cleanup(&root);
+    common::cleanup(&src);
+}

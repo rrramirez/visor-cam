@@ -321,10 +321,16 @@ impl VideoReader {
     }
 
     /// The file of the span being read, opened from its start if it isn't.
+    /// The file of the span being read, opened at the span's start if it
+    /// isn't (a span can start partway into its file: a voiceover's piece).
     fn open_pos(&mut self) -> anyhow::Result<&mut VideoFile> {
         if self.file.as_ref().is_none_or(|(i, _)| *i != self.pos) {
-            let path = self.spans[self.pos].path.as_ref().unwrap();
-            self.file = Some((self.pos, VideoFile::open(path)?));
+            let span = &self.spans[self.pos];
+            let mut file = VideoFile::open(span.path.as_ref().unwrap())?;
+            if span.offset > 0 {
+                file.seek(span.offset)?;
+            }
+            self.file = Some((self.pos, file));
         }
         Ok(&mut self.file.as_mut().unwrap().1)
     }
@@ -770,8 +776,12 @@ impl AudioReader {
 
     fn open_pos(&mut self) -> anyhow::Result<&mut AudioFile> {
         if self.file.as_ref().is_none_or(|(i, _)| *i != self.pos) {
-            let path = self.spans[self.pos].path.as_ref().unwrap();
-            self.file = Some((self.pos, AudioFile::open(path)?));
+            let span = &self.spans[self.pos];
+            let mut file = AudioFile::open(span.path.as_ref().unwrap())?;
+            if span.offset > 0 {
+                file.seek(span.offset)?;
+            }
+            self.file = Some((self.pos, file));
         }
         Ok(&mut self.file.as_mut().unwrap().1)
     }
@@ -784,8 +794,19 @@ impl AudioReader {
                 let Span {
                     start, end, offset, ..
                 } = self.spans[self.pos];
-                if let Some((t, chunk)) = self.open_pos()?.next_chunk()? {
-                    let at = start.saturating_add(t.saturating_sub(offset));
+                if let Some((t, mut chunk)) = self.open_pos()?.next_chunk()? {
+                    // Sound from before the span's start in its file (a
+                    // seek lands a little early) isn't the span's.
+                    if t < offset {
+                        let skip = (crate::timeline::micros_to_samples(offset - t) as usize
+                            * usize::from(CHANNELS))
+                        .min(chunk.len());
+                        chunk.drain(..skip);
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                    }
+                    let at = start.saturating_add(t.max(offset) - offset);
                     if at < end {
                         return Ok(Some((at, chunk)));
                     }

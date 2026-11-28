@@ -35,9 +35,14 @@ it shows at once and the user can undo it like their own: the edit, markers and 
 undo step each (`apply_agent_edit`, `apply_agent_markers`, `apply_agent_blurs`); name, speed,
 thumbnail and bubble are set as the editor's controls set them, not undoable
 (`apply_agent_looks`). Without an editor the change is saved to `project.json`, and a new name
-renames the folder at once (`rename_to_title`), refused while a copy or export writes into it
-(`App::copies`). `remove_from_recording` with `ranges` removes
-several stretches as one step.
+renames the folder at once (`rename_to_title`), refused while something uses it: a copy,
+export or dead-time search (`App::copies`). `remove_from_recording` with `ranges` removes
+several stretches as one step. Voiceovers can be deleted (`edit_voiceovers`, one undo step in
+the editor) but not recorded; see [voiceover.md](voiceover.md).
+
+**Starting from videos.** `create_recording {paths, name?}` (`visor import FILE…`) makes a new
+recording from video files (`import::new_recording`, see [recording.md](recording.md)) on a
+thread, then answers with its state and makes it the recording later edits act on.
 
 **Exporting.** `export_recording` takes the user's last export choices for anything not given
 (`ExportChoice::last`, `export_choice`). With the editor open it runs there

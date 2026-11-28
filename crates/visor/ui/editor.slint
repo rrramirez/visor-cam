@@ -1,6 +1,6 @@
 import { ComboBox, Switch, Slider, ProgressIndicator, ScrollView, LineEdit } from "std-widgets.slint";
 import { Theme, Glyph, Icons } from "theme.slint";
-import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection } from "widgets.slint";
+import { IconButton, PillButton, SectionLabel, Card, CollapsibleSection, LevelMeter } from "widgets.slint";
 
 // The timeline shows the whole recording, clip by clip in the order they
 // play, each with what was deleted next to it, dimmed. Positions on it are
@@ -57,6 +57,16 @@ export struct Gone {
 export struct Tick {
     pos: float,
     label: string,
+}
+
+// A voiceover in the sidebar's list.
+export struct VoiceoverRow {
+    label: string,
+    // Where it first plays on the timeline (a fraction), to jump there; -1
+    // once deleted with its clips.
+    pos: float,
+    // How loud the video's own sound plays under it, 0–1.
+    sound: float,
 }
 
 export struct Thumb {
@@ -419,6 +429,33 @@ export component Editor inherits Window {
     // Looks for stretches where nothing happens and removes them.
     callback remove-pauses();
     callback record-more();
+    // Voiceover: the panel (devices, what it covers), the countdown and
+    // recording, and the list.
+    in property <bool> vo-panel;
+    in property <[string]> vo-mics;
+    in property <[string]> vo-cameras;
+    in-out property <int> vo-mic;
+    in-out property <int> vo-camera;
+    in-out property <bool> vo-voice: true;
+    in-out property <bool> vo-cam-on;
+    in property <float> vo-level;
+    in property <image> vo-preview;
+    in property <bool> vo-has-preview;
+    in property <string> vo-span;
+    in property <string> vo-note;
+    in property <int> vo-countdown;
+    in property <bool> vo-recording;
+    in property <string> vo-time;
+    in property <[VoiceoverRow]> voiceovers;
+    in-out property <bool> voiceovers-open: true;
+    callback open-voiceover();
+    callback close-voiceover();
+    callback vo-devices-changed();
+    callback start-voiceover();
+    callback stop-voiceover();
+    callback cancel-voiceover();
+    callback delete-voiceover(int);
+    callback voiceover-sound(int, float, bool);
     // Adding videos: the recent recordings the menu offers (by name), and
     // while files are copied in, what to say on the button.
     in property <[string]> recent-recordings;
@@ -480,6 +517,16 @@ export component Editor inherits Window {
             reject
         }
         key-pressed(event) => {
+            // Recording a voiceover: Esc throws it away, Space stops it.
+            if (root.vo-recording || root.vo-countdown > 0) {
+                if (event.text == Key.Escape) { root.cancel-voiceover(); }
+                if (event.text == " " && root.vo-recording) { root.stop-voiceover(); }
+                return accept;
+            }
+            if (root.vo-panel) {
+                if (event.text == Key.Escape) { root.close-voiceover(); return accept; }
+                return reject;
+            }
             if (event.text == " ") { root.toggle-play(); return accept; }
             if (event.text == "i") { root.set-in(); return accept; }
             if (event.text == "o") { root.set-out(); return accept; }
@@ -816,6 +863,11 @@ export component Editor inherits Window {
                                             }
                                         }
                                     }
+                                    SideButton {
+                                        text: "Record voiceover…"; icon: Icons.mic;
+                                        enabled: !root.exporting && !root.finding-pauses && !root.adding;
+                                        clicked => { root.open-voiceover(); keys.focus(); }
+                                    }
                                     if root.add-error != "": Text {
                                         text: root.add-error;
                                         color: Theme.record;
@@ -846,6 +898,61 @@ export component Editor inherits Window {
                                 }
                             }
 
+                            if root.voiceovers.length > 0: CollapsibleSection {
+                                title: "VOICEOVERS";
+                                open <=> root.voiceovers-open;
+                                for v[i] in root.voiceovers: VerticalLayout {
+                                    spacing: 2px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Rectangle {
+                                            border-radius: Theme.radius-small;
+                                            background: vo-touch.has-hover ? Theme.surface-2 : transparent;
+                                            Text {
+                                                x: 4px;
+                                                text: v.label;
+                                                color: Theme.text;
+                                                vertical-alignment: center;
+                                            }
+                                            vo-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { if (v.pos >= 0) { root.seek(v.pos); } keys.focus(); }
+                                            }
+                                        }
+                                        IconButton {
+                                            size: 30px;
+                                            icon: Icons.trash;
+                                            tint: Theme.muted;
+                                            tooltip: "Delete voiceover";
+                                            clicked => { root.delete-voiceover(i); keys.focus(); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        padding-left: 4px;
+                                        Text {
+                                            text: "Clip sound " + round(sound.value * 100) + "%";
+                                            color: Theme.faint;
+                                            font-size: Theme.font-small;
+                                            vertical-alignment: center;
+                                            width: 110px;
+                                        }
+                                        sound := Slider {
+                                            minimum: 0;
+                                            maximum: 1;
+                                            value: v.sound;
+                                            changed(x) => { root.voiceover-sound(i, x, false); }
+                                            released(x) => { root.voiceover-sound(i, x, true); keys.focus(); }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "The video's own sound plays at the clip sound level under each voice.";
+                                    color: Theme.faint;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
                             CollapsibleSection {
                                 title: "MARKERS";
                                 open <=> root.markers-open;
@@ -1616,6 +1723,166 @@ export component Editor inherits Window {
                         background: white;
                     }
                 }
+            }
+        }
+    }
+
+    // Record voiceover: what to record from, and over what.
+    if root.vo-panel: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000a8;
+        TouchArea { }
+        Card {
+            width: 420px;
+            height: vo-layout.preferred-height;
+            background: Theme.surface;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            vo-layout := VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+                Text {
+                    text: "Record voiceover";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.vo-span + ". The video plays without its sound while you record; Stop when you're done.";
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Switch {
+                        text: "Voice";
+                        checked <=> root.vo-voice;
+                        toggled => { root.vo-devices-changed(); }
+                    }
+                    ComboBox {
+                        enabled: root.vo-voice;
+                        model: root.vo-mics;
+                        current-index <=> root.vo-mic;
+                        selected => { root.vo-devices-changed(); }
+                    }
+                }
+                LevelMeter {
+                    level: root.vo-voice ? root.vo-level : 0;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Switch {
+                        text: "Camera";
+                        checked <=> root.vo-cam-on;
+                        toggled => { root.vo-devices-changed(); }
+                    }
+                    ComboBox {
+                        enabled: root.vo-cam-on;
+                        model: root.vo-cameras;
+                        current-index <=> root.vo-camera;
+                        selected => { root.vo-devices-changed(); }
+                    }
+                }
+                if root.vo-cam-on: HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 140px;
+                        height: 140px;
+                        border-radius: 70px;
+                        clip: true;
+                        background: #000;
+                        if root.vo-has-preview: Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.vo-preview;
+                            image-fit: cover;
+                        }
+                    }
+                }
+                if root.vo-note != "": Text {
+                    text: root.vo-note;
+                    color: Theme.warning;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+                    PillButton {
+                        text: "Cancel";
+                        clicked => { root.close-voiceover(); }
+                    }
+                    PillButton {
+                        primary: true;
+                        text: "Record";
+                        icon: Icons.record;
+                        enabled: root.vo-voice || root.vo-cam-on;
+                        clicked => { root.start-voiceover(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Counting down, then recording a voiceover, over the preview.
+    if root.vo-countdown > 0: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+        TouchArea { }
+        Text {
+            text: root.vo-countdown;
+            font-size: 96px;
+            font-weight: 800;
+            color: white;
+        }
+        Text {
+            y: parent.height / 2 + 80px;
+            text: "Esc to cancel";
+            color: #ffffffb0;
+        }
+    }
+    // While it records, the editor stays put: clicks would move the
+    // playhead away from what's being narrated.
+    if root.vo-recording: TouchArea {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+    }
+    if root.vo-recording: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 16px;
+        width: vo-bar.preferred-width;
+        height: 44px;
+        border-radius: 22px;
+        background: #000000d0;
+        vo-bar := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 6px;
+            spacing: 12px;
+            Rectangle {
+                width: 12px;
+                Rectangle {
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: Theme.record;
+                }
+            }
+            Text {
+                text: "Recording voiceover " + root.vo-time;
+                color: white;
+                vertical-alignment: center;
+            }
+            PillButton {
+                text: "Stop";
+                icon: Icons.stop;
+                clicked => { root.stop-voiceover(); }
             }
         }
     }

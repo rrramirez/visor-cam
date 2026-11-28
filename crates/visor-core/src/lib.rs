@@ -16,6 +16,7 @@ pub use layout::{Layout, Segment};
 pub use media::{AudioBuffer, PixelFormat, Plane, PlaneData, VideoFrame};
 pub use project::{
     Addition, Blur, CameraOverlay, Chapter, Marker, Part, Project, Take, Track, TrackKind, Tracks,
+    VoicePiece, Voiceover,
 };
 
 /// Microseconds. Every timestamp and duration in Visor uses this unit.

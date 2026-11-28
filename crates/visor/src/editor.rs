@@ -59,6 +59,34 @@ pub struct EditorWindow {
     recent: RefCell<Vec<PathBuf>>,
     /// Files dropped on the window, gathered until the drop is over.
     dropped: Rc<RefCell<Vec<PathBuf>>>,
+    /// Recording a voiceover: its panel, countdown or recording.
+    vo: RefCell<Option<Vo>>,
+    /// This window, for timers to call back.
+    me: Weak<EditorWindow>,
+}
+
+type CameraOpened = crossbeam_channel::Receiver<(
+    String,
+    anyhow::Result<Arc<visor_capture::camera::CameraStream>>,
+)>;
+
+/// A voiceover being set up or recorded.
+struct Vo {
+    mics: Vec<visor_capture::mic::MicDevice>,
+    cameras: Vec<visor_capture::camera::CameraDevice>,
+    mic: Option<(String, Arc<visor_capture::mic::MicStream>)>,
+    camera: Option<(String, Arc<visor_capture::camera::CameraStream>)>,
+    preview: Option<crossbeam_channel::Receiver<Arc<visor_core::VideoFrame>>>,
+    /// The camera being opened in the background, and where it arrives.
+    camera_opening: Option<String>,
+    camera_rx: Option<CameraOpened>,
+    /// What it covers: from source time, for at most this long.
+    from: Micros,
+    len: Micros,
+    recorder: Option<visor_recorder::VoiceRecorder>,
+    /// The panel's preview, the countdown, or the recording's clock.
+    timer: Timer,
+    countdown: u32,
 }
 
 /// Hears where each added recording or video starts, in source time, with
@@ -83,6 +111,7 @@ enum Step {
     Added(Micros),
     /// What was added from that time on, taken out (to undo), to put back.
     TakenOut(Micros, Addition),
+    Voiceovers(Vec<visor_core::Voiceover>),
 }
 
 /// Puts a take just recorded (`clip`, and the `markers` made in it) into
@@ -103,7 +132,7 @@ fn add_take_to_steps(
                 m.sort_by_key(|m| m.at_us);
             }
             Step::Blurs(b) => visor_core::project::carry_blurs(b, recorded_end, clip),
-            Step::Added(_) | Step::TakenOut(..) => {}
+            Step::Added(_) | Step::TakenOut(..) | Step::Voiceovers(_) => {}
         }
     }
 }
@@ -133,7 +162,7 @@ fn add_to_steps(steps: &mut [Step], at: Micros, part: &Addition) {
                 end_us: at + x.end_us,
                 ..x.clone()
             })),
-            Step::Added(_) | Step::TakenOut(..) => {}
+            Step::Added(_) | Step::TakenOut(..) | Step::Voiceovers(_) => {}
         }
     }
 }
@@ -148,7 +177,7 @@ fn strip_from_steps(steps: &mut [Step], at: Micros) {
             }
             Step::Markers(m) => m.retain(|m| m.at_us < at),
             Step::Blurs(b) => b.retain(|b| b.start_us < at),
-            Step::Added(_) | Step::TakenOut(..) => {}
+            Step::Added(_) | Step::TakenOut(..) | Step::Voiceovers(_) => {}
         }
     }
 }
@@ -330,7 +359,7 @@ impl EditorWindow {
             ui.set_export_denoise(settings.export_denoise);
             ui.set_export_normalize(settings.export_normalize);
         }
-        ui.set_has_audio(project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System));
+        ui.set_has_audio(project.has_sound());
         ui.set_file_manager(platform::FILE_MANAGER.into());
         ui.set_can_copy(platform::CAN_COPY_FILE);
 
@@ -362,6 +391,8 @@ impl EditorWindow {
                 added_files: RefCell::default(),
                 recent: RefCell::default(),
                 dropped: Rc::default(),
+                vo: RefCell::default(),
+                me: weak.clone(),
             }
         });
         this.wire(Rc::downgrade(&this));
@@ -400,6 +431,13 @@ impl EditorWindow {
         self.export.borrow().is_some()
             || self.ui.get_finding_pauses()
             || self.adding.borrow().is_some()
+            || self.voiceover_active()
+    }
+
+    /// Whether a voiceover is being set up or recorded: what it covers
+    /// mustn't change meanwhile.
+    pub fn voiceover_active(&self) -> bool {
+        self.vo.try_borrow().map_or(true, |v| v.is_some())
     }
 
     /// Hides the editor to record more onto its recording.
@@ -516,6 +554,30 @@ impl EditorWindow {
         });
         on!(on_remove_pauses, |e| e.remove_pauses());
         on!(on_record_more, |e| e.record_more());
+        on!(on_open_voiceover, |e| e.open_voiceover());
+        on!(on_close_voiceover, |e| e.close_voiceover());
+        on!(on_vo_devices_changed, |e| e.vo_devices_changed());
+        on!(on_start_voiceover, |e| e.start_voiceover());
+        on!(on_stop_voiceover, |e| e.stop_voiceover());
+        on!(on_cancel_voiceover, |e| e.cancel_voiceover());
+        on!(on_delete_voiceover, |e, i| {
+            if let Ok(i) = usize::try_from(i) {
+                e.change_voiceovers(|v| {
+                    if i < v.len() {
+                        v.remove(i);
+                    }
+                });
+            }
+        });
+        on!(on_voiceover_sound, |e, i, x, done| {
+            if done && let Ok(i) = usize::try_from(i) {
+                e.change_voiceovers(|v| {
+                    if let Some(v) = v.get_mut(i) {
+                        v.clip_sound = f64::from(x).clamp(0.0, 1.0);
+                    }
+                });
+            }
+        });
         on!(on_open_add_menu, |e| e.open_add_menu());
         on!(on_add_recent, |e, i| {
             let dir = usize::try_from(i)
@@ -780,17 +842,12 @@ impl EditorWindow {
 
     /// Stops work for a window that is being hidden, then lets the app drop it.
     fn closing(&self) {
+        self.cancel_voiceover();
         self.stop_work();
         self.remove_unused_added_files();
         let (dir, jobs) = (self.dir.clone(), self.jobs.clone());
         // Drop the window (and its player threads) after this callback.
         slint::Timer::single_shot(Duration::ZERO, move || app().editor_closed(&dir, jobs));
-    }
-
-    /// Marks work reading the recording's folder from elsewhere (an agent),
-    /// so the folder isn't renamed under it.
-    pub fn start_job(&self) -> JobGuard {
-        self.jobs.start()
     }
 
     /// Cancels an export and stops playback. Returns the background jobs,
@@ -1362,6 +1419,13 @@ impl EditorWindow {
         self.agent_saved()
     }
 
+    /// Sets an agent's voiceovers (one deleted) as one step to undo.
+    pub fn apply_agent_voiceovers(&self, v: Vec<visor_core::Voiceover>) -> Result<Project, String> {
+        self.save_error.borrow_mut().take();
+        self.change_voiceovers(|all| *all = v);
+        self.agent_saved()
+    }
+
     /// Takes an agent's name, speed, thumbnail and camera bubble from
     /// `after`, as the user's own controls set them (not steps to undo).
     pub fn apply_agent_looks(&self, after: &Project) -> Result<Project, String> {
@@ -1448,6 +1512,12 @@ impl EditorWindow {
                 to.borrow_mut().push(Step::Blurs(now));
                 self.set_blurs(blurs);
             }
+            Step::Voiceovers(v) => {
+                let now = std::mem::replace(&mut self.project.borrow_mut().voiceovers, v);
+                to.borrow_mut().push(Step::Voiceovers(now));
+                self.save();
+                self.reload_keeping_place();
+            }
             Step::Added(at) => {
                 let part = self.project.borrow_mut().take_addition(at);
                 strip_from_steps(&mut self.undo.borrow_mut(), at);
@@ -1491,9 +1561,7 @@ impl EditorWindow {
             Err(e) => tracing::error!("could not reopen the player: {e:#}"),
         }
         self.ui.set_has_camera(project.has_track(TrackKind::Camera));
-        self.ui.set_has_audio(
-            project.has_track(TrackKind::Mic) || project.has_track(TrackKind::System),
-        );
+        self.ui.set_has_audio(project.has_sound());
         *self.nudged.borrow_mut() = None;
         self.refresh_edit_ui();
         self.load_previews();
@@ -1649,13 +1717,22 @@ impl EditorWindow {
     /// longer has (undone, or never finished).
     fn remove_unused_added_files(&self) {
         let project = self.project.borrow();
-        let used: std::collections::HashSet<&str> = std::iter::once(&project.tracks)
+        let mut used: std::collections::HashSet<&str> = std::iter::once(&project.tracks)
             .chain(project.takes.iter().map(|t| &t.tracks))
             .flat_map(|t| [&t.screen, &t.camera, &t.mic, &t.system])
             .flatten()
             .map(|t| t.file.as_str())
             .collect();
+        for v in &project.voiceovers {
+            used.extend(v.voice.as_deref());
+            used.extend(v.camera.as_ref().map(|c| c.file.as_str()));
+        }
         for name in self.added_files.borrow_mut().drain(..) {
+            // Voiceovers' files may still be read by a job that outlives
+            // the editor: `App::tidy_voiceovers` deletes them once it's done.
+            if visor_core::project::is_voiceover_file(&name) {
+                continue;
+            }
             if !used.contains(name.as_str()) {
                 let path = self.dir.join(&name);
                 if let Err(e) = std::fs::remove_file(&path)
@@ -1726,6 +1803,7 @@ impl EditorWindow {
     }
 
     fn refresh_edit_ui(&self) {
+        self.show_voiceovers();
         let project = self.project.borrow();
         let d = project.duration_us.max(1) as f64;
         let edit = &project.edit;
@@ -1951,7 +2029,7 @@ impl EditorWindow {
         let screen = project
             .has_track(TrackKind::Screen)
             .then(|| project.parts(TrackKind::Screen));
-        let audio: Vec<_> = [TrackKind::Mic, TrackKind::System]
+        let audio: Vec<_> = [TrackKind::Mic, TrackKind::System, TrackKind::Voice]
             .into_iter()
             .filter(|&k| project.has_track(k))
             .map(|k| project.parts(k))
@@ -2040,6 +2118,11 @@ impl EditorWindow {
         }
         if self.adding.borrow().is_some() {
             return Err("Videos are being added to it; export once that's done.".into());
+        }
+        if self.voiceover_active() {
+            return Err(
+                "The user is recording a voiceover in it; export once they're done.".into(),
+            );
         }
         self.export_with(choice, Some(reply))
     }
@@ -2225,10 +2308,7 @@ impl EditorWindow {
                     .into_owned();
                 // What it was made with (an agent's choices too, which the
                 // pickers don't show).
-                let has_audio = {
-                    let p = self.project.borrow();
-                    p.has_track(TrackKind::Mic) || p.has_track(TrackKind::System)
-                };
+                let has_audio = self.project.borrow().has_sound();
                 let mut detail: Vec<String> = job
                     .choice
                     .summary(has_audio)
@@ -2260,6 +2340,564 @@ impl EditorWindow {
             }
         }
     }
+}
+
+impl EditorWindow {
+    fn weak_self(&self) -> Weak<EditorWindow> {
+        self.me.clone()
+    }
+
+    /// The Voiceovers section's rows.
+    fn show_voiceovers(&self) {
+        let rows: Vec<crate::VoiceoverRow> = {
+            let p = self.project.borrow();
+            p.voiceovers
+                .iter()
+                .map(|v| crate::VoiceoverRow {
+                    label: voiceover_label(&p, v).into(),
+                    pos: voiceover_plays(&p, v).map_or(-1.0, |(source, ..)| {
+                        Layout::new(&p.edit, p.duration_us).display(source) as f32
+                            / p.duration_us.max(1) as f32
+                    }),
+                    sound: v.clip_sound as f32,
+                })
+                .collect()
+        };
+        self.ui.set_voiceovers(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// Changes the voiceovers as one step to undo.
+    fn change_voiceovers(&self, change: impl FnOnce(&mut Vec<visor_core::Voiceover>)) {
+        let before = self.project.borrow().voiceovers.clone();
+        let mut after = before.clone();
+        change(&mut after);
+        if after == before {
+            return;
+        }
+        self.undo.borrow_mut().push(Step::Voiceovers(before));
+        self.redo.borrow_mut().clear();
+        self.project.borrow_mut().voiceovers = after;
+        self.save();
+        self.reload_keeping_place();
+    }
+
+    /// Reopens the media for changed voiceovers, the playhead where it was
+    /// (the recording's length hasn't changed).
+    fn reload_keeping_place(&self) {
+        let at = self.player.borrow().position();
+        self.reload_media();
+        self.control().seek(at);
+    }
+
+    /// What a voiceover would cover now: the selection's kept part, else
+    /// from the playhead to the end. Its start, length and description.
+    fn voiceover_stretch(&self) -> Option<(Micros, Micros, String)> {
+        let p = self.project.borrow();
+        let clock = |source: Micros| util::clock(p.output_time(source));
+        if let Some((a, b)) = self.selection() {
+            let pieces = self.layout().kept_pieces(a, b);
+            if let Some(first) = pieces.first() {
+                let len: Micros = pieces.iter().map(|r| r.len()).sum();
+                let end = p.output_time(first.0) + (len as f64 / p.speed()) as Micros;
+                return Some((
+                    first.0,
+                    len,
+                    format!(
+                        "Over the selection, {}–{}",
+                        clock(first.0),
+                        util::clock(end)
+                    ),
+                ));
+            }
+        }
+        let (from, len) = from_playhead(&p.edit, self.player.borrow().position())?;
+        Some((from, len, format!("From {} to the end", clock(from))))
+    }
+
+    fn open_voiceover(&self) {
+        if self.is_busy() {
+            return;
+        }
+        let Some((from, len, span)) = self.voiceover_stretch() else {
+            return;
+        };
+        self.control().pause();
+        let mics = visor_capture::mic::list();
+        let cameras = visor_capture::camera::list();
+        let choice = crate::settings::VoiceoverDevices::current(&app().settings.borrow());
+        let (last_mic, last_camera) = (choice.mic.clone(), choice.camera.clone());
+        let index = |id: &Option<String>, ids: Vec<&str>| {
+            id.as_deref()
+                .and_then(|id| ids.iter().position(|i| *i == id))
+                .unwrap_or(0) as i32
+        };
+        self.ui.set_vo_mics(ModelRc::new(VecModel::from(
+            mics.iter()
+                .map(|m| m.name.as_str().into())
+                .collect::<Vec<slint::SharedString>>(),
+        )));
+        self.ui.set_vo_cameras(ModelRc::new(VecModel::from(
+            cameras
+                .iter()
+                .map(|c| c.name.as_str().into())
+                .collect::<Vec<slint::SharedString>>(),
+        )));
+        self.ui.set_vo_mic(index(
+            &last_mic,
+            mics.iter().map(|m| m.id.as_str()).collect(),
+        ));
+        self.ui.set_vo_camera(index(
+            &last_camera,
+            cameras.iter().map(|c| c.id.as_str()).collect(),
+        ));
+        self.ui.set_vo_voice(choice.voice && !mics.is_empty());
+        self.ui
+            .set_vo_cam_on(choice.camera_on && !cameras.is_empty());
+        self.ui.set_vo_span(span.into());
+        self.ui.set_vo_note("".into());
+        self.ui.set_vo_has_preview(false);
+        *self.vo.borrow_mut() = Some(Vo {
+            mics,
+            cameras,
+            mic: None,
+            camera: None,
+            preview: None,
+            camera_opening: None,
+            camera_rx: None,
+            from,
+            len,
+            recorder: None,
+            timer: Timer::default(),
+            countdown: 0,
+        });
+        self.vo_devices_changed();
+        self.ui.set_vo_panel(true);
+        // The level meter and camera preview.
+        let weak = self.weak_self();
+        if let Some(vo) = &*self.vo.borrow() {
+            vo.timer
+                .start(TimerMode::Repeated, Duration::from_millis(50), move || {
+                    if let Some(e) = weak.upgrade() {
+                        e.vo_preview();
+                    }
+                });
+        }
+    }
+
+    /// Opens the devices the panel now shows, and remembers them.
+    fn vo_devices_changed(&self) {
+        let (voice, cam_on) = (self.ui.get_vo_voice(), self.ui.get_vo_cam_on());
+        // Asking for permission and opening a device let the event loop run
+        // (the preview timer among it), so the state isn't held meanwhile.
+        let (mic_id, cam_id, mic_now, cam_now) = {
+            let guard = self.vo.borrow();
+            let Some(vo) = guard.as_ref() else { return };
+            let mic_id = usize::try_from(self.ui.get_vo_mic())
+                .ok()
+                .and_then(|i| vo.mics.get(i))
+                .map(|m| m.id.clone())
+                .filter(|_| voice);
+            let cam_id = usize::try_from(self.ui.get_vo_camera())
+                .ok()
+                .and_then(|i| vo.cameras.get(i))
+                .map(|c| c.id.clone())
+                .filter(|_| cam_on);
+            let mic_now = vo.mic.as_ref().map(|(i, _)| i.clone());
+            let cam_now = vo
+                .camera
+                .as_ref()
+                .map(|(i, _)| i.clone())
+                .or_else(|| vo.camera_opening.clone());
+            (mic_id, cam_id, mic_now, cam_now)
+        };
+        {
+            // The panel's own choices; the recorder's stay as they are.
+            let app = app();
+            let mut s = app.settings.borrow_mut();
+            let mut choice = crate::settings::VoiceoverDevices::current(&s);
+            choice.voice = voice;
+            choice.camera_on = cam_on;
+            if let Some(id) = &mic_id {
+                choice.mic = Some(id.clone());
+            }
+            if let Some(id) = &cam_id {
+                choice.camera = Some(id.clone());
+            }
+            s.voiceover = Some(choice);
+            s.save();
+        }
+        let mut note = String::new();
+        if mic_now != mic_id {
+            let mut mic = None;
+            if let Some(id) = mic_id {
+                if !app().device_allowed(false) {
+                    note = "Allow Visor to use the microphone (System Settings › Privacy & Security), then try again.".into();
+                } else {
+                    let stream = app().shared_mic(&id).map(Ok).unwrap_or_else(|| {
+                        visor_capture::mic::MicStream::open(Some(&id)).map(Arc::new)
+                    });
+                    match stream {
+                        Ok(s) => mic = Some((id, s)),
+                        Err(e) => note = format!("The microphone isn't available: {e:#}"),
+                    }
+                }
+            }
+            if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                vo.mic = mic;
+            }
+        }
+        if cam_now != cam_id {
+            if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                vo.camera = None;
+                vo.preview = None;
+                vo.camera_opening = None;
+                vo.camera_rx = None;
+            }
+            self.ui.set_vo_has_preview(false);
+            if let Some(id) = cam_id {
+                if !app().device_allowed(true) {
+                    note = "Allow Visor to use the camera (System Settings › Privacy & Security), then try again.".into();
+                } else if let Some(s) = app().shared_camera(&id) {
+                    self.vo_camera_opened(id, Ok(s));
+                } else {
+                    // Opening a camera takes a moment: not on the UI thread.
+                    // The preview timer takes it when it's open.
+                    let (tx, rx) = crossbeam_channel::bounded(1);
+                    if let Some(vo) = self.vo.borrow_mut().as_mut() {
+                        vo.camera_opening = Some(id.clone());
+                        vo.camera_rx = Some(rx);
+                    }
+                    std::thread::spawn(move || {
+                        let result = visor_capture::camera::CameraStream::open(&id).map(Arc::new);
+                        let _ = tx.send((id, result));
+                    });
+                }
+            }
+        }
+        self.ui.set_vo_note(note.into());
+    }
+
+    /// A camera opened for the panel, if it's still the one chosen.
+    fn vo_camera_opened(
+        &self,
+        id: String,
+        result: anyhow::Result<Arc<visor_capture::camera::CameraStream>>,
+    ) {
+        let mut guard = self.vo.borrow_mut();
+        let Some(vo) = guard.as_mut() else { return };
+        let shared = vo.camera_opening.is_none();
+        if !shared && vo.camera_opening.as_deref() != Some(id.as_str()) {
+            return;
+        }
+        vo.camera_opening = None;
+        vo.camera_rx = None;
+        match result {
+            Ok(s) => {
+                vo.preview = Some(s.subscribe());
+                vo.camera = Some((id, s));
+            }
+            Err(e) => {
+                drop(guard);
+                self.ui
+                    .set_vo_note(format!("The camera isn't available: {e:#}").into());
+            }
+        }
+    }
+
+    fn vo_preview(&self) {
+        let opened = self
+            .vo
+            .try_borrow()
+            .ok()
+            .and_then(|g| g.as_ref()?.camera_rx.as_ref()?.try_recv().ok());
+        if let Some((id, result)) = opened {
+            self.vo_camera_opened(id, result);
+        }
+        let Ok(guard) = self.vo.try_borrow() else {
+            return;
+        };
+        let Some(vo) = guard.as_ref() else { return };
+        if vo.recorder.is_some() {
+            return;
+        }
+        let level = vo.mic.as_ref().map_or(0.0, |(_, m)| m.level());
+        self.ui.set_vo_level(level);
+        if let Some(frame) = vo.preview.as_ref().and_then(|rx| rx.try_iter().last())
+            && let Some(buf) = util::nv12_square_preview(&frame, 280)
+        {
+            self.ui.set_vo_preview(slint::Image::from_rgba8(buf));
+            self.ui.set_vo_has_preview(true);
+        }
+    }
+
+    fn close_voiceover(&self) {
+        self.ui.set_vo_panel(false);
+        if let Some(vo) = self.vo.borrow_mut().take() {
+            vo.timer.stop();
+            if let Some(r) = vo.recorder {
+                r.discard();
+            }
+        }
+        self.end_voiceover_playback();
+    }
+
+    /// The next number free for voiceover files in the folder.
+    fn next_voiceover_number(&self) -> usize {
+        let taken = |n: usize| {
+            self.dir.join(format!("voice-{n}.m4a")).exists()
+                || self.dir.join(format!("vcam-{n}.mp4")).exists()
+        };
+        (1..).find(|&n| !taken(n)).unwrap_or(1)
+    }
+
+    /// Record: a countdown, then the stretch plays (silent, at 1x) while
+    /// the voice and camera record.
+    fn start_voiceover(&self) {
+        let n = self.next_voiceover_number();
+        let started = {
+            let mut guard = self.vo.borrow_mut();
+            let Some(vo) = guard.as_mut() else { return };
+            if vo.camera_opening.is_some() {
+                self.ui
+                    .set_vo_note("The camera is still starting: a moment.".into());
+                return;
+            }
+            let mic = vo.mic.as_ref().map(|(_, m)| m.subscribe());
+            let cam = vo.camera.as_ref().map(|(_, c)| (c.subscribe(), c.size()));
+            if mic.is_none() && cam.is_none() {
+                self.ui
+                    .set_vo_note("Choose a microphone or a camera to record from.".into());
+                return;
+            }
+            match visor_recorder::VoiceRecorder::start(&self.dir, n, mic, cam) {
+                Ok(mut r) => {
+                    if let Some((_, m)) = &vo.mic {
+                        r.keep(Box::new(m.clone()));
+                    }
+                    if let Some((_, c)) = &vo.camera {
+                        r.keep(Box::new(c.clone()));
+                    }
+                    for name in [format!("voice-{n}.m4a"), format!("vcam-{n}.mp4")] {
+                        self.added_files.borrow_mut().push(name);
+                    }
+                    vo.recorder = Some(r);
+                    vo.preview = None;
+                    vo.countdown = 3;
+                    Ok(vo.from)
+                }
+                Err(e) => Err(format!("Couldn't start recording: {e:#}")),
+            }
+        };
+        let from = match started {
+            Ok(from) => from,
+            Err(e) => return self.ui.set_vo_note(e.into()),
+        };
+        self.ui.set_vo_panel(false);
+        self.ui.set_vo_countdown(3);
+        self.control().seek(from);
+        let weak = self.weak_self();
+        if let Some(vo) = &*self.vo.borrow() {
+            vo.timer.start(
+                TimerMode::Repeated,
+                Duration::from_millis(1000),
+                move || {
+                    if let Some(e) = weak.upgrade() {
+                        e.vo_count();
+                    }
+                },
+            );
+        }
+    }
+
+    fn vo_count(&self) {
+        let go = {
+            let mut guard = self.vo.borrow_mut();
+            let Some(vo) = guard.as_mut() else { return };
+            vo.countdown = vo.countdown.saturating_sub(1);
+            self.ui.set_vo_countdown(vo.countdown as i32);
+            vo.countdown == 0
+        };
+        if !go {
+            return;
+        }
+        // Picture only, at 1x: the voice is recorded as it happens.
+        let from = self.vo.borrow().as_ref().map_or(0, |v| v.from);
+        {
+            let mut player = self.control();
+            player.set_speed(1.0);
+            player.set_muted(true);
+            player.seek(from);
+            player.play();
+        }
+        if let Some(vo) = &*self.vo.borrow() {
+            if let Some(r) = &vo.recorder {
+                r.resume();
+            }
+            let weak = self.weak_self();
+            vo.timer
+                .start(TimerMode::Repeated, Duration::from_millis(100), move || {
+                    if let Some(e) = weak.upgrade() {
+                        e.vo_tick();
+                    }
+                });
+        }
+        self.ui.set_vo_recording(true);
+        self.ui.set_vo_time("0:00".into());
+    }
+
+    fn vo_tick(&self) {
+        let (elapsed, len) = {
+            let guard = self.vo.borrow();
+            let Some(vo) = guard.as_ref() else { return };
+            let Some(r) = &vo.recorder else { return };
+            (r.elapsed(), vo.len)
+        };
+        self.ui.set_vo_time(util::clock(elapsed).into());
+        // At the end of what it covers, or of the video.
+        let ended = !self.player.borrow().is_playing() && elapsed > 500_000;
+        if elapsed >= len || ended {
+            self.stop_voiceover();
+        }
+    }
+
+    /// Stop: the voiceover is added over what played, as one step to undo.
+    fn stop_voiceover(&self) {
+        let Some(vo) = self.vo.borrow_mut().take() else {
+            return;
+        };
+        vo.timer.stop();
+        self.ui.set_vo_recording(false);
+        self.ui.set_vo_countdown(0);
+        self.end_voiceover_playback();
+        let Some(recorder) = vo.recorder else { return };
+        match recorder.stop() {
+            Ok(made) => {
+                let duration = made.duration_us.min(vo.len);
+                if duration < MIN_VOICEOVER {
+                    // Stopped as it began: nothing worth keeping.
+                    for name in [&made.voice, &made.camera.as_ref().map(|c| c.file.clone())]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(self.dir.join(name));
+                    }
+                    return;
+                }
+                let v = {
+                    let p = self.project.borrow();
+                    voiceover_over(&p.edit, vo.from, duration, made.voice, made.camera)
+                };
+                if v.pieces.is_empty() {
+                    return;
+                }
+                self.change_voiceovers(|all| all.push(v));
+                self.control().seek(vo.from);
+            }
+            Err(e) => {
+                tracing::warn!("voiceover failed: {e:#}");
+                self.ui
+                    .set_add_error(format!("The voiceover didn't record: {e:#}").into());
+            }
+        }
+    }
+
+    /// Esc while counting down or recording: nothing is kept.
+    fn cancel_voiceover(&self) {
+        self.ui.set_vo_recording(false);
+        self.ui.set_vo_countdown(0);
+        self.close_voiceover();
+    }
+
+    /// The player as before a voiceover: its speed, its sound, paused.
+    fn end_voiceover_playback(&self) {
+        let speed = self.project.borrow().speed();
+        let mut player = self.control();
+        player.pause();
+        player.set_muted(false);
+        player.set_speed(speed);
+    }
+}
+
+/// A voiceover recorded for `duration` while the video played from source
+/// time `from`: over what played, in play order, from its files' start.
+fn voiceover_over(
+    edit: &EditList,
+    from: Micros,
+    duration: Micros,
+    voice: Option<String>,
+    camera: Option<visor_core::Track>,
+) -> visor_core::Voiceover {
+    visor_core::Voiceover {
+        pieces: edit
+            .play_span(from, duration)
+            .into_iter()
+            .map(|(r, file_us)| visor_core::VoicePiece {
+                start_us: r.0,
+                end_us: r.1,
+                file_us,
+            })
+            .collect(),
+        voice,
+        camera,
+        clip_sound: 0.25,
+    }
+}
+
+/// What a voiceover from the playhead at source time `pos` covers: its
+/// start and length, to the end. Once (nearly) at the end, from the start.
+fn from_playhead(edit: &EditList, pos: Micros) -> Option<(Micros, Micros)> {
+    let from = kept_frame(edit, pos);
+    let played = edit.to_output(from)?;
+    let left = edit.duration().saturating_sub(played);
+    if left >= MIN_VOICEOVER {
+        return Some((from, left));
+    }
+    let first = edit.ranges().first()?.0;
+    Some((first, edit.duration()))
+}
+
+/// Shorter than this, a voiceover isn't kept (nor started).
+const MIN_VOICEOVER: Micros = 500_000;
+
+/// "0:12–0:30 · Voice and camera": where a voiceover is in the video, and
+/// what it has.
+fn voiceover_label(project: &Project, v: &visor_core::Voiceover) -> String {
+    let has = match (v.voice.is_some(), v.camera.is_some()) {
+        (true, true) => "Voice and camera",
+        (true, false) => "Voice",
+        _ => "Camera",
+    };
+    match voiceover_plays(project, v) {
+        Some((_, start, end)) => format!("{}–{} · {has}", util::clock(start), util::clock(end)),
+        None => format!("Deleted with its clips · {has}"),
+    }
+}
+
+/// Where what's left of a voiceover plays: the source time of its earliest
+/// moment in the video, and the earliest and latest output times it plays
+/// at (clips moved or partly deleted since). None once it's all deleted.
+fn voiceover_plays(
+    project: &Project,
+    v: &visor_core::Voiceover,
+) -> Option<(Micros, Micros, Micros)> {
+    let mut found: Option<(Micros, Micros, Micros)> = None;
+    for p in &v.pieces {
+        for r in project.edit.ranges() {
+            let (lo, hi) = (p.start_us.max(r.0), p.end_us.min(r.1));
+            if lo >= hi {
+                continue;
+            }
+            let (out_lo, out_hi) = (project.output_time(lo), project.output_time(hi - 1) + 1);
+            found = Some(match found {
+                None => (lo, out_lo, out_hi),
+                Some((src, a, b)) => {
+                    let src = if out_lo < a { lo } else { src };
+                    (src, a.min(out_lo), b.max(out_hi))
+                }
+            });
+        }
+    }
+    found
 }
 
 /// `t` if the edit keeps it, else the closest kept frame before it (the
@@ -2683,6 +3321,66 @@ mod tests {
         assert_eq!(kept_frame(&edit, 5_000_000), 3_999_999);
         // Before everything kept: the first kept frame.
         assert_eq!(kept_frame(&edit, 0), 1_000_000);
+    }
+
+    #[test]
+    fn a_voiceover_covers_what_played_while_it_recorded() {
+        let mut e = EditList::full(20_000_000);
+        e.cut(5_000_000, 8_000_000);
+        // From 3 s for 4 s: 3–5 s, then on after the cut, 8–10 s.
+        let v = voiceover_over(&e, 3_000_000, 4_000_000, Some("voice-1.m4a".into()), None);
+        assert_eq!(
+            v.pieces,
+            [
+                visor_core::VoicePiece {
+                    start_us: 3_000_000,
+                    end_us: 5_000_000,
+                    file_us: 0
+                },
+                visor_core::VoicePiece {
+                    start_us: 8_000_000,
+                    end_us: 10_000_000,
+                    file_us: 2_000_000
+                },
+            ]
+        );
+        assert_eq!(v.clip_sound, 0.25);
+        let mut p = Project::new("Demo", "", 20_000_000);
+        p.edit = e;
+        assert_eq!(voiceover_label(&p, &v), "0:03–0:07 · Voice");
+        let cam = visor_core::Track {
+            file: "vcam-1.mp4".into(),
+            ..Default::default()
+        };
+        let both = voiceover_over(&p.edit, 0, 1_000_000, Some("voice-2.m4a".into()), Some(cam));
+        assert_eq!(voiceover_label(&p, &both), "0:00–0:01 · Voice and camera");
+        // From what still plays of it: part of its first piece deleted, its
+        // second moved to the front.
+        let mut q = p.clone();
+        q.edit.cut(3_000_000, 4_000_000);
+        assert_eq!(voiceover_label(&q, &v), "0:03–0:06 · Voice");
+        // Moved: from the earliest moment it plays to the latest (8–10 s
+        // plays first, 4–5 s at 0:15).
+        let last = q.edit.ranges().len() - 1;
+        q.edit.move_clip(last, 0);
+        assert_eq!(voiceover_label(&q, &v), "0:00–0:16 · Voice");
+        q.edit = EditList::full(20_000_000);
+        q.edit.cut(3_000_000, 10_000_000);
+        assert_eq!(voiceover_label(&q, &v), "Deleted with its clips · Voice");
+        // From the playhead to the end; from the start once at the end, as
+        // Play does.
+        assert_eq!(
+            from_playhead(&p.edit, 3_000_000),
+            Some((3_000_000, 14_000_000))
+        );
+        assert_eq!(from_playhead(&p.edit, 20_000_000), Some((0, 17_000_000)));
+        assert_eq!(from_playhead(&p.edit, 19_900_000), Some((0, 17_000_000)));
+        // Nothing played: nothing covered.
+        assert!(
+            voiceover_over(&p.edit, 6_000_000, 1_000_000, None, None)
+                .pieces
+                .is_empty()
+        );
     }
 
     #[test]

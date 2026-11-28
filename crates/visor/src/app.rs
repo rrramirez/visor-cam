@@ -390,6 +390,7 @@ impl App {
     fn on_tray(&self, action: Action) {
         match action {
             Action::NewRecording => self.open_panel(),
+            Action::NewFromVideo => self.new_from_video(),
             Action::TogglePause => self.toggle_pause(),
             Action::StopRecording => self.stop_recording(false),
             Action::OpenRecent(dir) => self.open_editor(dir),
@@ -702,6 +703,7 @@ impl App {
         ui.on_start(|| app().start_recording());
         ui.on_open_preferences(|| app().open_preferences());
         ui.on_open_folder(|| app().open_library());
+        ui.on_start_from_video(|| app().new_from_video());
         ui.on_open_permission_settings(|| {
             #[cfg(target_os = "macos")]
             {
@@ -1961,14 +1963,28 @@ impl App {
         // a cancelled export or a thumbnail being saved may still write to
         // the old path, and on Windows the player's files stay open for a
         // moment.
+        // Until its jobs are done (a thumbnail being saved…), the folder is
+        // held as a copy, so a voiceover's files aren't tidied from under
+        // them.
+        self.copy_started(dir);
         let (dir, root) = (dir.to_path_buf(), self.settings.borrow().save_dir.clone());
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             while jobs.running() {
                 if std::time::Instant::now() > deadline {
+                    let d = dir.clone();
+                    post(move |app| {
+                        app.copy_finished(&d);
+                    });
                     return tracing::warn!("not renaming {}: still busy", dir.display());
                 }
                 std::thread::sleep(Duration::from_millis(100));
+            }
+            {
+                let d = dir.clone();
+                post(move |app| {
+                    app.copy_finished(&d);
+                });
             }
             for attempt in 1..=10 {
                 let (tx, rx) = crossbeam_channel::bounded(1);
@@ -2004,6 +2020,8 @@ impl App {
             );
             return false;
         }
+        // Its editor's jobs are done and nothing else reads it.
+        self.tidy_voiceovers(dir);
         match visor_core::project::rename_to_title(dir, root) {
             Ok(Some(to)) => {
                 tracing::info!("renamed {} to {}", dir.display(), to.display());

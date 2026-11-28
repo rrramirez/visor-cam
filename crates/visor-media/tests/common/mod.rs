@@ -60,11 +60,17 @@ pub fn write_video(path: &Path, w: u32, h: u32, frames: u64, uv: u8) {
 }
 
 pub fn write_tone(path: &Path, duration_us: u64, amplitude: f32) {
+    write_tone_with(path, duration_us, |_| amplitude);
+}
+
+/// A 440 Hz tone whose amplitude at each moment (µs) `amplitude` gives.
+pub fn write_tone_with(path: &Path, duration_us: u64, amplitude: impl Fn(u64) -> f32) {
     let mut writer = AudioWriter::create(path).unwrap();
     let chunk = 480; // 10 ms at 48 kHz
     let total = duration_us * 48 / 1000;
     let mut n = 0u64;
     while n < total {
+        let amplitude = amplitude(n * 1000 / 48);
         let samples: Vec<f32> = (n..n + chunk)
             .flat_map(|i| {
                 let s = (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * amplitude;

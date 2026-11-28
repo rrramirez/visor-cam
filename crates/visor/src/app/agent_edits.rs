@@ -418,6 +418,26 @@ pub fn export_choice(args: &Value, last: ExportChoice) -> Result<ExportChoice, S
     Ok(c)
 }
 
+/// The voiceovers without the `number`th (from 1, as get_recording lists
+/// them).
+pub fn delete_voiceover(p: &Project, number: usize) -> Result<Vec<visor_core::Voiceover>, String> {
+    if p.voiceovers.is_empty() {
+        return Err("This recording has no voiceovers.".into());
+    }
+    let i = number
+        .checked_sub(1)
+        .filter(|&i| i < p.voiceovers.len())
+        .ok_or_else(|| {
+            format!(
+                "number is 1 to {}, as get_recording lists the voiceovers.",
+                p.voiceovers.len()
+            )
+        })?;
+    let mut v = p.voiceovers.clone();
+    v.remove(i);
+    Ok(v)
+}
+
 /// Points a reply's `folder` and `file` at where the folder moved, from
 /// `from` to `to` (a rename that happened after it was made).
 pub fn moved(v: &mut Value, from: &std::path::Path, to: &std::path::Path) {
@@ -502,6 +522,20 @@ pub fn recording_json(
             "x": o.x, "y": o.y, "size": o.size, "mirror": o.mirror,
         },
         "thumbnail_seconds": p.thumbnail_us.map(secs),
+        "voiceovers": p
+            .voiceovers
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                json!({
+                    "number": i + 1,
+                    "pieces": v.pieces.iter().map(|x| json!([secs(x.start_us), secs(x.end_us)])).collect::<Vec<_>>(),
+                    "voice": v.voice.is_some(),
+                    "camera": v.camera.is_some(),
+                    "clip_sound": v.clip_sound,
+                })
+            })
+            .collect::<Vec<_>>(),
         "exports": exports
             .iter()
             .map(|(n, s, writing)| {
@@ -751,6 +785,37 @@ mod tests {
         assert_eq!(v["folder"], "/r/Intro");
         assert_eq!(v["file"], "/r/Intro/exports/Demo.mp4");
         assert_eq!(v["other"], "/r/Demo 2/x");
+    }
+
+    #[test]
+    fn voiceovers_are_listed_and_deleted_by_number() {
+        let mut p = demo();
+        let vo = |start, end| visor_core::Voiceover {
+            pieces: vec![visor_core::VoicePiece {
+                start_us: start * S,
+                end_us: end * S,
+                file_us: 0,
+            }],
+            voice: Some("voice-1.m4a".into()),
+            camera: None,
+            clip_sound: 0.25,
+        };
+        p.voiceovers = vec![vo(1, 3), vo(14, 16)];
+        let v = recording_json(&p, "/tmp/Demo", &[], false);
+        assert_eq!(v["voiceovers"][1]["number"], 2);
+        assert_eq!(v["voiceovers"][1]["pieces"], json!([[14.0, 16.0]]));
+        assert_eq!(v["voiceovers"][0]["voice"], true);
+        assert_eq!(v["voiceovers"][0]["camera"], false);
+        assert_eq!(v["voiceovers"][0]["clip_sound"], 0.25);
+        let left = delete_voiceover(&p, 1).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].pieces[0].start_us, 14 * S);
+        assert!(delete_voiceover(&p, 3).unwrap_err().contains("1 to 2"));
+        assert!(
+            delete_voiceover(&demo(), 1)
+                .unwrap_err()
+                .contains("no voiceovers")
+        );
     }
 
     #[test]

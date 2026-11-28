@@ -416,6 +416,152 @@ pub fn new_project_dir(root: &Path, title: &str) -> std::io::Result<PathBuf> {
     visor_core::project::create_unique_dir(root, &name)
 }
 
+/// Records a voiceover: voice and/or camera, no screen, on one clock that
+/// starts paused, so it begins the instant the video starts playing
+/// ([`resume`](Self::resume)). Files: `voice-N.m4a`, `vcam-N.mp4`.
+pub struct VoiceRecorder {
+    clock: ClockRef,
+    workers: Vec<Worker>,
+    dir: PathBuf,
+    voice: Option<String>,
+    camera: Option<Track>,
+    /// Whatever must stay alive while it records (the streams).
+    _keep: Vec<Box<dyn std::any::Any>>,
+}
+
+/// A camera's frames, and their size.
+pub type CameraFeed = (Receiver<Arc<VideoFrame>>, (u32, u32));
+
+/// What a voiceover recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceRecording {
+    pub duration_us: Micros,
+    pub voice: Option<String>,
+    pub camera: Option<Track>,
+}
+
+impl VoiceRecorder {
+    /// Starts paused, writing what `mic` and `camera` (its frames and their
+    /// size) send into `dir`, numbered `n`.
+    pub fn start(
+        dir: &Path,
+        n: usize,
+        mic: Option<Receiver<Arc<AudioBuffer>>>,
+        camera: Option<CameraFeed>,
+    ) -> anyhow::Result<Self> {
+        if mic.is_none() && camera.is_none() {
+            return Err(anyhow!("nothing to record: no voice and no camera"));
+        }
+        // Paused from the moment it starts: nothing counts until resumed.
+        let now = host_now();
+        let mut clock = MediaClock::start(now);
+        clock.pause(now);
+        let clock: ClockRef = Arc::new(Mutex::new(clock));
+        let mut workers = Vec::new();
+        let mut voice = None;
+        let mut cam = None;
+        if let Some((rx, (w, h))) = camera {
+            let file = format!("vcam-{n}.mp4");
+            let writer = VideoWriter::create(&dir.join(&file), w, h, 30)?;
+            workers.push(spawn_video("camera", rx, writer, clock.clone())?);
+            cam = Some(Track {
+                file,
+                width: Some(w),
+                height: Some(h),
+                fps: Some(30),
+                start_us: None,
+            });
+        }
+        if let Some(rx) = mic {
+            let file = format!("voice-{n}.m4a");
+            let writer = AudioWriter::create(&dir.join(&file))?;
+            workers.push(spawn_audio("mic", rx, writer, clock.clone())?);
+            voice = Some(file);
+        }
+        Ok(Self {
+            clock,
+            workers,
+            dir: dir.to_path_buf(),
+            voice,
+            camera: cam,
+            _keep: Vec::new(),
+        })
+    }
+
+    /// Keeps `thing` (an open device stream) alive while it records.
+    pub fn keep(&mut self, thing: Box<dyn std::any::Any>) {
+        self._keep.push(thing);
+    }
+
+    pub fn resume(&self) {
+        self.clock.lock().unwrap().resume(host_now());
+    }
+
+    /// Recorded time so far.
+    pub fn elapsed(&self) -> Micros {
+        self.clock.lock().unwrap().elapsed(host_now())
+    }
+
+    fn join(&mut self, stop_at: Micros) -> Vec<&'static str> {
+        for w in &self.workers {
+            let _ = w.stop.send(stop_at);
+        }
+        let mut failed = Vec::new();
+        for w in self.workers.drain(..) {
+            match w.handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(track = w.track, "voiceover track failed: {e:#}");
+                    failed.push(w.track);
+                }
+                Err(_) => failed.push(w.track),
+            }
+        }
+        failed
+    }
+
+    /// Stops and says what it recorded; a track that failed is left out.
+    pub fn stop(mut self) -> anyhow::Result<VoiceRecording> {
+        let stop_at = host_now();
+        let duration_us = self.clock.lock().unwrap().elapsed(stop_at);
+        let failed = self.join(stop_at);
+        let mut made = VoiceRecording {
+            duration_us,
+            voice: self.voice.take(),
+            camera: self.camera.take(),
+        };
+        if failed.contains(&"mic") {
+            made.voice = None;
+        }
+        if failed.contains(&"camera") {
+            made.camera = None;
+        }
+        if made.voice.is_none() && made.camera.is_none() {
+            return Err(anyhow!("the voiceover failed to record"));
+        }
+        Ok(made)
+    }
+
+    /// Stops and deletes what it recorded.
+    pub fn discard(mut self) {
+        self.join(host_now());
+        for file in [self.voice.take(), self.camera.take().map(|c| c.file)]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(self.dir.join(file));
+        }
+    }
+}
+
+impl Drop for VoiceRecorder {
+    fn drop(&mut self) {
+        if !self.workers.is_empty() {
+            self.join(host_now());
+        }
+    }
+}
+
 fn spawn_video<F: Borrow<VideoFrame> + Send + 'static>(
     track: &'static str,
     rx: Receiver<F>,
@@ -544,6 +690,62 @@ fn run_until_stopped<T, W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_voiceover_records_voice_and_camera_without_a_screen() {
+        let dir = std::env::temp_dir().join(format!("visor-voice-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cam_tx, cam_rx) = bounded::<Arc<VideoFrame>>(64);
+        let (mic_tx, mic_rx) = bounded::<Arc<AudioBuffer>>(64);
+        let rec = VoiceRecorder::start(&dir, 1, Some(mic_rx), Some((cam_rx, (64, 48)))).unwrap();
+        // Before resuming nothing counts.
+        assert_eq!(rec.elapsed(), 0);
+        rec.resume();
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(600) {
+            let _ = cam_tx.send(Arc::new(VideoFrame {
+                host_ts: host_now(),
+                width: 64,
+                height: 48,
+                format: visor_core::PixelFormat::Nv12,
+                planes: vec![
+                    visor_core::Plane {
+                        data: vec![100u8; 64 * 48].into(),
+                        stride: 64,
+                    },
+                    visor_core::Plane {
+                        data: vec![128u8; 64 * 24].into(),
+                        stride: 64,
+                    },
+                ],
+            }));
+            let _ = mic_tx.send(Arc::new(AudioBuffer {
+                host_ts: host_now(),
+                sample_rate: 48_000,
+                channels: 2,
+                samples: vec![0.1; 960],
+            }));
+            thread::sleep(Duration::from_millis(10));
+        }
+        let made = rec.stop().unwrap();
+        assert!(made.duration_us >= 500_000, "{}", made.duration_us);
+        assert_eq!(made.voice.as_deref(), Some("voice-1.m4a"));
+        let cam = made.camera.unwrap();
+        assert_eq!(
+            (cam.file.as_str(), cam.width, cam.height),
+            ("vcam-1.mp4", Some(64), Some(48))
+        );
+        assert!(dir.join("voice-1.m4a").metadata().unwrap().len() > 0);
+        assert!(dir.join("vcam-1.mp4").metadata().unwrap().len() > 0);
+
+        // Discarded: nothing left.
+        let (_cam, cam_rx) = bounded::<Arc<VideoFrame>>(8);
+        let rec = VoiceRecorder::start(&dir, 2, None, Some((cam_rx, (64, 48)))).unwrap();
+        rec.discard();
+        assert!(!dir.join("vcam-2.mp4").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A screen that sends a frame every 20 ms until stopped.
     struct FakeScreen((u32, u32));

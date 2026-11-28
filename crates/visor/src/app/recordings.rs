@@ -26,6 +26,74 @@ impl App {
         platform::activate();
     }
 
+    /// Starts a recording from video files the user picks, and opens it
+    /// in the editor once they're copied in.
+    pub fn new_from_video(&self) {
+        platform::activate();
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title("Start from videos")
+            .add_filter("Videos", &visor_media::import::picker_extensions())
+            .pick_files()
+        else {
+            return;
+        };
+        let root = self.settings.borrow().save_dir.clone();
+        std::thread::spawn(move || {
+            let made = visor_media::import::new_recording(
+                &root,
+                &paths,
+                None,
+                &mut |_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+            post(move |app| match made {
+                Ok(dir) => {
+                    app.refresh_tray();
+                    app.open_editor(dir);
+                }
+                Err(e) => {
+                    tracing::warn!("couldn't start from videos: {e:#}");
+                    let _ = rfd::MessageDialog::new()
+                        .set_title("Visor")
+                        .set_description(format!("Couldn't start from those videos: {e:#}"))
+                        .show();
+                }
+            });
+        });
+    }
+
+    /// The mic stream the recorder panel has open, if it's device `id`
+    /// (a device opened twice may not work).
+    pub(crate) fn shared_mic(&self, id: &str) -> Option<Arc<MicStream>> {
+        self.devices
+            .borrow()
+            .mic
+            .as_ref()
+            .filter(|(i, _)| i == id)
+            .map(|(_, s)| s.clone())
+    }
+
+    /// Likewise for the camera.
+    pub(crate) fn shared_camera(&self, id: &str) -> Option<Arc<CameraStream>> {
+        self.devices
+            .borrow()
+            .camera
+            .as_ref()
+            .filter(|(i, _)| i == id)
+            .map(|(_, s)| s.clone())
+    }
+
+    /// Whether Visor may use the mic (`camera` false) or the camera; asks
+    /// when it hasn't been decided yet.
+    pub(crate) fn device_allowed(&self, camera: bool) -> bool {
+        let which = if camera {
+            Permission::Camera
+        } else {
+            Permission::Microphone
+        };
+        self.ensure_permission(which, |_| {})
+    }
+
     /// Lists the recordings again, if the Recordings window is showing.
     pub fn library_changed(&self) {
         let Some(w) = self.library.borrow().clone().filter(|w| w.is_visible()) else {

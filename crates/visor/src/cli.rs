@@ -20,6 +20,8 @@ Control the running Visor (turn on agent control in Preferences first):
   status                      what Visor is doing
   sources                     displays, windows, apps, cameras and microphones
   list                        recordings in the save folder, newest first
+  import FILE... [--name N]   start a recording from video files (a phone's screen
+                              recording, say), as its clips; prints its folder
   start [options]             start recording; returns once it's recording
       --name NAME             name the recording (and its folder)
       --screen [DISPLAY]      the whole screen (the main one by default)
@@ -56,6 +58,7 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   set [--name N] [--speed X] [--thumbnail TIME|first] [--bubble on|off]
       [--bubble-shape circle|rounded] [--bubble-x X] [--bubble-y Y]
       [--bubble-size S] [--mirror on|off]
+  voiceover delete N          delete voiceover N (as info lists them)
   export [--format mp4|webm|webm_av1|gif] [--size original|1080p|720p]
          [--reduce-noise on|off] [--even-volume on|off]   waits until it's written
   add PATH...                 add video files (MP4, MOV, M4V, MKV, WebM) or other
@@ -111,6 +114,14 @@ pub fn run(args: &[String]) -> Option<i32> {
                 }
             });
         }
+        "import" => match import_args(rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor import: {e}\n\n{USAGE}");
+                return Some(2);
+            }
+        },
         "add" => match add_args(rest) {
             Ok(command) => command,
             Err(e) => {
@@ -119,16 +130,15 @@ pub fn run(args: &[String]) -> Option<i32> {
                 return Some(2);
             }
         },
-        "info" | "split" | "move" | "bring-back" | "marker" | "blur" | "set" | "export" => {
-            match finish_args(first, rest) {
-                Ok(command) => command,
-                Err(e) => {
-                    attach_console();
-                    eprintln!("visor {first}: {e}\n\n{USAGE}");
-                    return Some(2);
-                }
+        "info" | "split" | "move" | "bring-back" | "marker" | "blur" | "set" | "export"
+        | "voiceover" => match finish_args(first, rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor {first}: {e}\n\n{USAGE}");
+                return Some(2);
             }
-        }
+        },
         "remove" | "trim" | "restore" | "open" | "dead-time" => match edit_args(first, rest) {
             Ok(command) => command,
             Err(e) => {
@@ -292,6 +302,24 @@ fn edit_args(name: &str, args: &[String]) -> Result<Value, String> {
     Ok(command)
 }
 
+fn import_args(args: &[String]) -> Result<Value, String> {
+    let mut command = json!({"command": "create_recording"});
+    let mut paths = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--name" {
+            command["name"] = args.next().ok_or("--name needs a value")?.as_str().into();
+        } else {
+            paths.push(arg.clone());
+        }
+    }
+    if paths.is_empty() {
+        return Err("give the video files to start from".into());
+    }
+    command["paths"] = paths.into();
+    Ok(command)
+}
+
 fn add_args(args: &[String]) -> Result<Value, String> {
     let mut command = json!({"command": "add_video"});
     let mut paths = Vec::new();
@@ -429,6 +457,17 @@ fn finish_args(name: &str, args: &[String]) -> Result<Value, String> {
                 c["end_seconds"] = seconds_arg(v)?.into();
             }
             c
+        }
+        "voiceover" => {
+            known(&[])?;
+            match (words.first(), words.get(1)) {
+                (Some(&"delete"), Some(n)) => json!({
+                    "command": "edit_voiceovers",
+                    "action": "delete",
+                    "number": n.parse::<u64>().map_err(|_| "voiceover delete N (1, 2, … as info lists them)")?,
+                }),
+                _ => return Err("voiceover delete N".into()),
+            }
         }
         "set" => {
             known(&[
@@ -613,7 +652,7 @@ pub fn call(command: &Value) -> Value {
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
-            Some("start_recording" | "list_sources" | "list_recordings") => {
+            Some("start_recording" | "list_sources" | "list_recordings" | "create_recording") => {
                 launch_and_call(command)
             }
             // A fresh Visor knows no last recording: only a named one helps.
@@ -630,7 +669,8 @@ pub fn call(command: &Value) -> Value {
                 | "edit_markers"
                 | "edit_blurs"
                 | "set_recording"
-                | "export_recording",
+                | "export_recording"
+                | "edit_voiceovers",
             ) if command.get("folder").is_some() => launch_and_call(command),
             Some(
                 "remove_from_recording"
@@ -645,7 +685,8 @@ pub fn call(command: &Value) -> Value {
                 | "edit_markers"
                 | "edit_blurs"
                 | "set_recording"
-                | "export_recording",
+                | "export_recording"
+                | "edit_voiceovers",
             ) => {
                 json!({
                     "ok": false,
@@ -929,6 +970,11 @@ mod tests {
             c("export --format webm --size 720p --reduce-noise on").unwrap(),
             json!({"command": "export_recording", "format": "webm", "size": "720p", "reduce_noise": true})
         );
+        assert_eq!(
+            c("voiceover delete 2").unwrap(),
+            json!({"command": "edit_voiceovers", "action": "delete", "number": 2})
+        );
+        assert!(c("voiceover delete").is_err());
         assert!(c("split").is_err());
         assert!(c("marker rename 5").is_err());
         assert!(c("blur add 0.1 0.2").is_err());
@@ -939,6 +985,15 @@ mod tests {
             json!({"command": "remove_from_recording", "ranges": [[2.0, 3.0], [5.0, 6.5]]})
         );
         assert!(edit_args("remove", &args("2 3 5")).is_err());
+    }
+
+    #[test]
+    fn import_starts_a_recording_from_videos() {
+        assert_eq!(
+            import_args(&args("a.mov b.mp4 --name Tour")).unwrap(),
+            json!({"command": "create_recording", "paths": ["a.mov", "b.mp4"], "name": "Tour"})
+        );
+        assert!(import_args(&args("--name Tour")).is_err());
     }
 
     #[test]
