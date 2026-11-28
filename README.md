@@ -101,7 +101,16 @@ in Preferences) as separate tracks plus `project.json`, so edits are
 non-destructive and you can always re-export. Once you name a recording, its
 folder takes that name.
 
+**Recordings window:** the recorder panel's folder button, or *Recordings…* in
+the menu bar, shows all your recordings with a thumbnail, date and length,
+newest first. Double-click one (or press Return) to open it in the editor;
+click the name of the selected one to rename it; select several (⌘-click,
+⇧-click) and press ⌫ to move them to the Trash. A card's menu also shows it in
+Finder or shows its exports. Recordings being recorded or open in an editor
+say so, and can't be moved to the Trash.
+
 Command line: `visor --edit <recording folder>` opens a recording;
+`visor --library` opens the Recordings window;
 `visor --record [--stop-after SECONDS]` starts recording with the saved
 preferences as soon as the saved camera is ready, optionally stopping after
 that many seconds of recorded time.
@@ -127,6 +136,7 @@ settings. Agents that run shell commands can use the command line instead:
 
 ```sh
 visor sources                                # what can be recorded
+visor list                                   # recordings, newest first
 visor start --window "Safari" --name "Safari tour"  # returns once recording
 visor mark "Step 2: open settings"           # shown on the editor's timeline
 visor pause; visor resume

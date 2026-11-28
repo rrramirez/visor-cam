@@ -13,6 +13,7 @@ pub enum Action {
     StopRecording,
     OpenRecent(PathBuf),
     OpenFolder,
+    Library,
     Preferences,
     Support,
     CheckForUpdates,
@@ -34,6 +35,7 @@ const ID_NEW: &str = "new";
 const ID_PAUSE: &str = "pause";
 const ID_STOP: &str = "stop";
 const ID_FOLDER: &str = "folder";
+const ID_LIBRARY: &str = "library";
 const ID_PREFS: &str = "prefs";
 const ID_UPDATES: &str = "updates";
 const ID_SUPPORT: &str = "support";
@@ -52,6 +54,7 @@ impl Tray {
             &pause,
             &stop,
             &PredefinedMenuItem::separator(),
+            &MenuItem::with_id(ID_LIBRARY, "Recordings…", true, None),
             &recent_menu,
             &MenuItem::with_id(ID_FOLDER, "Open Recordings Folder", true, None),
             &PredefinedMenuItem::separator(),
@@ -100,6 +103,7 @@ impl Tray {
             ID_PAUSE => Action::TogglePause,
             ID_STOP => Action::StopRecording,
             ID_FOLDER => Action::OpenFolder,
+            ID_LIBRARY => Action::Library,
             ID_PREFS => Action::Preferences,
             ID_UPDATES => Action::CheckForUpdates,
             ID_SUPPORT => Action::Support,

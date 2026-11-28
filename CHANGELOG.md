@@ -4,6 +4,11 @@ What's new in each version of Visor. The release script publishes the
 section for the version being released as its GitHub release notes, which
 is also what the update window shows.
 
+## Unreleased
+
+### New
+- **Recordings window:** all your recordings in one place, newest first, each with its thumbnail, date and length. Open it from the recorder's folder button or *Recordings…* in the menu bar. Double-click one to open it in the editor, click its name to rename it, show it in Finder or its exports, or select several and move them to the Trash. Recordings being recorded or open in an editor are marked, and stay out of the Trash. Agents can list recordings too: `list_recordings`, or `visor list`.
+
 ## 0.9.0
 
 ### New

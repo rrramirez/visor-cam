@@ -4,6 +4,7 @@ pub mod clock;
 pub mod config;
 pub mod edit;
 pub mod layout;
+pub mod library;
 pub mod media;
 pub mod project;
 pub mod time;

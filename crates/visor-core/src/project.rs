@@ -700,6 +700,32 @@ fn is_plain_file_name(name: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
+/// `path` resolved to its real, absolute form, as editors, agents and the
+/// Recordings window compare folders by: links followed, and on Windows
+/// without the `\\?\` prefix `canonicalize` adds to drive paths, which
+/// Explorer and other programs don't take.
+pub fn real_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(without_verbatim_prefix(path.canonicalize()?))
+}
+
+/// `\\?\C:\…` as `C:\…`; anything else (a network path, a path
+/// that needs the prefix to be valid, other platforms) as it is.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    match text.strip_prefix(r"\\?\") {
+        Some(rest)
+            if rest.len() < 260
+                && rest.as_bytes().get(1) == Some(&b':')
+                && rest.as_bytes()[0].is_ascii_alphabetic() =>
+        {
+            PathBuf::from(rest)
+        }
+        _ => path,
+    }
+}
+
 /// Lists project folders under `root`, newest first by when they were
 /// recorded. This is a plain directory scan; there is no library database.
 pub fn list_projects(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -774,8 +800,9 @@ pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     if dir.is_symlink() {
         return Ok(None);
     }
-    let dir = dir.canonicalize()?;
-    let root = root.canonicalize()?;
+    // Real paths, as the folder is known elsewhere (see `real_path`).
+    let dir = real_path(dir)?;
+    let root = real_path(root)?;
     if dir.parent() != Some(root.as_path()) {
         return Ok(None);
     }
@@ -792,7 +819,7 @@ pub fn rename_to_title(dir: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
     // file systems), which a rename can still change.
     let target = numbered(&name)
         .map(|n| root.join(n))
-        .find(|t| t.symlink_metadata().is_err() || t.canonicalize().ok().as_ref() == Some(&dir))
+        .find(|t| t.symlink_metadata().is_err() || real_path(t).ok().as_ref() == Some(&dir))
         .expect("numbered names never run out");
     fs::rename(&dir, &target)?;
     Ok(Some(target))
@@ -902,6 +929,26 @@ mod tests {
     }
 
     #[test]
+    fn real_paths_drop_windows_verbatim_prefixes() {
+        let p = |s: &str| without_verbatim_prefix(PathBuf::from(s));
+        assert_eq!(
+            p(r"\\?\C:\Users\x\Videos\Visor"),
+            PathBuf::from(r"C:\Users\x\Videos\Visor")
+        );
+        // A network share keeps it: dropping it would change the path.
+        assert_eq!(
+            p(r"\\?\UNC\server\share"),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(
+            p("/Users/x/Movies/Visor"),
+            PathBuf::from("/Users/x/Movies/Visor")
+        );
+        let here = std::env::temp_dir();
+        assert_eq!(real_path(&here).unwrap(), here.canonicalize().unwrap());
+    }
+
+    #[test]
     fn folder_names_are_safe() {
         assert_eq!(folder_name(" Demo: a/b? ").as_deref(), Some("Demo- a-b-"));
         assert_eq!(folder_name("..hidden.").as_deref(), Some("hidden"));
@@ -939,9 +986,12 @@ mod tests {
             "Demo",
             "2026-10-02T10:00:00Z",
         );
-        let root = root.canonicalize().unwrap();
+        // Given as configured (on macOS, /var/… for /private/var/…): the
+        // new folder comes back as its real path, as editors know it.
+        let given = root.clone();
+        let root = real_path(&root).unwrap();
 
-        let a = rename_to_title(&a, &root).unwrap().unwrap();
+        let a = rename_to_title(&a, &given).unwrap().unwrap();
         assert_eq!(a, root.join("Demo"));
         // Taken: numbered. Already named: left alone.
         let b = rename_to_title(&b, &root).unwrap().unwrap();

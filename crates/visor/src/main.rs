@@ -3,6 +3,7 @@
 //! Usage:
 //!   visor                         menu bar app; opens the recorder panel
 //!   visor --edit <folder>         open a recording in the editor
+//!   visor --library               open the Recordings window
 //!   visor --record [--stop-after S]
 //!                                 start recording right away with the saved
 //!                                 preferences (optionally stopping after S s)
@@ -17,6 +18,7 @@ mod app;
 mod cli;
 mod editor;
 mod instance;
+mod library;
 mod mcp;
 mod platform;
 mod settings;
@@ -45,6 +47,7 @@ fn main() -> anyhow::Result<()> {
     let request = match &args {
         Args::Edit(dir) => instance::Request::Edit(dir.clone()),
         Args::Background => instance::Request::Background,
+        Args::Library => instance::Request::Library,
         _ => instance::Request::ShowPanel,
     };
     let instance = instance::claim(&request);
@@ -77,6 +80,7 @@ fn main() -> anyhow::Result<()> {
             app::post(move |app| {
                 app.when_ready(move |app| match request {
                     instance::Request::ShowPanel => app.open_panel(),
+                    instance::Request::Library => app.open_library(),
                     instance::Request::Background => {}
                     instance::Request::Edit(dir) => app.open_editor(dir),
                     instance::Request::Control(command, reply) => app.agent_command(command, reply),
@@ -94,6 +98,7 @@ fn main() -> anyhow::Result<()> {
             Args::Edit(dir) => app.open_editor(dir),
             Args::Record { stop_after } => app.record_when_ready(stop_after),
             Args::Panel => app.open_panel(),
+            Args::Library => app.open_library(),
             Args::Background => {}
         }
         // After crash recovery has looked for interrupted recordings: an
@@ -109,6 +114,7 @@ enum Args {
     /// Started for an agent: just the menu bar icon.
     Background,
     Edit(PathBuf),
+    Library,
     Record {
         stop_after: Option<u64>,
     },
@@ -134,6 +140,7 @@ fn parse_args() -> Args {
                 parsed = Args::Record { stop_after: secs };
             }
             "--background" => parsed = Args::Background,
+            "--library" => parsed = Args::Library,
             "--version" => {
                 println!("visor {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

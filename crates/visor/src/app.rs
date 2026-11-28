@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod agent;
+mod recordings;
 
 /// Work waiting for startup to finish (see `App::when_ready`).
 type Deferred = Box<dyn FnOnce(&App)>;
@@ -77,6 +78,8 @@ pub struct App {
     session: RefCell<Session>,
     editors: RefCell<Vec<Rc<EditorWindow>>>,
     prefs: RefCell<Option<Preferences>>,
+    /// The Recordings window, once opened.
+    library: RefCell<Option<Rc<crate::library::LibraryWindow>>>,
     area_window: RefCell<Option<AreaSelector>>,
     /// Border around the display chosen in the panel, with several displays.
     screen_highlight: RefCell<Option<Highlight>>,
@@ -184,6 +187,7 @@ impl App {
             session: RefCell::default(),
             editors: RefCell::default(),
             prefs: RefCell::default(),
+            library: RefCell::default(),
             area_window: RefCell::default(),
             screen_highlight: RefCell::default(),
             next_start_id: std::cell::Cell::new(1),
@@ -382,6 +386,7 @@ impl App {
             Action::StopRecording => self.stop_recording(false),
             Action::OpenRecent(dir) => self.open_editor(dir),
             Action::OpenFolder => platform::open_folder(&self.settings.borrow().save_dir),
+            Action::Library => self.open_library(),
             Action::Preferences => self.open_preferences(),
             Action::Support => platform::open_url(SUPPORT_URL),
             Action::CheckForUpdates => {
@@ -415,6 +420,9 @@ impl App {
     }
 
     fn refresh_tray(&self) {
+        // Whatever changed the menu's recent recordings may change the
+        // Recordings window too.
+        self.library_changed();
         let recent = self.recent();
         let (recording, paused) = match &*self.session.borrow() {
             Session::Recording { recorder, .. } => (true, recorder.is_paused()),
@@ -685,7 +693,7 @@ impl App {
         ui.on_mic_changed(|i| app().choose_mic(i as usize));
         ui.on_start(|| app().start_recording());
         ui.on_open_preferences(|| app().open_preferences());
-        ui.on_open_folder(|| platform::open_folder(&app().settings.borrow().save_dir));
+        ui.on_open_folder(|| app().open_library());
         ui.on_open_permission_settings(|| {
             #[cfg(target_os = "macos")]
             {
@@ -1871,7 +1879,7 @@ impl App {
     /// when some of it is gone (or it never saved that). Its editor is
     /// hidden meanwhile, and comes back with the take as its last clip.
     pub fn record_more(&self, dir: PathBuf) {
-        let dir = dir.canonicalize().unwrap_or(dir);
+        let dir = visor_core::project::real_path(&dir).unwrap_or(dir);
         let busy = !matches!(*self.session.borrow(), Session::Idle)
             || self.pending_start.borrow().is_some()
             || self.more_cancelled.borrow().as_ref() == Some(&dir);
@@ -1906,7 +1914,7 @@ impl App {
     fn show_editor(&self, dir: PathBuf, name_first: bool) {
         // One path per folder, however it was reached (symlinks, /var vs
         // /private/var), so a recording never has two editors.
-        let dir = dir.canonicalize().unwrap_or(dir);
+        let dir = visor_core::project::real_path(&dir).unwrap_or(dir);
         // Not while recording more onto it, or putting it back after a
         // cancelled take: its editor is waiting for that.
         if self.more.borrow().as_ref() == Some(&dir)
@@ -1923,6 +1931,8 @@ impl App {
             Ok(editor) => {
                 self.editors.borrow_mut().push(editor);
                 self.update_dock();
+                // It's Open there now.
+                self.library_changed();
                 platform::activate();
             }
             Err(e) => {
@@ -1998,8 +2008,9 @@ impl App {
         }
     }
 
-    fn update_dock(&self) {
+    pub(crate) fn update_dock(&self) {
         let regular = !self.editors.borrow().is_empty()
+            || self.library_visible()
             || self
                 .prefs
                 .borrow()

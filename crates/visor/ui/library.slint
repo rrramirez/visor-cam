@@ -1,0 +1,360 @@
+import { ScrollView, LineEdit } from "std-widgets.slint";
+import { Theme, Glyph, Icons } from "theme.slint";
+import { IconButton, PillButton } from "widgets.slint";
+
+// One recording in the Recordings window.
+export struct RecordingCard {
+    title: string,
+    // "Nov 27, 2026 · 1:23", or why it can't be opened.
+    detail: string,
+    thumb: image,
+    has-thumb: bool,
+    readable: bool,
+    // "Open", "Recording", or nothing.
+    badge: string,
+    selected: bool,
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 28px;
+    border-radius: Theme.radius-small;
+    background: t.has-hover && root.enabled ? Theme.surface-3 : transparent;
+    Text {
+        x: 10px;
+        text: root.text;
+        color: root.enabled ? Theme.text : Theme.faint;
+        vertical-alignment: center;
+    }
+    t := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Library inherits Window {
+    title: "Visor Recordings";
+    preferred-width: 940px;
+    preferred-height: 640px;
+    min-width: 420px;
+    min-height: 320px;
+    background: Theme.bg;
+    default-font-size: Theme.font;
+
+    in property <[RecordingCard]> cards;
+    // How many cards are selected: a click on a name renames only a lone one.
+    in property <int> selected-count;
+    // The card whose name is being edited, or -1.
+    in-out property <int> renaming: -1;
+    // A refusal or failure to show above the grid.
+    in property <string> note;
+    in property <string> file-manager: "Finder";
+    // Cards per row, for the arrow keys.
+    out property <int> columns: max(1, floor((grid.width - 2 * pad + gap) / (card-width + gap)));
+
+    // `pick`: 0 only this card, 1 toggle (⌘), 2 range (⇧).
+    callback card-clicked(int, int);
+    callback open(int);
+    callback step(int);
+    callback trash();
+    callback rename(int, string);
+    // The name of card i is edited (Rust keeps which recording), or no longer.
+    callback start-rename(int);
+    callback end-rename();
+    callback reveal(int);
+    callback reveal-exports(int);
+    callback reveal-all();
+    callback new-recording();
+    // Right-click or ⋯ on a card: it's selected (if it wasn't) before the menu shows.
+    callback menu-for(int);
+
+    property <length> pad: 20px;
+    property <length> gap: 16px;
+    property <length> card-width: 200px;
+    property <length> thumb-height: self.card-width * 10 / 16;
+    property <length> card-height: self.thumb-height + 58px;
+    property <int> menu-card: -1;
+    // A plain click on the selected card's name renames it, unless a second
+    // click follows (a double-click opens it), as in Finder.
+    property <int> rename-pending: -1;
+    rename-timer := Timer {
+        interval: 500ms;
+        running: root.rename-pending >= 0;
+        triggered => {
+            root.start-rename(root.rename-pending);
+            root.rename-pending = -1;
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.renaming >= 0) { return reject; }
+            root.rename-pending = -1;
+            if (event.text == Key.LeftArrow) { root.step(-1); return accept; }
+            if (event.text == Key.RightArrow) { root.step(1); return accept; }
+            if (event.text == Key.UpArrow) { root.step(-root.columns); return accept; }
+            if (event.text == Key.DownArrow) { root.step(root.columns); return accept; }
+            if (event.text == Key.Return) { root.open(-1); return accept; }
+            if (event.text == Key.Backspace || event.text == Key.Delete) { root.trash(); return accept; }
+            reject
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                padding: root.pad;
+                padding-bottom: 8px;
+                spacing: 10px;
+                Text {
+                    text: "Recordings";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.cards.length == 1 ? "1 recording" : root.cards.length + " recordings";
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                IconButton {
+                    icon: Icons.folder;
+                    tooltip: "Show in " + root.file-manager;
+                    clicked => { root.reveal-all(); }
+                }
+                PillButton {
+                    horizontal-stretch: 0;
+                    primary: true;
+                    text: "New Recording";
+                    icon: Icons.record;
+                    clicked => { root.new-recording(); }
+                }
+            }
+
+            if root.note != "": HorizontalLayout {
+                padding-left: root.pad;
+                padding-right: root.pad;
+                Text {
+                    horizontal-stretch: 1;
+                    // Doesn't widen the window, however long it is.
+                    min-width: 0;
+                    text: root.note;
+                    color: Theme.warning;
+                    wrap: word-wrap;
+                }
+            }
+
+            grid := Rectangle {
+                if root.cards.length == 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    Text {
+                        text: "No recordings yet";
+                        font-size: 16px;
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "Start one with New Recording.";
+                        color: Theme.faint;
+                        horizontal-alignment: center;
+                    }
+                }
+                ScrollView {
+                    viewport-height: max(self.visible-height,
+                        ceil(root.cards.length / root.columns) * (root.card-height + root.gap) + root.pad);
+                    viewport-width: self.visible-width;
+                    // A click on the background lets go of the selection.
+                    TouchArea {
+                        clicked => { root.rename-pending = -1; root.card-clicked(-1, 0); keys.focus(); }
+                    }
+                    for card[i] in root.cards: card-box := Rectangle {
+                        // Where its menu opens: under the pointer, or the ⌄ button.
+                        property <length> menu-x;
+                        property <length> menu-y;
+                        x: root.pad + mod(i, root.columns) * (root.card-width + root.gap);
+                        y: floor(i / root.columns) * (root.card-height + root.gap);
+                        width: root.card-width;
+                        height: root.card-height;
+                        border-radius: Theme.radius;
+                        background: card.selected ? Theme.surface-3 : area.has-hover ? Theme.surface-2 : transparent;
+                        border-width: card.selected ? 2px : 0px;
+                        border-color: Theme.record;
+                        opacity: card.readable ? 1 : 0.6;
+
+                        area := TouchArea {
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.rename-pending = -1;
+                                    if (event.button == PointerEventButton.right) {
+                                        card-box.menu-x = self.mouse-x;
+                                        card-box.menu-y = self.mouse-y;
+                                        root.menu-for(i);
+                                        root.menu-card = i;
+                                        menu.show();
+                                    } else if (event.button == PointerEventButton.left) {
+                                        root.card-clicked(i, event.modifiers.meta || event.modifiers.control ? 1 : event.modifiers.shift ? 2 : 0);
+                                        keys.focus();
+                                    }
+                                }
+                            }
+                            double-clicked => { root.open(i); }
+                        }
+
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 6px;
+                            Rectangle {
+                                height: root.thumb-height - 16px;
+                                border-radius: Theme.radius-small;
+                                background: #000;
+                                clip: true;
+                                if card.has-thumb: Image {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: card.thumb;
+                                    image-fit: contain;
+                                }
+                                if !card.readable: Text {
+                                    text: "Can't be read";
+                                    color: Theme.faint;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                if card.badge != "": Rectangle {
+                                    x: 6px;
+                                    y: 6px;
+                                    width: badge-text.preferred-width + 12px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: card.badge == "Recording" ? Theme.record : #000000b0;
+                                    badge-text := Text {
+                                        text: card.badge;
+                                        color: white;
+                                        font-size: Theme.font-small;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                if root.renaming != i: Text {
+                                    text: card.title;
+                                    color: Theme.text;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind != PointerEventKind.down) { return; }
+                                            if (event.button == PointerEventButton.right) {
+                                                card-box.menu-x = self.absolute-position.x - card-box.absolute-position.x + self.mouse-x;
+                                                card-box.menu-y = self.absolute-position.y - card-box.absolute-position.y + self.mouse-y;
+                                                root.menu-for(i);
+                                                root.menu-card = i;
+                                                menu.show();
+                                            } else if (event.button == PointerEventButton.left) {
+                                                if (event.modifiers.meta || event.modifiers.control || event.modifiers.shift) {
+                                                    root.rename-pending = -1;
+                                                    root.card-clicked(i, event.modifiers.meta || event.modifiers.control ? 1 : 2);
+                                                } else if (card.selected && root.selected-count == 1 && card.readable && card.badge != "Recording") {
+                                                    root.rename-pending = i;
+                                                } else {
+                                                    root.rename-pending = -1;
+                                                    root.card-clicked(i, 0);
+                                                }
+                                                keys.focus();
+                                            }
+                                        }
+                                        double-clicked => {
+                                            root.rename-pending = -1;
+                                            root.open(i);
+                                        }
+                                    }
+                                }
+                                if root.renaming == i: name := LineEdit {
+                                    text: card.title;
+                                    init => { self.focus(); self.select-all(); }
+                                    accepted(text) => {
+                                        root.rename(i, text);
+                                        keys.focus();
+                                    }
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Escape) {
+                                            root.end-rename();
+                                            keys.focus();
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
+                                if root.renaming != i: IconButton {
+                                    width: 22px;
+                                    height: 22px;
+                                    icon: Icons.chevron-down;
+                                    tooltip: "More";
+                                    clicked => {
+                                        root.rename-pending = -1;
+                                        card-box.menu-x = root.card-width - 200px;
+                                        card-box.menu-y = root.card-height - 30px;
+                                        root.menu-for(i);
+                                        root.menu-card = i;
+                                        menu.show();
+                                    }
+                                }
+                            }
+                            Text {
+                                text: card.detail;
+                                color: Theme.faint;
+                                font-size: Theme.font-small;
+                                overflow: elide;
+                            }
+                        }
+
+                        menu := PopupWindow {
+                            x: card-box.menu-x;
+                            y: card-box.menu-y;
+                            width: 200px;
+                            close-policy: close-on-click;
+                            Rectangle {
+                                background: Theme.surface-2;
+                                border-radius: Theme.radius-small;
+                                border-width: 1px;
+                                border-color: Theme.surface-3;
+                                VerticalLayout {
+                                    padding: 4px;
+                                    MenuRow {
+                                        text: "Open";
+                                        enabled: card.readable && card.badge != "Recording";
+                                        clicked => { root.open(i); }
+                                    }
+                                    MenuRow {
+                                        text: "Rename";
+                                        enabled: card.readable && card.badge != "Recording";
+                                        clicked => { root.card-clicked(i, 0); root.start-rename(i); }
+                                    }
+                                    MenuRow {
+                                        text: "Show in " + root.file-manager;
+                                        clicked => { root.reveal(i); }
+                                    }
+                                    MenuRow {
+                                        text: "Show exports";
+                                        clicked => { root.reveal-exports(i); }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.surface-3; }
+                                    MenuRow {
+                                        text: "Move to Trash";
+                                        clicked => { root.trash(); keys.focus(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

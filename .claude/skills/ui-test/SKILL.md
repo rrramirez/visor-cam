@@ -46,11 +46,26 @@ $U launch --edit "$d"           # debug build; --dmg runs dist/Visor.app (build 
 $U windows                      # id x y w h layer title, e.g. 8770 274 74 1180 832 0 Visor — Demo
 ```
 
-Test what ships: after `scripts/package-macos.sh`, `launch --dmg` runs the packaged app with
-its own FFmpeg (which decoders exist matters for imported videos). For a hand-made project
-with takes, markers or blurs, edit its `project.json` before launching.
+Prefer the packaged app: `VISOR_NOTARY_PROFILE=skip scripts/package-macos.sh` (a couple of
+minutes; skips notarizing), then `launch --dmg`. It's what ships (its own FFmpeg decoders
+matter for imported videos), and macOS lets System Events bring an app bundle forward, which
+it often refuses for the bare debug binary. For a hand-made project with takes, markers or
+blurs, edit its `project.json` before launching.
+
+Open a window that can come forward: `--edit <folder>` or `--library`. With only the
+recorder panel showing, Visor is a menu bar app: it can't be brought forward, and clicks on
+the panel don't register.
 
 ## 3. Drive and look
+
+**Other windows in the way.** `click`, `dclick`, `drag` and `scroll` refuse unless the window
+under the point is the test instance's (or the drag source's), and `key`/`type` refuse unless
+it's the frontmost app, so input never lands in the user's apps. When `front` can't bring
+Visor forward over a window covering it, ask the user: hide that app (System Events
+`set visible of process "…" to false`, and show it again after), or let them move it. Check
+`swift`'s window order (`CGWindowListCopyWindowInfo`) after hiding one app: the next one
+behind may now cover the test window. Don't work around a refusal by calling
+`target/ui-test/input` directly.
 
 ```bash
 $U front                        # before every input: the terminal takes focus back after each command
@@ -93,6 +108,14 @@ front, so the padded file still reads fine) and delete it afterwards.
   them. Pickers and the countdown are separate windows: `windows` lists them, and the
   countdown isn't on layer 0.
 - `launch` refuses while a test instance runs. `stop` first, and `stop` at the end.
+- Visor reads ⌘ and ⇧ for clicks from key presses (winit), not from the click: ⌘-click and
+  ⇧-click selection only work while Visor is the active app and `key` can press the modifier.
+  If it isn't active, cover multi-selection with unit tests and list it under **To test**.
+- Confirmations (`rfd::MessageDialog`) shown while Visor isn't the active app come up as a
+  system alert owned by UserNotificationCenter, not Visor, so the click guard refuses them.
+  Answer them by hand, or test from a state where Visor is active.
+- A window that rebuilds its model on every click (`set_cards` with a new model) never sees a
+  double-click: the second click lands on a new element. Update rows in place.
 
 ## 4. Report
 

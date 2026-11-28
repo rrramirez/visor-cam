@@ -232,6 +232,7 @@ impl App {
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
             "add_video" => return self.agent_add(&command, reply),
+            "list_recordings" => Ok(self.agent_list_recordings()),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -750,17 +751,17 @@ impl App {
                 dir.display()
             )
         };
-        let dir = dir.canonicalize().map_err(|_| missing())?;
+        let dir = visor_core::project::real_path(&dir).map_err(|_| missing())?;
         if !dir.join(visor_core::project::PROJECT_FILE).is_file() {
             return Err(missing());
         }
-        let root = self.settings.borrow().save_dir.canonicalize().ok();
+        let root = visor_core::project::real_path(&self.settings.borrow().save_dir).ok();
         if dir.parent() != root.as_deref() {
             return Err("Only recordings in Visor's recordings folder can be used.".into());
         }
         match &*self.session.borrow() {
             Session::Recording { recorder, .. }
-                if recorder.dir().canonicalize().ok().as_ref() == Some(&dir) =>
+                if visor_core::project::real_path(recorder.dir()).ok().as_ref() == Some(&dir) =>
             {
                 return Err("That recording is still going; stop it first.".into());
             }
@@ -950,6 +951,35 @@ impl App {
             drop(guard);
             send(reply, result);
         });
+    }
+
+    /// The recordings in the save folder, newest first.
+    fn agent_list_recordings(&self) -> Value {
+        let root = self.settings.borrow().save_dir.clone();
+        let entries = visor_core::library::entries(&root).unwrap_or_default();
+        let recordings: Vec<Value> = entries
+            .iter()
+            .map(|e| {
+                let mut r = json!({
+                    "name": e.title,
+                    "folder": e.dir.display().to_string(),
+                    "recorded_at": e.recorded_at.map(|t| {
+                        chrono::DateTime::<chrono::Local>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+                    }),
+                });
+                match &e.info {
+                    Some(i) => {
+                        r["recorded_seconds"] = seconds(i.recorded_us).into();
+                        r["video_seconds"] = seconds(i.video_us).into();
+                        r["markers"] = i.markers.into();
+                    }
+                    None => r["error"] = "project.json can't be read".into(),
+                }
+                r
+            })
+            .collect();
+        let root = visor_core::project::real_path(&root).unwrap_or(root);
+        json!({"folder": root.display().to_string(), "recordings": recordings})
     }
 
     /// Adds video files or other recordings at the end of a recording:
@@ -1192,7 +1222,7 @@ impl App {
         {
             // Canonical, like the editors' folders that renames report.
             self.agent.borrow_mut().last_folder =
-                Some(dir.canonicalize().unwrap_or_else(|_| dir.clone()));
+                Some(visor_core::project::real_path(dir).unwrap_or_else(|_| dir.clone()));
         }
         let Some((reply, open_editor)) = stop else {
             // Stopped by the user.
@@ -1239,7 +1269,7 @@ impl App {
 }
 
 fn canonical(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    visor_core::project::real_path(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// The reply to `add_video`: where each addition landed in recorded time,

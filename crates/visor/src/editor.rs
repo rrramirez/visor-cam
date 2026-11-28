@@ -280,6 +280,16 @@ impl EditorWindow {
         Ok(this)
     }
 
+    /// Names the recording (its folder follows when the editor closes).
+    pub fn rename(&self, title: &str) {
+        let title = title.trim().to_string();
+        if !title.is_empty() {
+            self.ui.set_project_title(title.clone().into());
+            self.project.borrow_mut().title = title;
+            self.save();
+        }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -620,14 +630,7 @@ impl EditorWindow {
             e.move_blur_edge(end, e.frames_from(at, frames), again);
             *e.blur_nudged.borrow_mut() = Some(e.project.borrow().blurs.clone());
         });
-        on!(on_title_edited, |e, title| {
-            let title = title.trim().to_string();
-            if !title.is_empty() {
-                e.ui.set_project_title(title.clone().into());
-                e.project.borrow_mut().title = title;
-                e.save();
-            }
-        });
+        on!(on_title_edited, |e, title| e.rename(&title));
         on!(on_set_thumbnail, |e| {
             let position = e.player.borrow().position();
             let frame = kept_frame(&e.project.borrow().edit, position);

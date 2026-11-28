@@ -24,6 +24,8 @@ pub enum Request {
     /// Started in the background for an agent: nothing to show.
     Background,
     Edit(PathBuf),
+    /// Show the Recordings window.
+    Library,
     /// An agent command (see `app::agent`), answered through the sender.
     Control(Value, crossbeam_channel::Sender<Value>),
 }
@@ -229,6 +231,7 @@ fn read_request(mut stream: &TcpStream, token: &str) -> std::io::Result<Parsed> 
     Ok(match (lines.next(), lines.next()) {
         (Some("show"), _) => Parsed::Launch(Request::ShowPanel),
         (Some("background"), _) => Parsed::Launch(Request::Background),
+        (Some("library"), _) => Parsed::Launch(Request::Library),
         (Some("edit"), Some(path)) if !path.is_empty() => {
             Parsed::Launch(Request::Edit(PathBuf::from(path)))
         }
@@ -277,6 +280,7 @@ fn hand_over(dir: &Path, request: &Request) -> Result<(), SendError> {
     let message = match request {
         Request::ShowPanel => "show\n".to_string(),
         Request::Background => "background\n".to_string(),
+        Request::Library => "library\n".to_string(),
         Request::Edit(path) => {
             // The running Visor has its own working directory.
             let path = std::path::absolute(path).map_err(SendError::NotListening)?;
@@ -402,6 +406,14 @@ mod tests {
         assert!(matches!(
             rx.recv_timeout(TIMEOUT).unwrap(),
             Request::ShowPanel
+        ));
+        assert!(matches!(
+            try_claim(&dir, &Request::Library).unwrap(),
+            Instance::HandedOver
+        ));
+        assert!(matches!(
+            rx.recv_timeout(TIMEOUT).unwrap(),
+            Request::Library
         ));
     }
 
