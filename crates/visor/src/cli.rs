@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::instance::{self, ControlError};
 
 const USAGE: &str = "\
-usage: visor [--edit <recording folder> | --record [--stop-after SECONDS]]
+usage: visor [--edit <recording folder> | --library | --record [--stop-after SECONDS]]
        visor <command>
 
 Control the running Visor (turn on agent control in Preferences first):
