@@ -191,25 +191,46 @@ fn place(mut b: Blur, area: Area) -> Result<Blur, String> {
     Ok(b)
 }
 
-/// The blur covering `t`: the only one, or the `number`th (from 1, in the
-/// order get_recording lists them) of those that do.
-pub fn find_blur(p: &Project, t: Micros, number: Option<usize>) -> Result<usize, String> {
-    let covering: Vec<usize> = (0..p.blurs.len())
-        .filter(|&i| p.blurs[i].covers(t))
-        .collect();
-    match (covering.as_slice(), number) {
-        ([], _) => Err(format!("No blur covers {}.", at(t))),
-        ([one], None) => Ok(*one),
-        (_, None) => Err(format!(
-            "{} blurs cover {}; say which with number (1 to {}).",
-            covering.len(),
-            at(t),
-            covering.len()
-        )),
-        (_, Some(n)) => covering
-            .get(n.wrapping_sub(1))
-            .copied()
-            .ok_or_else(|| format!("number is 1 to {}.", covering.len())),
+/// The blur an agent means: the `number`th in get_recording's list (from
+/// 1), which must cover `t` if a time is given too; else the only one
+/// covering `t`.
+pub fn find_blur(p: &Project, t: Option<Micros>, number: Option<usize>) -> Result<usize, String> {
+    match (t, number) {
+        (_, Some(n)) => {
+            let i = n
+                .checked_sub(1)
+                .filter(|&i| i < p.blurs.len())
+                .ok_or_else(|| match p.blurs.len() {
+                    0 => "There are no blurs.".to_string(),
+                    len => format!("number is 1 to {len}, as get_recording lists the blurs."),
+                })?;
+            match t {
+                Some(t) if !p.blurs[i].covers(t) => {
+                    Err(format!("Blur {n} doesn't cover {}.", at(t)))
+                }
+                _ => Ok(i),
+            }
+        }
+        (Some(t), None) => {
+            let covering: Vec<usize> = (0..p.blurs.len())
+                .filter(|&i| p.blurs[i].covers(t))
+                .collect();
+            match covering.as_slice() {
+                [] => Err(format!("No blur covers {}.", at(t))),
+                [one] => Ok(*one),
+                several => {
+                    let numbers: Vec<String> =
+                        several.iter().map(|i| (i + 1).to_string()).collect();
+                    Err(format!(
+                        "{} blurs cover {}: say which with number ({}, as get_recording lists them).",
+                        several.len(),
+                        at(t),
+                        numbers.join(" or ")
+                    ))
+                }
+            }
+        }
+        (None, None) => Err("Say which blur: at_seconds (a moment it covers) or number.".into()),
     }
 }
 
@@ -259,7 +280,7 @@ pub fn add_blur(
 
 pub fn change_blur(
     p: &Project,
-    t: Micros,
+    t: Option<Micros>,
     number: Option<usize>,
     area: Area,
     start: Option<Micros>,
@@ -280,7 +301,11 @@ pub fn change_blur(
     Ok(blurs)
 }
 
-pub fn delete_blur(p: &Project, t: Micros, number: Option<usize>) -> Result<Vec<Blur>, String> {
+pub fn delete_blur(
+    p: &Project,
+    t: Option<Micros>,
+    number: Option<usize>,
+) -> Result<Vec<Blur>, String> {
     let i = find_blur(p, t, number)?;
     let mut blurs = p.blurs.clone();
     blurs.remove(i);
@@ -394,11 +419,12 @@ pub fn export_choice(args: &Value, last: ExportChoice) -> Result<ExportChoice, S
 }
 
 /// A recording's state for get_recording: what an agent needs to find its
-/// way around it and change it. `exports`: file name and size.
+/// way around it and change it. `exports`: file name, size, and whether
+/// it's still being written.
 pub fn recording_json(
     p: &Project,
     folder: &str,
-    exports: &[(String, u64)],
+    exports: &[(String, u64, bool)],
     editor_open: bool,
 ) -> Value {
     let range = |r: &Range| json!([secs(r.0), secs(r.1)]);
@@ -456,7 +482,16 @@ pub fn recording_json(
             "x": o.x, "y": o.y, "size": o.size, "mirror": o.mirror,
         },
         "thumbnail_seconds": p.thumbnail_us.map(secs),
-        "exports": exports.iter().map(|(n, s)| json!({"file": n, "bytes": s})).collect::<Vec<_>>(),
+        "exports": exports
+            .iter()
+            .map(|(n, s, writing)| {
+                let mut e = json!({"file": n, "bytes": s});
+                if *writing {
+                    e["in_progress"] = true.into();
+                }
+                e
+            })
+            .collect::<Vec<_>>(),
         "editor_open": editor_open,
     })
 }
@@ -574,31 +609,37 @@ mod tests {
         let mut q = p.clone();
         q.blurs = add_blur(&p, area(0.0, 0.0, 0.5, 0.5), Some(2 * S), Some(6 * S)).unwrap();
         q.blurs = add_blur(&q, area(0.5, 0.5, 0.2, 0.2), Some(4 * S), None).unwrap();
-        // 5 s: both cover it.
+        // 5 s: both cover it; number is the place in get_recording's list.
         assert!(
-            delete_blur(&q, 5 * S, None)
+            delete_blur(&q, Some(5 * S), None)
                 .unwrap_err()
                 .contains("2 blurs")
         );
-        assert_eq!(delete_blur(&q, 5 * S, Some(2)).unwrap().len(), 1);
-        assert!(delete_blur(&q, 5 * S, Some(3)).is_err());
-        let c = change_blur(
-            &q,
-            3 * S,
-            None,
-            Area {
-                x: Some(0.25),
-                ..Area::default()
-            },
-            None,
-            Some(9 * S),
-        )
-        .unwrap();
-        assert_eq!((c[0].x, c[0].end_us, c[0].width), (0.25, 9 * S, 0.5));
-        assert!(change_blur(&q, 3 * S, None, Area::default(), Some(9 * S), None).is_err());
-        assert!(delete_blur(&q, 19 * S + 500_000, None).is_ok());
+        let left = delete_blur(&q, Some(5 * S), Some(1)).unwrap();
+        assert_eq!(left[0].start_us, 4 * S);
+        assert_eq!(delete_blur(&q, None, Some(2)).unwrap()[0].start_us, 2 * S);
         assert!(
-            delete_blur(&p, 5 * S, None)
+            delete_blur(&q, None, Some(3))
+                .unwrap_err()
+                .contains("1 to 2")
+        );
+        // A number and a time that don't go together.
+        assert!(
+            delete_blur(&q, Some(10 * S), Some(1))
+                .unwrap_err()
+                .contains("doesn't cover")
+        );
+        assert!(delete_blur(&q, None, None).is_err());
+        let x = Area {
+            x: Some(0.25),
+            ..Area::default()
+        };
+        let c = change_blur(&q, Some(3 * S), None, x, None, Some(9 * S)).unwrap();
+        assert_eq!((c[0].x, c[0].end_us, c[0].width), (0.25, 9 * S, 0.5));
+        assert!(change_blur(&q, Some(3 * S), None, Area::default(), Some(9 * S), None).is_err());
+        assert!(delete_blur(&q, Some(19 * S + 500_000), None).is_ok());
+        assert!(
+            delete_blur(&p, Some(5 * S), None)
                 .unwrap_err()
                 .contains("No blur")
         );
@@ -685,7 +726,17 @@ mod tests {
             width: 0.3,
             height: 0.4,
         }];
-        let v = recording_json(&p, "/tmp/Demo", &[("Demo.mp4".into(), 1234)], true);
+        let v = recording_json(
+            &p,
+            "/tmp/Demo",
+            &[
+                ("Demo.mp4".into(), 1234, false),
+                ("Demo 2.mp4".into(), 99, true),
+            ],
+            true,
+        );
+        assert_eq!(v["exports"][1]["in_progress"], true);
+        assert_eq!(v["exports"][0].get("in_progress"), None);
         assert_eq!(v["clips"], json!([[12.0, 20.0], [0.0, 5.0], [8.0, 12.0]]));
         assert_eq!(v["removed"][0]["range"], json!([5.0, 8.0]));
         assert_eq!(v["markers"][2]["text"], "Done");

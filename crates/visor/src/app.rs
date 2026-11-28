@@ -105,6 +105,8 @@ pub struct App {
     /// nor swept for what an unfinished addition left, as the copy writes
     /// to the folder.
     copies: RefCell<Vec<PathBuf>>,
+    /// Files agents' background exports are writing.
+    agent_exports: RefCell<Vec<PathBuf>>,
     /// Startup is done (see `when_ready`); until then, what to run after.
     ready: std::cell::Cell<bool>,
     deferred: RefCell<Vec<Deferred>>,
@@ -199,6 +201,7 @@ impl App {
             more: RefCell::default(),
             more_cancelled: RefCell::default(),
             copies: RefCell::default(),
+            agent_exports: RefCell::default(),
             ready: std::cell::Cell::new(false),
             deferred: RefCell::default(),
         });

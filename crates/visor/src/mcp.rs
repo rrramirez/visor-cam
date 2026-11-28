@@ -150,7 +150,15 @@ fn tool_list() -> Value {
         {
             "name": "trim_recording",
             "description": "Keeps only the part of a recording between start_seconds and end_seconds (recorded seconds, like remove_from_recording), removing the rest. Like remove_from_recording, it also removes anything under 0.25 s it leaves kept next to another removed part.",
-            "inputSchema": edit_schema(),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "folder": folder_schema(),
+                },
+                "required": ["start_seconds", "end_seconds"],
+            },
         },
         {
             "name": "restore_recording",
@@ -246,7 +254,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "edit_blurs",
-            "description": "Blurs an area of the screen so it can't be read (a password, an email address), or changes or deletes a blur. The area is x, y, width, height as fractions of the frame (0 to 1, from the top left), as view_frame's image shows it; the camera bubble stays on top. add needs the area, and lasts start_seconds to end_seconds (default the whole recording). change and delete act on the blur covering at_seconds; if several do, number picks one (1, 2, … in get_recording's order). change sets only what's given. Returns the recording as get_recording does.",
+            "description": "Blurs an area of the screen so it can't be read (a password, an email address), or changes or deletes a blur. The area is x, y, width, height as fractions of the frame (0 to 1, from the top left), as view_frame's image shows it; the camera bubble stays on top. add needs the area, and lasts start_seconds to end_seconds (default the whole recording). change and delete act on blur number (1, 2, … its place in get_recording's blurs), or on the one blur covering at_seconds; given both, the blur must cover that time. change sets only what's given. Returns the recording as get_recording does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -290,7 +298,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "export_recording",
-            "description": "Exports a recording, as edited, to its exports folder, and returns the file once it's written. Options left out are the user's last export choices. MP4 and WebM exports get a chapter per marker, and MP4s carry the thumbnail as their cover. If the recording is open in the editor the export runs there, where the user sees it and can cancel it. A long export may outlast this call; it carries on, and get_recording lists it when done.",
+            "description": "Exports a recording, as edited, to its exports folder, and returns the file once it's written. Options left out are the user's last export choices. MP4 and WebM exports get a chapter per marker, and MP4s carry the thumbnail as their cover. If the recording is open in the editor the export runs there, where the user sees it and can cancel it. A long export may outlast this call; it carries on, and get_recording lists the file with in_progress until it's written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

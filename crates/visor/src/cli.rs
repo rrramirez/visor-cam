@@ -51,8 +51,8 @@ Times are recorded seconds (or M:SS), as marks and status show them:
   bring-back TIME             bring back the removed stretch at TIME
   marker add TIME [TEXT] | rename TIME TEXT | delete TIME
   blur add X Y W H [--from S] [--to E]    blur an area (fractions of the frame)
-  blur change TIME [--x .. --y .. --width .. --height .. --from S --to E] [--number N]
-  blur delete TIME [--number N]
+  blur change TIME|--number N [--x .. --y .. --width .. --height .. --from S --to E]
+  blur delete TIME|--number N   (N: its place in info's blurs)
   set [--name N] [--speed X] [--thumbnail TIME|first] [--bubble on|off]
       [--bubble-shape circle|rounded] [--bubble-x X] [--bubble-y Y]
       [--bubble-size S] [--mirror on|off]
@@ -406,7 +406,12 @@ fn finish_args(name: &str, args: &[String]) -> Result<Value, String> {
                         c[k] = number(v, k)?.into();
                     }
                 }
-                "change" | "delete" => c["at_seconds"] = time(words.get(1))?.into(),
+                // A time it covers, or --number alone.
+                "change" | "delete" => {
+                    if words.get(1).is_some() || flag("number").is_none() {
+                        c["at_seconds"] = time(words.get(1))?.into();
+                    }
+                }
                 _ => return Err("blur add X Y W H | change TIME | delete TIME".into()),
             }
             for k in ["x", "y", "width", "height"] {

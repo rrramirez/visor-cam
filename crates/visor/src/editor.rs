@@ -1999,6 +1999,11 @@ impl EditorWindow {
         }
     }
 
+    /// The file an export is being written to, if one is.
+    pub fn exporting_to(&self) -> Option<PathBuf> {
+        self.export.borrow().as_ref().map(|j| j.out.clone())
+    }
+
     /// Exports for an agent, here, so the user sees it and can cancel it;
     /// `reply` hears where it was written. Refused while exporting already,
     /// or adding videos (it would leave them out).

@@ -22,7 +22,8 @@ edit), or one whose cancelled take is being put back.
 **Times.** All times are recorded (source) seconds, as markers and `status` report them, so
 they don't shift when something is removed or clips move. Things are addressed by time: a clip
 by a moment it plays, a removed stretch by a moment in it, a marker by its time (nearest within
-0.5 s, `MARKER_REACH`), a blur by a moment it covers (and `number` among several).
+0.5 s, `MARKER_REACH`), a blur by a moment it covers or by `number`, its place in
+`get_recording`'s list (checked against the time when both are given).
 
 **Reading.** `get_recording` (`recording_json`) gives the whole state: clips in play order,
 removed stretches and the clip each comes back next to (`EditList::removed`), markers, blurs
@@ -34,15 +35,17 @@ it shows at once and the user can undo it like their own: the edit, markers and 
 undo step each (`apply_agent_edit`, `apply_agent_markers`, `apply_agent_blurs`); name, speed,
 thumbnail and bubble are set as the editor's controls set them, not undoable
 (`apply_agent_looks`). Without an editor the change is saved to `project.json`, and a new name
-renames the folder at once (`rename_to_title`). `remove_from_recording` with `ranges` removes
+renames the folder at once (`rename_to_title`), refused while a copy or export writes into it
+(`App::copies`). `remove_from_recording` with `ranges` removes
 several stretches as one step.
 
 **Exporting.** `export_recording` takes the user's last export choices for anything not given
 (`ExportChoice::last`, `export_choice`). With the editor open it runs there
 (`EditorWindow::agent_export`), shown and cancellable, and refused while the editor exports or
 adds videos; the reply comes from `poll_export`, or an error if the editor closes first.
-Otherwise it runs on a thread into `exports/`, holding folder renames (`App::copies`) until
-written.
+Otherwise it runs on a thread into `exports/`, one per recording at a time (two could pick the
+same file name), holding folder renames (`App::copies`) until written. Files still being written
+(`App::agent_exports`, `EditorWindow::exporting_to`) are listed with `in_progress`.
 
 ## Invariants
 

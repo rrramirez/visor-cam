@@ -110,7 +110,7 @@ pub fn trash_refusal(selected: &[(&str, Option<Busy>)]) -> Option<String> {
             Busy::Open => format!("Close “{name}” in the editor first."),
             Busy::Recording => format!("“{name}” is being recorded; stop it first."),
             Busy::Adding => {
-                format!("Videos are being added to “{name}”; wait for that to finish.")
+                format!("Something is being written into “{name}” (videos added, or an export); wait for that to finish.")
             }
         })
     })
@@ -578,7 +578,10 @@ mod tests {
         );
         assert_eq!(
             trash_refusal(&[("Demo", Some(Busy::Adding))]),
-            Some("Videos are being added to “Demo”; wait for that to finish.".to_string())
+            Some(
+                "Something is being written into “Demo” (videos added, or an export); wait for that to finish."
+                    .to_string()
+            )
         );
         assert_eq!(trash_question(&["Intro"]), "Move “Intro” to the Trash?");
         assert_eq!(

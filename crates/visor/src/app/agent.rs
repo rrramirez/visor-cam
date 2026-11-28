@@ -142,7 +142,12 @@ enum Change {
 }
 
 /// The recording's state as `get_recording` gives it, with its exports.
-fn recording_value(dir: &Path, project: &visor_core::Project, editor_open: bool) -> Value {
+fn recording_value(
+    dir: &Path,
+    project: &visor_core::Project,
+    editor_open: bool,
+    writing: &[PathBuf],
+) -> Value {
     let mut exports: Vec<(std::time::SystemTime, String, u64)> =
         std::fs::read_dir(dir.join("exports"))
             .map(|entries| {
@@ -163,7 +168,13 @@ fn recording_value(dir: &Path, project: &visor_core::Project, editor_open: bool)
             })
             .unwrap_or_default();
     exports.sort();
-    let exports: Vec<(String, u64)> = exports.into_iter().map(|(_, n, s)| (n, s)).collect();
+    let exports: Vec<(String, u64, bool)> = exports
+        .into_iter()
+        .map(|(_, n, s)| {
+            let busy = writing.iter().any(|w| w == &dir.join("exports").join(&n));
+            (n, s, busy)
+        })
+        .collect();
     agent_edits::recording_json(project, &dir.display().to_string(), &exports, editor_open)
 }
 
@@ -1027,6 +1038,14 @@ impl App {
                     }
                     Change::Looks(after) => {
                         let renamed = after.title != p.title;
+                        // Not while a copy or export writes into the folder.
+                        if renamed && self.copying(&dir) {
+                            return Err(
+                                "Something is being written into it (videos added, or an export); \
+                                        rename it once that's done."
+                                    .into(),
+                            );
+                        }
                         p = *after;
                         renamed
                     }
@@ -1044,7 +1063,7 @@ impl App {
                 p
             }
         };
-        Ok(recording_value(&dir, &project, editor.is_some()))
+        Ok(self.recording_value(&dir, &project, editor.as_deref()))
     }
 
     /// Exports a recording and answers once the file is written: in its
@@ -1080,12 +1099,26 @@ impl App {
             }
             return;
         }
+        // One at a time: two could pick the same file name.
+        let exports = dir.join("exports");
+        if self
+            .agent_exports
+            .borrow()
+            .iter()
+            .any(|f| f.parent() == Some(exports.as_path()))
+        {
+            return send(
+                reply,
+                Err("It's already being exported; try again once that's done.".into()),
+            );
+        }
         let (options, _) = choice.options();
         let out = match crate::editor::export_path(&dir, &project, options.format.extension()) {
             Ok(out) => out,
             Err(e) => return send(reply, Err(format!("Couldn't export it: {e:#}"))),
         };
         self.copy_started(&dir);
+        self.agent_exports.borrow_mut().push(out.clone());
         std::thread::spawn(move || {
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let result = visor_media::export(&dir, &project, &out, &options, &mut |_| {}, &cancel)
@@ -1096,6 +1129,7 @@ impl App {
                 });
             post(move |app| {
                 app.copy_finished(&dir);
+                app.agent_exports.borrow_mut().retain(|f| *f != out);
                 send(reply, answer(result));
             });
         });
@@ -1105,7 +1139,20 @@ impl App {
     fn agent_get_recording(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
         let (editor, project) = self.agent_project(&dir)?;
-        Ok(recording_value(&dir, &project, editor.is_some()))
+        Ok(self.recording_value(&dir, &project, editor.as_deref()))
+    }
+
+    /// The recording's state as `get_recording` gives it, with its exports
+    /// (those still being written marked so).
+    fn recording_value(
+        &self,
+        dir: &Path,
+        project: &visor_core::Project,
+        editor: Option<&EditorWindow>,
+    ) -> Value {
+        let mut writing = self.agent_exports.borrow().clone();
+        writing.extend(editor.and_then(EditorWindow::exporting_to));
+        recording_value(dir, project, editor.is_some(), &writing)
     }
 
     fn agent_edit_clips(&self, args: &Value) -> Result<Value, String> {
@@ -1164,10 +1211,7 @@ impl App {
             opt_time(args, "start_seconds")?,
             opt_time(args, "end_seconds")?,
         );
-        let at = match action.as_str() {
-            "add" => 0,
-            _ => time_arg(args, "at_seconds")?,
-        };
+        let at = opt_time(args, "at_seconds")?;
         self.agent_change(args, |p| {
             match action.as_str() {
                 "add" => agent_edits::add_blur(p, area, start, end),
