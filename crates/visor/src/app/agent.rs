@@ -168,13 +168,26 @@ fn recording_value(
             })
             .unwrap_or_default();
     exports.sort();
-    let exports: Vec<(String, u64, bool)> = exports
+    let mut exports: Vec<(String, u64, bool)> = exports
         .into_iter()
         .map(|(_, n, s)| {
             let busy = writing.iter().any(|w| w == &dir.join("exports").join(&n));
             (n, s, busy)
         })
         .collect();
+    // Exports being set up, whose file isn't written yet.
+    for w in writing
+        .iter()
+        .filter(|w| w.parent() == Some(dir.join("exports").as_path()))
+    {
+        let name = w
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !exports.iter().any(|(n, _, _)| *n == name) {
+            exports.push((name, 0, true));
+        }
+    }
     agent_edits::recording_json(project, &dir.display().to_string(), &exports, editor_open)
 }
 
@@ -1063,7 +1076,7 @@ impl App {
                 p
             }
         };
-        Ok(self.recording_value(&dir, &project, editor.as_deref()))
+        Ok(self.recording_value(&dir, &project, editor.is_some()))
     }
 
     /// Exports a recording and answers once the file is written: in its
@@ -1121,12 +1134,21 @@ impl App {
         self.agent_exports.borrow_mut().push(out.clone());
         std::thread::spawn(move || {
             let cancel = std::sync::atomic::AtomicBool::new(false);
-            let result = visor_media::export(&dir, &project, &out, &options, &mut |_| {}, &cancel)
-                .map(|()| out.clone())
-                .map_err(|e| {
-                    let _ = std::fs::remove_file(&out);
-                    format!("The export failed: {e:#}")
-                });
+            // Written under a hidden name and named once done: one cut short
+            // (Visor quit) never looks like a finished export.
+            let name = out
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let partial = out.with_file_name(format!(".{name}"));
+            let result =
+                visor_media::export(&dir, &project, &partial, &options, &mut |_| {}, &cancel)
+                    .and_then(|()| Ok(std::fs::rename(&partial, &out)?))
+                    .map(|()| out.clone())
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&partial);
+                        format!("The export failed: {e:#}")
+                    });
             post(move |app| {
                 app.copy_finished(&dir);
                 app.agent_exports.borrow_mut().retain(|f| *f != out);
@@ -1139,7 +1161,7 @@ impl App {
     fn agent_get_recording(&self, args: &Value) -> Result<Value, String> {
         let dir = self.agent_recording(args)?;
         let (editor, project) = self.agent_project(&dir)?;
-        Ok(self.recording_value(&dir, &project, editor.as_deref()))
+        Ok(self.recording_value(&dir, &project, editor.is_some()))
     }
 
     /// The recording's state as `get_recording` gives it, with its exports
@@ -1148,11 +1170,9 @@ impl App {
         &self,
         dir: &Path,
         project: &visor_core::Project,
-        editor: Option<&EditorWindow>,
+        editor_open: bool,
     ) -> Value {
-        let mut writing = self.agent_exports.borrow().clone();
-        writing.extend(editor.and_then(EditorWindow::exporting_to));
-        recording_value(dir, project, editor.is_some(), &writing)
+        recording_value(dir, project, editor_open, &self.exports_writing())
     }
 
     fn agent_edit_clips(&self, args: &Value) -> Result<Value, String> {
@@ -1435,10 +1455,35 @@ impl App {
 
     pub(crate) fn copy_finished(&self, dir: &Path) {
         let dir = canonical(dir);
-        let mut copies = self.copies.borrow_mut();
-        if let Some(i) = copies.iter().position(|d| *d == dir) {
-            copies.remove(i);
+        {
+            let mut copies = self.copies.borrow_mut();
+            if let Some(i) = copies.iter().position(|d| *d == dir) {
+                copies.remove(i);
+            }
         }
+        // A rename held while it was written to (an editor closed meanwhile)
+        // happens now, if nothing else has the folder.
+        if !self.copying(&dir) && self.editor_for(&dir).is_none() {
+            let root = self.settings.borrow().save_dir.clone();
+            if let Ok(Some(to)) = visor_core::project::rename_to_title(&dir, &root) {
+                tracing::info!("renamed {} to {}", dir.display(), to.display());
+                self.agent_folder_renamed(&dir, &to);
+                self.refresh_tray();
+            }
+        }
+    }
+
+    /// Exports being written, by agents in the background or in editors:
+    /// their files may not exist yet.
+    pub(crate) fn exports_writing(&self) -> Vec<PathBuf> {
+        let mut writing = self.agent_exports.borrow().clone();
+        writing.extend(
+            self.editors
+                .borrow()
+                .iter()
+                .filter_map(|e| e.exporting_to()),
+        );
+        writing
     }
 
     /// Copied in for an agent with no editor open: adds it, if the

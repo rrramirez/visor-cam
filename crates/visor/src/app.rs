@@ -1990,8 +1990,9 @@ impl App {
             return false;
         }
         if self.copying(dir) {
+            // copy_finished renames it once that's done.
             tracing::info!(
-                "not renaming {}: videos are being added to it",
+                "not renaming {} yet: something is being written into it",
                 dir.display()
             );
             return false;

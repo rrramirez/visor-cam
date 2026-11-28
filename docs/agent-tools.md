@@ -43,9 +43,11 @@ several stretches as one step.
 (`ExportChoice::last`, `export_choice`). With the editor open it runs there
 (`EditorWindow::agent_export`), shown and cancellable, and refused while the editor exports or
 adds videos; the reply comes from `poll_export`, or an error if the editor closes first.
-Otherwise it runs on a thread into `exports/`, one per recording at a time (two could pick the
-same file name), holding folder renames (`App::copies`) until written. Files still being written
-(`App::agent_exports`, `EditorWindow::exporting_to`) are listed with `in_progress`.
+Otherwise it runs on a thread into `exports/`, one per recording at a time, written under a
+hidden name (`.name.mp4`) and renamed when done, so one cut short by quitting never looks
+finished; folder renames wait (`App::copies`) and happen when it's written (`copy_finished`).
+New export names skip those still being set up (`App::exports_writing`), whose files may not
+exist yet, and `get_recording` lists them with `in_progress` (bytes 0 until the file appears).
 
 ## Invariants
 

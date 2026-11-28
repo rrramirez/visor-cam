@@ -236,12 +236,15 @@ pub fn exports_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(exports)
 }
 
-/// Where a new export of `project` in `dir` goes, in format `ext`.
+/// Where a new export of `project` in `dir` goes, in format `ext`: a name
+/// no file has, nor an export still being set up (`app().exports_writing`),
+/// which may not have made its file yet.
 pub fn export_path(dir: &Path, project: &Project, ext: &str) -> anyhow::Result<PathBuf> {
-    Ok(unique_path(
+    Ok(unique_path_besides(
         &exports_dir(dir)?,
         &sanitize(&project.title),
         ext,
+        &app().exports_writing(),
     ))
 }
 
@@ -2252,9 +2255,14 @@ fn sanitize(title: &str) -> String {
 /// `dir/name.ext`, or `dir/name 2.ext`, … if taken. Any entry counts as
 /// taken, including a dangling symlink, which FFmpeg would write through.
 fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
+    unique_path_besides(dir, name, ext, &[])
+}
+
+/// [`unique_path`], also skipping the paths in `taken`.
+fn unique_path_besides(dir: &Path, name: &str, ext: &str, taken: &[PathBuf]) -> PathBuf {
     let mut path = dir.join(format!("{name}.{ext}"));
     let mut n = 2;
-    while path.symlink_metadata().is_ok() {
+    while path.symlink_metadata().is_ok() || taken.contains(&path) {
         path = dir.join(format!("{name} {n}.{ext}"));
         n += 1;
     }
@@ -2650,6 +2658,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.mp4"), b"").unwrap();
         assert_eq!(unique_path(&dir, "x", "mp4"), dir.join("x 2.mp4"));
+        // Names of exports still being set up count too.
+        let busy = [dir.join("z.gif")];
+        assert_eq!(
+            unique_path_besides(&dir, "z", "gif", &busy),
+            dir.join("z 2.gif")
+        );
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(dir.join("missing"), dir.join("y.mp4")).unwrap();
