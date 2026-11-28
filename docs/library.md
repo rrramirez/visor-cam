@@ -43,8 +43,10 @@ Renaming a recording open in an editor goes through that editor's name
 (`EditorWindow::rename`; the folder follows when it closes); otherwise the title is saved
 and the folder renamed at once (`rename_to_title`). The window keeps which recording is
 being renamed by folder (`LibraryWindow::renaming`), so a refresh that moves cards doesn't
-move the edit; a click on the selected card's name starts it after a moment, so a
-double-click opens instead. Moving to the Trash (the `trash` crate; on macOS through
+move the edit; a click on the name of the one selected card starts it after a moment, so a
+double-click opens instead (with several selected, the click selects that card alone). A
+recording being recorded, *Record more* onto it included, is refused before its editor is
+tried: that editor is only hidden, and the take's save would put the old name back. Moving to the Trash (the `trash` crate; on macOS through
 `NSFileManager`, not by asking Finder, which a signed app may not do) asks first
 (`trash_question`) and is refused for any recording in use (`trash_refusal`).
 

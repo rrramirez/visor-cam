@@ -986,9 +986,12 @@ mod tests {
             "Demo",
             "2026-10-02T10:00:00Z",
         );
-        let root = root.canonicalize().unwrap();
+        // Given as configured (on macOS, /var/… for /private/var/…): the
+        // new folder comes back as its real path, as editors know it.
+        let given = root.clone();
+        let root = real_path(&root).unwrap();
 
-        let a = rename_to_title(&a, &root).unwrap().unwrap();
+        let a = rename_to_title(&a, &given).unwrap().unwrap();
         assert_eq!(a, root.join("Demo"));
         // Taken: numbered. Already named: left alone.
         let b = rename_to_title(&b, &root).unwrap().unwrap();
