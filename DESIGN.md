@@ -132,7 +132,8 @@ portal + GStreamer).
 
 The default root is `~/Movies/Visor` on macOS, `%USERPROFILE%\Videos\Visor` on
 Windows, and `$XDG_VIDEOS_DIR/Visor` on Linux. The root is configurable. There
-is no database: the recordings list is a directory scan.
+is no database: the recordings list is a directory scan. Thumbnails for the
+Recordings window are cached in the user's cache folder, not in recordings.
 
 `project.json` (v1):
 
@@ -200,8 +201,8 @@ cancelled (a partial file is deleted).
 
 ### UI surfaces (Slint)
 
-1. **Tray / menu bar menu**: New recording, Open recordings folder, recent
-   recordings, Preferences, Quit.
+1. **Tray / menu bar menu**: New recording, Recordings…, recent recordings,
+   Open recordings folder, Preferences, Quit.
 2. **Recorder panel**: pick the source (Display / Window / App / Area), camera
    device, mic device, system audio on/off, per-app audio target. Start.
 3. **Area selector**: full-screen transparent overlay to drag (and move) a
@@ -214,6 +215,8 @@ cancelled (a partial file is deleted).
 7. **Editor window**: preview, timeline, edit tools, export.
 8. **Preferences**: save folder, frame rate, countdown, cursor, default export
    format.
+9. **Recordings window**: every recording as a card with its thumbnail, to open,
+   rename, show or move to the Trash ([docs/library.md](docs/library.md)).
 
 ### Permissions (macOS)
 

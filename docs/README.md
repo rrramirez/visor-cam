@@ -9,5 +9,7 @@ there.
   cuts and trims, speed, chapters.
 - [recording.md](recording.md): recording to disk, takes (*Record more*),
   added recordings and videos, reading across them, crash recovery.
+- [library.md](library.md): the Recordings window, listing, thumbnails,
+  renaming and trashing recordings.
 - [editor-ui.md](editor-ui.md): the Slint editor window, its timeline, undo
   steps and shortcuts.
