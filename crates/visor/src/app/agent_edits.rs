@@ -428,13 +428,12 @@ pub fn moved(v: &mut Value, from: &std::path::Path, to: &std::path::Path) {
             .map(std::path::PathBuf::from)
             && let Ok(rest) = path.strip_prefix(from)
         {
-            v[key] = to
-                .join(rest)
-                .display()
-                .to_string()
-                .trim_end_matches('/')
-                .to_string()
-                .into();
+            let new = if rest.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(rest)
+            };
+            v[key] = new.display().to_string().into();
         }
     }
 }
