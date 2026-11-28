@@ -19,6 +19,7 @@ usage: visor [--edit <recording folder> | --library | --record [--stop-after SEC
 Control the running Visor (turn on agent control in Preferences first):
   status                      what Visor is doing
   sources                     displays, windows, apps, cameras and microphones
+  list                        recordings in the save folder, newest first
   start [options]             start recording; returns once it's recording
       --name NAME             name the recording (and its folder)
       --screen [DISPLAY]      the whole screen (the main one by default)
@@ -63,8 +64,14 @@ pub fn run(args: &[String]) -> Option<i32> {
             println!("{USAGE}");
             return Some(0);
         }
-        "status" => json!({"command": "status"}),
-        "sources" => json!({"command": "list_sources"}),
+        "status" | "sources" | "list" => match command_for(first, rest) {
+            Ok(command) => command,
+            Err(e) => {
+                attach_console();
+                eprintln!("visor {first}: {e}\n\n{USAGE}");
+                return Some(2);
+            }
+        },
         "start" => match start_args(rest) {
             Ok(command) => command,
             Err(e) => {
@@ -145,6 +152,18 @@ pub const IMAGE: &str = "image_jpeg";
 /// Takes the frame out of a reply, if it has one.
 pub fn take_image(reply: &mut Value) -> Option<Value> {
     reply.as_object_mut()?.remove(IMAGE)
+}
+
+/// The command for a plain command-line command, one that takes nothing.
+fn command_for(name: &str, rest: &[String]) -> Result<Value, String> {
+    if !rest.is_empty() {
+        return Err("takes no arguments".into());
+    }
+    Ok(json!({"command": match name {
+        "sources" => "list_sources",
+        "list" => "list_recordings",
+        _ => "status",
+    }}))
 }
 
 fn start_args(args: &[String]) -> Result<Value, String> {
@@ -365,7 +384,9 @@ pub fn call(command: &Value) -> Value {
     match instance::control(command) {
         Ok(reply) => reply,
         Err(ControlError::NotRunning) => match command["command"].as_str() {
-            Some("start_recording" | "list_sources") => launch_and_call(command),
+            Some("start_recording" | "list_sources" | "list_recordings") => {
+                launch_and_call(command)
+            }
             // A fresh Visor knows no last recording: only a named one helps.
             Some(
                 "remove_from_recording"
@@ -616,6 +637,14 @@ mod tests {
         assert!(edit_args("remove", &args("--min 1 2 3")).is_err());
         assert!(edit_args("remove", &args("a b")).is_err());
         assert!(edit_args("restore", &args("5")).is_err());
+    }
+
+    #[test]
+    fn list_asks_for_the_recordings() {
+        assert_eq!(
+            command_for("list", &[]).unwrap(),
+            json!({"command": "list_recordings"})
+        );
     }
 
     #[test]

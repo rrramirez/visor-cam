@@ -232,6 +232,7 @@ impl App {
             "restore_recording" => self.agent_edit(&command, EditKind::Restore),
             "open_recording" => self.agent_open(&command),
             "add_video" => return self.agent_add(&command, reply),
+            "list_recordings" => Ok(self.agent_list_recordings()),
             "view_frame" => return self.agent_frame(&command, reply),
             "find_dead_time" => return self.agent_dead_time(&command, reply),
             other => Err(format!("Unknown command \"{other}\".")),
@@ -950,6 +951,34 @@ impl App {
             drop(guard);
             send(reply, result);
         });
+    }
+
+    /// The recordings in the save folder, newest first.
+    fn agent_list_recordings(&self) -> Value {
+        let root = self.settings.borrow().save_dir.clone();
+        let entries = visor_core::library::entries(&root).unwrap_or_default();
+        let recordings: Vec<Value> = entries
+            .iter()
+            .map(|e| {
+                let mut r = json!({
+                    "name": e.title,
+                    "folder": e.dir.display().to_string(),
+                    "recorded_at": e.recorded_at.map(|t| {
+                        chrono::DateTime::<chrono::Local>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+                    }),
+                });
+                match &e.info {
+                    Some(i) => {
+                        r["recorded_seconds"] = seconds(i.recorded_us).into();
+                        r["video_seconds"] = seconds(i.video_us).into();
+                        r["markers"] = i.markers.into();
+                    }
+                    None => r["error"] = "project.json can't be read".into(),
+                }
+                r
+            })
+            .collect();
+        json!({"folder": root.display().to_string(), "recordings": recordings})
     }
 
     /// Adds video files or other recordings at the end of a recording:

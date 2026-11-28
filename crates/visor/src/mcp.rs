@@ -189,6 +189,12 @@ fn tool_list() -> Value {
             "annotations": {"readOnlyHint": true},
         },
         {
+            "name": "list_recordings",
+            "description": "Lists the recordings in Visor's recordings folder, newest first: each one's name, folder (for the other tools' folder argument), when it was recorded, its recorded and video seconds, and how many markers it has.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true},
+        },
+        {
             "name": "add_video",
             "description": "Adds video files (MP4, MOV, M4V, MKV or WebM) or other Visor recordings (their folders) at the end of a stopped recording, in the order given, as clips the user can move. A Visor recording comes as it was edited, with its markers and blurs. The files are copied into the recording. If it's open in Visor's editor the change shows there and the user can undo it. Returns where each landed, in recorded seconds, and the clips kept.",
             "inputSchema": {
